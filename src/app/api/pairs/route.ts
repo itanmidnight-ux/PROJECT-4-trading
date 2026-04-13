@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getActiveSymbol, getSupportedSymbols } from '@/lib/broker-manager';
 import { automation } from '@/lib/automation';
+import { apiError } from '@/lib/api-response';
 
 export async function GET() {
   try {
@@ -13,10 +14,10 @@ export async function GET() {
       popularPairs: symbols.slice(0, 8),
     });
   } catch (error: any) {
-    return NextResponse.json(
-      { error: error.message, pairs: ['XAU_USD'], activePair: 'XAU_USD' },
-      { status: 500 }
-    );
+    return apiError('INTERNAL_ERROR', error.message || 'Failed to load pairs', 500, {
+      pairs: ['XAU_USD'],
+      activePair: 'XAU_USD',
+    });
   }
 }
 
@@ -25,7 +26,7 @@ export async function POST(request: Request) {
     const body = await request.json();
     const { action, symbol } = body;
     if (!symbol) {
-      return NextResponse.json({ success: false, error: 'Symbol is required' }, { status: 400 });
+      return apiError('VALIDATION_ERROR', 'Symbol is required', 400);
     }
     const clean = String(symbol).replace('/', '_').toUpperCase();
 
@@ -38,11 +39,8 @@ export async function POST(request: Request) {
       });
     }
 
-    return NextResponse.json(
-      { success: false, error: 'Unknown action. Use: setActive' },
-      { status: 400 }
-    );
+    return apiError('VALIDATION_ERROR', 'Unknown action. Use: setActive', 400);
   } catch (error: any) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return apiError('INTERNAL_ERROR', error.message || 'Failed to update pair', 500);
   }
 }

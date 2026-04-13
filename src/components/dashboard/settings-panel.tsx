@@ -245,10 +245,10 @@ export function SettingsPanel() {
 
   // Broker credential state
   const [selectedBroker, setSelectedBroker] = useState<"oanda" | "weltrade_mt5" | "ctrader">("weltrade_mt5");
-  const [oandaAccountId, setOandaAccountId] = useState("");
-  const [oandaApiToken, setOandaApiToken] = useState("");
+  const [brokerAccountId, setBrokerAccountId] = useState("");
+  const [brokerApiToken, setBrokerApiToken] = useState("");
   const [brokerServer, setBrokerServer] = useState("");
-  const [oandaIsDemo, setOandaIsDemo] = useState(true);
+  const [brokerIsDemo, setBrokerIsDemo] = useState(true);
   const [credStatus, setCredStatus] = useState<{ configured: boolean; accountIdPrefix: string | null; isDemo: boolean; broker?: string } | null>(null);
   const [validating, setValidating] = useState(false);
   const [savingCreds, setSavingCreds] = useState(false);
@@ -298,7 +298,7 @@ export function SettingsPanel() {
           broker: data.broker,
         });
         if (typeof data.isDemo === "boolean") {
-          setOandaIsDemo(data.isDemo);
+          setBrokerIsDemo(data.isDemo);
         }
       }
     } catch { /* silent */ }
@@ -336,15 +336,15 @@ export function SettingsPanel() {
         toast({ title: "Error al cambiar modo", description: errorMsg, variant: "destructive" });
       }
     } catch {
-      toast({ title: "Error", description: "Error de conexiÃ³n", variant: "destructive" });
+      toast({ title: "Error", description: "Error de conexión", variant: "destructive" });
     } finally {
       setModeLoading(false);
     }
   };
 
   /* ---- Save broker credentials ---- */
-  const handleSaveOandaCredentials = async () => {
-    if (!oandaAccountId.trim() || !oandaApiToken.trim()) {
+  const handleSaveBrokerCredentials = async () => {
+    if (!brokerAccountId.trim() || !brokerApiToken.trim()) {
       toast({
         title: "Campos requeridos",
         description: selectedBroker === "weltrade_mt5"
@@ -361,35 +361,35 @@ export function SettingsPanel() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           broker: selectedBroker,
-          accountId: oandaAccountId.trim(),
-          apiToken: oandaApiToken.trim(),
-          isDemo: oandaIsDemo,
+          accountId: brokerAccountId.trim(),
+          apiToken: brokerApiToken.trim(),
+          isDemo: brokerIsDemo,
           extra: selectedBroker === "weltrade_mt5" ? { server: brokerServer.trim() } : undefined,
           makeActive: true,
         }),
       });
       if (res.ok) {
-        toast({ title: "Credenciales guardadas", description: "ConexiÃ³n configurada exitosamente" });
+        toast({ title: "Credenciales guardadas", description: "Conexión configurada exitosamente" });
         loadCredentialStatus();
-        setOandaAccountId("");
-        setOandaApiToken("");
+        setBrokerAccountId("");
+        setBrokerApiToken("");
       } else {
         toast({ title: "Error", description: "No se pudieron guardar las credenciales", variant: "destructive" });
       }
     } catch {
-      toast({ title: "Error", description: "Error de conexiÃ³n", variant: "destructive" });
+      toast({ title: "Error", description: "Error de conexión", variant: "destructive" });
     } finally {
       setSavingCreds(false);
     }
   };
 
   /* ---- Validate broker credentials ---- */
-  const handleValidateOandaCredentials = async () => {
+  const handleValidateBrokerCredentials = async () => {
     setValidating(true);
     try {
-      const body: Record<string, any> = { isDemo: oandaIsDemo, broker: selectedBroker };
-      if (oandaAccountId.trim()) body.accountId = oandaAccountId.trim();
-      if (oandaApiToken.trim()) body.apiToken = oandaApiToken.trim();
+      const body: Record<string, any> = { isDemo: brokerIsDemo, broker: selectedBroker };
+      if (brokerAccountId.trim()) body.accountId = brokerAccountId.trim();
+      if (brokerApiToken.trim()) body.apiToken = brokerApiToken.trim();
       if (selectedBroker === "weltrade_mt5" && brokerServer.trim()) {
         body.extra = { server: brokerServer.trim() };
       }
@@ -406,10 +406,10 @@ export function SettingsPanel() {
         });
         loadCredentialStatus();
       } else {
-        toast({ title: "Credenciales invÃ¡lidas", description: data.message || "Verifica tus credenciales", variant: "destructive" });
+        toast({ title: "Credenciales inválidas", description: data.message || "Verifica tus credenciales", variant: "destructive" });
       }
     } catch {
-      toast({ title: "Error", description: "Error de validaciÃ³n", variant: "destructive" });
+      toast({ title: "Error", description: "Error de validación", variant: "destructive" });
     } finally {
       setValidating(false);
     }
@@ -664,7 +664,7 @@ export function SettingsPanel() {
       if (!val) return "â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢";
       return val.length > 8 ? val.slice(0, 4) + "â€¢â€¢â€¢â€¢" + val.slice(-4) : "â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢";
     }
-    return val || "â€”";
+    return val || "-";
   };
 
   /* ================================================================== */
@@ -815,10 +815,10 @@ export function SettingsPanel() {
             <div className="flex items-start gap-2">
               <AlertTriangle className="h-4 w-4 text-red-400 mt-0.5 shrink-0" />
               <div>
-                <p className="text-xs font-semibold text-red-400">AtenciÃ³n: Cuenta Real</p>
+                <p className="text-xs font-semibold text-red-400">Atención: Cuenta Real</p>
                 <p className="text-[10px] text-red-300/70 mt-1">
                   Al activar la cuenta real, todas las operaciones usarán dinero real de tu broker activo.
-                  AsegÃºrate de tener configuradas las API keys correctas. Â¿Continuar?
+                  Asegúrate de tener configuradas las API keys correctas. ¿Continuar?
                 </p>
                 <div className="flex gap-2 mt-2">
                   <button
@@ -831,7 +831,7 @@ export function SettingsPanel() {
                     onClick={() => handleSwitchMode(false)}
                     className="px-3 py-1 text-[10px] rounded-md bg-red-500/20 text-red-400 hover:bg-red-500/30 border border-red-500/30 font-semibold"
                   >
-                    SÃ­, activar cuenta real
+                    Sí, activar cuenta real
                   </button>
                 </div>
               </div>
@@ -877,23 +877,23 @@ export function SettingsPanel() {
               <Label className="text-xs text-gray-400">Cuenta Demo</Label>
               <HelpIcon text="Activa demo para pruebas sin riesgo. Desactiva para operar en cuenta real." />
             </div>
-            <Switch checked={oandaIsDemo} onCheckedChange={setOandaIsDemo} />
+            <Switch checked={brokerIsDemo} onCheckedChange={setBrokerIsDemo} />
           </div>
           <p className="text-[10px] text-gray-500 -mt-2">
-            {oandaIsDemo ? "Demo â€” Dinero ficticio" : "Live â€” DINERO REAL"}
+            {brokerIsDemo ? "Demo - Dinero ficticio" : "Live - DINERO REAL"}
           </p>
           <div className="space-y-2">
-            <Input type="text" placeholder={selectedBroker === "weltrade_mt5" ? "MT5 Login" : "Account ID"} value={oandaAccountId} onChange={(e) => setOandaAccountId(e.target.value)} className="bg-white/[0.04] border-white/[0.08] text-xs h-8 font-mono" />
-            <Input type="password" placeholder={selectedBroker === "weltrade_mt5" ? "MT5 Password" : "API Token"} value={oandaApiToken} onChange={(e) => setOandaApiToken(e.target.value)} className="bg-white/[0.04] border-white/[0.08] text-xs h-8 font-mono" />
+            <Input type="text" placeholder={selectedBroker === "weltrade_mt5" ? "MT5 Login" : "Account ID"} value={brokerAccountId} onChange={(e) => setBrokerAccountId(e.target.value)} className="bg-white/[0.04] border-white/[0.08] text-xs h-8 font-mono" />
+            <Input type="password" placeholder={selectedBroker === "weltrade_mt5" ? "MT5 Password" : "API Token"} value={brokerApiToken} onChange={(e) => setBrokerApiToken(e.target.value)} className="bg-white/[0.04] border-white/[0.08] text-xs h-8 font-mono" />
             {selectedBroker === "weltrade_mt5" && (
               <Input type="text" placeholder="MT5 Server (optional)" value={brokerServer} onChange={(e) => setBrokerServer(e.target.value)} className="bg-white/[0.04] border-white/[0.08] text-xs h-8 font-mono" />
             )}
           </div>
           <div className="flex gap-2">
-            <button onClick={handleSaveOandaCredentials} disabled={savingCreds} className="px-2.5 py-1 text-[10px] rounded-md bg-blue-500/15 text-blue-400 hover:bg-blue-500/25 border border-blue-500/30 disabled:opacity-40 transition-all">
+            <button onClick={handleSaveBrokerCredentials} disabled={savingCreds} className="px-2.5 py-1 text-[10px] rounded-md bg-blue-500/15 text-blue-400 hover:bg-blue-500/25 border border-blue-500/30 disabled:opacity-40 transition-all">
               {savingCreds ? <Loader2 className="h-3 w-3 animate-spin" /> : "Guardar"}
             </button>
-            <button onClick={handleValidateOandaCredentials} disabled={validating} className="px-2.5 py-1 text-[10px] rounded-md bg-white/[0.06] text-gray-400 hover:text-gray-200 border border-white/[0.08] disabled:opacity-40 transition-all">
+            <button onClick={handleValidateBrokerCredentials} disabled={validating} className="px-2.5 py-1 text-[10px] rounded-md bg-white/[0.06] text-gray-400 hover:text-gray-200 border border-white/[0.08] disabled:opacity-40 transition-all">
               {validating ? <Loader2 className="h-3 w-3 animate-spin" /> : "Validar"}
             </button>
           </div>
@@ -1165,5 +1165,7 @@ export function SettingsPanel() {
     </div>
   );
 }
+
+
 
 

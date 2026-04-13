@@ -1,14 +1,9 @@
-import { NextResponse } from "next/server";
+import { apiError } from '@/lib/api-response';
 
 export async function GET() {
-  try {
-    const res = await fetch("http://localhost:9000/api/snapshot?XTransformPort=9000", {
-      cache: "no-store",
-    });
-    if (!res.ok) throw new Error("Flask not available");
-    const data = await res.json();
-    return NextResponse.json(data);
-  } catch {
-    return NextResponse.json({ error: "Flask API not available", mock: true }, { status: 503 });
-  }
+  return apiError(
+    'NOT_FOUND',
+    'Legacy proxy endpoint disabled. Use /api/snapshot.',
+    410
+  );
 }

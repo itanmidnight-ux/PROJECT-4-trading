@@ -32,7 +32,7 @@ const DEFAULT_SETTINGS: SettingUpdate[] = [
   { key: 'api_secret', value: '', section: 'api' },
   { key: 'testnet', value: 'true', section: 'api' },
   { key: 'confirm_mainnet', value: 'true', section: 'api' },
-  { key: 'broker_active', value: 'oanda', section: 'general' },
+  { key: 'broker_active', value: 'weltrade_mt5', section: 'general' },
 
   // Trading Settings
   { key: 'symbol', value: 'XAU_USD', section: 'trading' },

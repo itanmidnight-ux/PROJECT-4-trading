@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getSupportedSymbols, getTickerPrice, getActiveSymbol } from "@/lib/broker-manager";
 import { formatPair } from "@/lib/format-utils";
+import { apiError } from '@/lib/api-response';
 
 export async function GET() {
   try {
@@ -27,9 +28,9 @@ export async function GET() {
 
     return NextResponse.json({ prices, source: "broker", timestamp: Date.now() });
   } catch (error: any) {
-    return NextResponse.json(
-      { error: error.message, prices: {}, source: "error" },
-      { status: 500 }
-    );
+    return apiError('INTERNAL_ERROR', error.message || 'Failed to load prices', 500, {
+      prices: {},
+      source: 'error',
+    });
   }
 }

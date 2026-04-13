@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { apiError } from '@/lib/api-response';
 import {
   getActiveBroker,
   getBrokerCredentials,
@@ -35,7 +36,9 @@ export async function GET(request: Request) {
       isDemo: status.isDemo,
     });
   } catch (error: any) {
-    return NextResponse.json({ error: error.message, configured: false }, { status: 500 });
+    return apiError('INTERNAL_ERROR', error.message || 'Failed to read credential status', 500, {
+      configured: false,
+    });
   }
 }
 
@@ -46,10 +49,7 @@ export async function PUT(request: Request) {
     const { accountId, apiToken, isDemo, extra, makeActive } = body;
 
     if (!accountId || !apiToken) {
-      return NextResponse.json(
-        { success: false, message: 'accountId and apiToken are required' },
-        { status: 400 }
-      );
+      return apiError('VALIDATION_ERROR', 'accountId and apiToken are required', 400);
     }
 
     setBrokerCredentials(broker, String(accountId).trim(), String(apiToken).trim(), isDemo !== false, extra);
@@ -69,7 +69,7 @@ export async function PUT(request: Request) {
       isDemo: status.isDemo,
     });
   } catch (error: any) {
-    return NextResponse.json({ success: false, message: error.message }, { status: 500 });
+    return apiError('INTERNAL_ERROR', error.message || 'Failed to save credentials', 500);
   }
 }
 
@@ -102,6 +102,6 @@ export async function POST(request: Request) {
       broker,
     });
   } catch (error: any) {
-    return NextResponse.json({ success: false, message: error.message }, { status: 500 });
+    return apiError('INTERNAL_ERROR', error.message || 'Failed to validate credentials', 500);
   }
 }

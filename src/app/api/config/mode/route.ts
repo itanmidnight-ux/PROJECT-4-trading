@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { apiError } from '@/lib/api-response';
 import {
   getActiveBroker,
   getBrokerCredentials,
@@ -25,7 +26,7 @@ export async function GET() {
       },
     });
   } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return apiError('INTERNAL_ERROR', error.message || 'Failed to load mode', 500);
   }
 }
 
@@ -39,10 +40,7 @@ export async function POST(request: Request) {
       : (typeof body.isDemo === 'boolean' ? body.isDemo : undefined);
 
     if (requestedDemo === undefined) {
-      return NextResponse.json(
-        { success: false, message: 'testnet or isDemo boolean is required' },
-        { status: 400 }
-      );
+      return apiError('VALIDATION_ERROR', 'testnet or isDemo boolean is required', 400);
     }
 
     if (requestedDemo === creds.isDemo) {
@@ -56,13 +54,12 @@ export async function POST(request: Request) {
     }
 
     if (!creds.accountId || !creds.apiToken) {
-      return NextResponse.json({
-        success: false,
-        changed: false,
-        broker,
-        requiresCredentials: true,
-        error: `No credentials configured for ${broker}`,
-      });
+      return apiError(
+        'VALIDATION_ERROR',
+        `No credentials configured for ${broker}`,
+        400,
+        { changed: false, broker, requiresCredentials: true }
+      );
     }
 
     setBrokerCredentials(broker, creds.accountId, creds.apiToken, requestedDemo, creds.extra);
@@ -78,6 +75,6 @@ export async function POST(request: Request) {
       message: init.message,
     });
   } catch (error: any) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return apiError('INTERNAL_ERROR', error.message || 'Failed to switch mode', 500);
   }
 }

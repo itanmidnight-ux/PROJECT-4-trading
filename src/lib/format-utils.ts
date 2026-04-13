@@ -1,16 +1,16 @@
-// ============================================
+﻿// ============================================
 // RECO-TRADING - Format Utilities
 // ============================================
-// Formatting helpers for OANDA market symbols
+// Formatting helpers for broker market symbols
 // ============================================
 
-/** Format OANDA symbol for display: XAU_USD → XAU/USD */
+/** Format broker symbol for display: XAU_USD -> XAU/USD */
 export function formatPair(symbol: string): string {
   if (!symbol) return "";
   return symbol.replace("_", "/");
 }
 
-/** Unformat display name to OANDA symbol: XAU/USD → XAU_USD */
+/** Unformat display name to broker symbol: XAU/USD -> XAU_USD */
 export function unformatPair(display: string): string {
   if (!display) return "";
   return display.replace("/", "_");
@@ -37,21 +37,18 @@ export function getSymbolDisplayName(symbol: string): string {
 
 /** Format price based on symbol */
 export function formatSymbolPrice(symbol: string, price: number): string {
-  if (!price || price === 0) return "—";
-  
-  // Metals and indices get 2 decimal places
+  if (!price || price === 0) return "-";
+
   if (symbol.includes("XAU") || symbol.includes("XAG") || symbol.includes("US30") || symbol.includes("SPX") || symbol.includes("NAS")) {
     return price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }
-  
-  // Forex pairs get 5 decimal places
+
   if (symbol.includes("USD") || symbol.includes("JPY")) {
     if (symbol.includes("JPY")) {
       return price.toFixed(3);
     }
     return price.toFixed(5);
   }
-  
-  // Default
+
   return price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }

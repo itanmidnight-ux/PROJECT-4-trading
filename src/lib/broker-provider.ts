@@ -1,6 +1,6 @@
 export type BrokerProvider = 'oanda' | 'weltrade_mt5' | 'ctrader';
 
-export const DEFAULT_BROKER_PROVIDER: BrokerProvider = 'oanda';
+export const DEFAULT_BROKER_PROVIDER: BrokerProvider = 'weltrade_mt5';
 
 export const BROKER_PROVIDERS: BrokerProvider[] = ['oanda', 'weltrade_mt5', 'ctrader'];
 
@@ -11,5 +11,5 @@ export function normalizeBrokerProvider(value: string | null | undefined): Broke
     return 'weltrade_mt5';
   }
   if (normalized === 'ctrader') return 'ctrader';
-  return 'oanda';
+  return DEFAULT_BROKER_PROVIDER;
 }
