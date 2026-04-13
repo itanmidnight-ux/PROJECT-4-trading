@@ -22,6 +22,43 @@ mkdir -p "$ROOT_DIR/logs" "$ROOT_DIR/data"
 export DATABASE_URL="file:$ROOT_DIR/data/reco_trading.db"
 export NODE_ENV=production
 export PORT=3000
+BUILD_STAMP_FILE="$ROOT_DIR/.next/.build_commit"
+
+safe_git_head() {
+  git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || echo "unknown"
+}
+
+ensure_prisma_ready() {
+  log "Ensuring Prisma client is generated..."
+  if command -v bun >/dev/null 2>&1; then
+    bunx prisma generate >/dev/null 2>&1 || bunx prisma generate
+    bunx prisma db push --skip-generate >/dev/null 2>&1 || bunx prisma db push --skip-generate
+  else
+    npx prisma generate >/dev/null 2>&1 || npx prisma generate
+    npx prisma db push --skip-generate >/dev/null 2>&1 || npx prisma db push --skip-generate
+  fi
+  ok "Prisma client ready"
+}
+
+build_if_needed() {
+  local head_commit
+  head_commit="$(safe_git_head)"
+  local stamped_commit=""
+  [[ -f "$BUILD_STAMP_FILE" ]] && stamped_commit="$(cat "$BUILD_STAMP_FILE" 2>/dev/null || true)"
+
+  if [[ ! -f .next/standalone/server.js || "$stamped_commit" != "$head_commit" ]]; then
+    log "Build missing or stale (head=$head_commit, built=${stamped_commit:-none}). Rebuilding..."
+    rm -rf .next || true
+    if command -v bun >/dev/null 2>&1; then
+      bun run build
+    else
+      npm run build
+    fi
+    mkdir -p "$(dirname "$BUILD_STAMP_FILE")"
+    echo "$head_commit" > "$BUILD_STAMP_FILE"
+    ok "Build updated for commit $head_commit"
+  fi
+}
 
 if [[ ! -f .env ]]; then
   err ".env missing. Run ./install.sh first."
@@ -33,14 +70,8 @@ if [[ ! -d node_modules ]]; then
   exit 1
 fi
 
-if [[ ! -f .next/standalone/server.js ]]; then
-  log "Build artifact missing. Building now..."
-  if command -v bun >/dev/null 2>&1; then
-    bun run build
-  else
-    npm run build
-  fi
-fi
+ensure_prisma_ready
+build_if_needed
 
 # stop previous app on 3000 if any
 if command -v lsof >/dev/null 2>&1; then

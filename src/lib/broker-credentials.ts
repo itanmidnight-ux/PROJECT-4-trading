@@ -217,21 +217,38 @@ export async function getActiveBroker(): Promise<BrokerProvider> {
 
 export async function initializeActiveBroker(): Promise<{ success: boolean; message: string; broker: BrokerProvider }> {
   await loadAllBrokerCredentials();
-  const broker = await getActiveBroker();
-  const creds = getBrokerCredentials(broker);
-  if (!creds.accountId || !creds.apiToken) {
-    return {
-      success: false,
-      message: `No credentials configured for ${broker}`,
+  const active = await getActiveBroker();
+  const priority = [active, 'weltrade_mt5', 'oanda', 'ctrader']
+    .filter((b, i, arr) => arr.indexOf(b) === i) as BrokerProvider[];
+
+  for (const broker of priority) {
+    const creds = getBrokerCredentials(broker);
+    if (!creds.accountId || !creds.apiToken) continue;
+
+    const initialized = await initializeBrokerByProvider(
       broker,
-    };
+      accountIdForBroker(creds),
+      encodeTokenForBroker(creds),
+      creds.isDemo,
+      process.env.TRADING_SYMBOL || 'XAU_USD'
+    );
+
+    if (initialized.success) {
+      if (broker !== active) {
+        await setActiveBroker(broker);
+        return {
+          ...initialized,
+          broker,
+          message: `${initialized.message} (fallback from ${active})`,
+        };
+      }
+      return { ...initialized, broker };
+    }
   }
-  const initialized = await initializeBrokerByProvider(
-    broker,
-    accountIdForBroker(creds),
-    encodeTokenForBroker(creds),
-    creds.isDemo,
-    process.env.TRADING_SYMBOL || 'XAU_USD'
-  );
-  return { ...initialized, broker };
+
+  return {
+    success: false,
+    message: `No usable credentials configured. Checked: ${priority.join(', ')}`,
+    broker: active,
+  };
 }

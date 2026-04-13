@@ -1,17 +1,35 @@
 import { NextResponse } from 'next/server';
-import { getActiveSymbol, getSupportedSymbols } from '@/lib/broker-manager';
+import { getActiveSymbol, getSupportedSymbols, getTickerPrice } from '@/lib/broker-manager';
 import { automation } from '@/lib/automation';
 import { apiError } from '@/lib/api-response';
+import { formatPair } from '@/lib/format-utils';
 
 export async function GET() {
   try {
     const symbols = await getSupportedSymbols();
     const active = getActiveSymbol();
+    const pairs = await Promise.all(
+      symbols.map(async (symbol) => {
+        const price = await getTickerPrice(symbol).catch(() => 0);
+        return {
+          symbol,
+          display: formatPair(symbol),
+          price,
+          change24h: 0,
+          high24h: 0,
+          low24h: 0,
+          volume24h: 0,
+          active: symbol === active,
+          lastUpdate: Date.now(),
+        };
+      })
+    );
+
     return NextResponse.json({
-      pairs: symbols,
+      pairs,
       activePair: active,
-      defaultPairs: symbols,
-      popularPairs: symbols.slice(0, 8),
+      defaultPairs: pairs,
+      popularPairs: pairs.slice(0, 8),
     });
   } catch (error: any) {
     return apiError('INTERNAL_ERROR', error.message || 'Failed to load pairs', 500, {
