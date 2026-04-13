@@ -1,0 +1,25 @@
+$ bash run.sh 
+[run] Starting web dashboard...
+[ok] Web process started (PID: 61359)
+[ok] Dashboard ready: http://localhost:3000
+[warn] Weltrade credentials not configured yet.
+[warn] Open Dashboard > Settings and complete: login, password, server, bridge URL.
+
+Dashboard: http://localhost:3000
+Logs: tail -f logs/web.log
+Stop: ./stop.sh
+
+[SMART-SL] Initialized. Phases: 4, ProfitLocks: 3, Cooldown: 2min
+[RISK] Configuration loaded from database
+[STOP-TRADE] Configuration loaded from database
+[STOP-TRADE] ✅ All blocking checks disabled - trades will NOT be blocked
+[OANDA] Credentials set. Account: , Demo: true
+[cTrader] New adapter instance created
+[cTrader] Credentials set: , Demo: true
+[SMART-SL] Config loaded from DB. Phases: 4, ProfitLocks: 3
+[ENGINE] All subsystem configs loaded from DB
+2026-04-13T03:08:31.473Z [AUTOMATION][INFO] Broker init: oanda - No credentials configured for oanda
+[BROKER] No broker initialized
+[BROKER] No broker initialized
+[BROKER] No broker initialized
+[BROKER] No broker initialized
