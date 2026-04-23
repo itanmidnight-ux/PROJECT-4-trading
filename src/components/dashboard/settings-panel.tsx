@@ -364,7 +364,11 @@ export function SettingsPanel() {
           accountId: brokerAccountId.trim(),
           apiToken: brokerApiToken.trim(),
           isDemo: brokerIsDemo,
-          extra: selectedBroker === "weltrade_mt5" ? { server: brokerServer.trim() } : undefined,
+          extra: selectedBroker === "weltrade_mt5" ? {
+            server: brokerServer.trim(),
+            demoServer: "MetaQuotes-Demo",
+            liveServer: "Weltrade-Live",
+          } : undefined,
           makeActive: true,
         }),
       });
@@ -391,7 +395,11 @@ export function SettingsPanel() {
       if (brokerAccountId.trim()) body.accountId = brokerAccountId.trim();
       if (brokerApiToken.trim()) body.apiToken = brokerApiToken.trim();
       if (selectedBroker === "weltrade_mt5" && brokerServer.trim()) {
-        body.extra = { server: brokerServer.trim() };
+        body.extra = {
+          server: brokerServer.trim(),
+          demoServer: "MetaQuotes-Demo",
+          liveServer: "Weltrade-Live",
+        };
       }
       const res = await fetch(`/api/config/credentials?broker=${selectedBroker}`, {
         method: "POST",
@@ -867,7 +875,7 @@ export function SettingsPanel() {
           {selectedBroker === "weltrade_mt5" && (
             <div className="rounded-lg border border-emerald-500/25 bg-emerald-500/10 px-3 py-2">
               <p className="text-[10px] text-emerald-300">
-                Flujo recomendado: Login MT5 + Password + Server exacto + Bridge URL activo.
+                Flujo recomendado: en Demo usa servidor MetaQuotes-Demo; en Real usa servidor Weltrade-Live (o el exacto entregado por tu broker).
                 Luego pulsa Validar y Guardar.
               </p>
             </div>
@@ -886,7 +894,7 @@ export function SettingsPanel() {
             <Input type="text" placeholder={selectedBroker === "weltrade_mt5" ? "MT5 Login" : "Account ID"} value={brokerAccountId} onChange={(e) => setBrokerAccountId(e.target.value)} className="bg-white/[0.04] border-white/[0.08] text-xs h-8 font-mono" />
             <Input type="password" placeholder={selectedBroker === "weltrade_mt5" ? "MT5 Password" : "API Token"} value={brokerApiToken} onChange={(e) => setBrokerApiToken(e.target.value)} className="bg-white/[0.04] border-white/[0.08] text-xs h-8 font-mono" />
             {selectedBroker === "weltrade_mt5" && (
-              <Input type="text" placeholder="MT5 Server (optional)" value={brokerServer} onChange={(e) => setBrokerServer(e.target.value)} className="bg-white/[0.04] border-white/[0.08] text-xs h-8 font-mono" />
+              <Input type="text" placeholder={brokerIsDemo ? "MetaQuotes-Demo (recomendado para pruebas)" : "Weltrade-Live (cuenta real)"} value={brokerServer} onChange={(e) => setBrokerServer(e.target.value)} className="bg-white/[0.04] border-white/[0.08] text-xs h-8 font-mono" />
             )}
           </div>
           <div className="flex gap-2">

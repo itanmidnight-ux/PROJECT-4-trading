@@ -47,6 +47,8 @@ const SYMBOL_SPECS: Record<string, SymbolSpec> = {
 type BridgeCredentials = {
   password?: string;
   server?: string;
+  demoServer?: string;
+  liveServer?: string;
   terminalPath?: string;
 };
 
@@ -76,6 +78,8 @@ export class WeltradeMt5Adapter implements IBroker {
         this.extra = {
           password: parsed.password,
           server: parsed.server,
+          demoServer: parsed.demoServer,
+          liveServer: parsed.liveServer,
           terminalPath: parsed.terminalPath,
         };
       }
@@ -98,7 +102,7 @@ export class WeltradeMt5Adapter implements IBroker {
       const result = await this.bridgePost('/auth/validate', {
         login: this.login,
         password: this.secret,
-        server: this.extra.server,
+        server: this.resolveServer(),
         terminalPath: this.extra.terminalPath,
         isDemo: this.isDemo,
       });
@@ -343,6 +347,14 @@ export class WeltradeMt5Adapter implements IBroker {
 
   private toMt5Symbol(symbol: string): string {
     return symbol.replace('_', '');
+  }
+
+  private resolveServer(): string | undefined {
+    if (this.extra.server && String(this.extra.server).trim()) return String(this.extra.server).trim();
+    const fromMode = this.isDemo
+      ? (this.extra.demoServer || process.env.WELTRADE_MT5_DEMO_SERVER || 'MetaQuotes-Demo')
+      : (this.extra.liveServer || process.env.WELTRADE_MT5_SERVER || 'Weltrade-Live');
+    return String(fromMode || '').trim() || undefined;
   }
 
   private mapTimeframe(tf: string): string {
