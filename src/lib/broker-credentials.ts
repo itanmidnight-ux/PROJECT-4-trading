@@ -34,6 +34,8 @@ const memoryStore: Record<BrokerProvider, BrokerCredentials> = {
     isDemo: process.env.WELTRADE_MT5_IS_DEMO !== 'false',
     extra: {
       server: process.env.WELTRADE_MT5_SERVER || '',
+      demoServer: process.env.WELTRADE_MT5_DEMO_SERVER || 'MetaQuotes-Demo',
+      liveServer: process.env.WELTRADE_MT5_SERVER || 'Weltrade-Live',
       terminalPath: process.env.WELTRADE_MT5_TERMINAL_PATH || '',
     },
   },
@@ -59,6 +61,8 @@ function encodeTokenForBroker(creds: BrokerCredentials): string {
     return JSON.stringify({
       password: creds.apiToken,
       server: creds.extra?.server || '',
+      demoServer: creds.extra?.demoServer || process.env.WELTRADE_MT5_DEMO_SERVER || 'MetaQuotes-Demo',
+      liveServer: creds.extra?.liveServer || process.env.WELTRADE_MT5_SERVER || 'Weltrade-Live',
       terminalPath: creds.extra?.terminalPath || '',
     });
   }
