@@ -195,7 +195,7 @@ function renderEvents(containerId, events) {
   }
   const levelClass = (lvl) => {
     const l = (lvl || '').toLowerCase();
-    if (l === 'error') return 'error';
+    if (l === 'critical' || l === 'error') return 'error';
     if (l === 'warn' || l === 'warning') return 'warn';
     return 'info';
   };
