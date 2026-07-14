@@ -159,6 +159,22 @@ def symbol_info(symbol: str):
     info = mt5.symbol_info(symbol)
     if info is None:
         return _err(f"symbol_info({symbol}) not available", 404)
+
+    # Ask MT5 itself what margin a 1.0 lot order would need, rather than
+    # deriving it from contract_size/price/account-leverage on the Linux
+    # side. Brokers commonly run a DIFFERENT, fixed leverage for metals
+    # than whatever the account's forex leverage is set to (FBS does
+    # exactly this - metals are pinned to 1:500 regardless of the
+    # account's leverage setting, per their own docs) - order_calc_margin
+    # is the one call that reflects the broker's actual, current rule
+    # instead of an assumption that can be wrong by orders of magnitude.
+    margin_initial = None
+    tick = mt5.symbol_info_tick(symbol)
+    if tick is not None:
+        margin = mt5.order_calc_margin(mt5.ORDER_TYPE_BUY, symbol, 1.0, tick.ask)
+        if margin is not None:
+            margin_initial = float(margin)
+
     return jsonify({
         "ok": True,
         "contract_size": info.trade_contract_size,
@@ -170,6 +186,7 @@ def symbol_info(symbol: str):
         "trade_tick_value": info.trade_tick_value,
         "trade_tick_size": info.trade_tick_size,
         "spread": info.spread,
+        "margin_initial": margin_initial,
     })
 
 

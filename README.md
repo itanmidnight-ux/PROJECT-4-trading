@@ -13,19 +13,35 @@ y un dashboard nativo para ver resultados.
   cada perdida este acotada (`RISK_PER_TRADE_USD` en `.env`, ~1 USD por
   defecto) y que el sistema se detenga solo si el dia se pone feo
   (`MAX_DAILY_LOSS_USD`, `MAX_DAILY_DRAWDOWN_PCT`).
-- **La cuenta de $50 con apalancamiento 1:1 limita mucho cuanto se puede
-  operar.** XAUUSD en MT5 normalmente usa un tamaño de contrato de 100 oz
-  por lote; con 1:1, el margen requerido para abrir posicion puede superar
-  el balance disponible incluso en el lote minimo (0.01), dependiendo de
-  como FBS tenga configurado el simbolo. `core/risk_manager.py` consulta
-  la especificacion real del simbolo en el broker antes de cada trade y
-  **se niega a operar si el margen no alcanza**, en vez de forzar una
-  orden que el broker rechazaria. Corre el backtest y una sesion en
-  `DRY_RUN=true` primero para ver los numeros reales de tu cuenta.
+- **Sobre el "apalancamiento 1:1" de la cuenta: probablemente no aplica al
+  oro.** Segun la documentacion propia de FBS, el apalancamiento de metales
+  (oro incluido) esta **fijo en 1:500 y no se puede cambiar desde el Area
+  de Trader** - es independiente del apalancamiento configurado para
+  Forex en la cuenta. Con 1:1 literal sobre un contrato estandar de 100 oz,
+  ni el lote minimo (0.01) entraria en una cuenta de $50 (~$4000 de
+  margen requerido); con el 1:500 fijo que FBS aplica a metales, ese mismo
+  lote minimo ronda los $8 de margen - perfectamente viable. El codigo NO
+  asume ninguno de los dos numeros: `bridge/mt5_bridge_server.py` le pide
+  a MT5 el margen real via `order_calc_margin()` (la misma cuenta que usa
+  el broker para decidir si te deja operar) en vez de calcularlo a mano
+  con el apalancamiento de la cuenta, y `core/risk_manager.py` **se niega
+  a operar si ese margen real no alcanza**, en vez de forzar una orden que
+  el broker rechazaria. Corre el backtest y una sesion en `DRY_RUN=true`
+  primero para ver los numeros reales de tu cuenta - esto es evidencia de
+  documentacion publica de FBS, no una garantia de como esta configurada
+  tu cuenta especifica.
 - **"1000 trades/dia" es un techo, no una meta.** `MAX_TRADES_PER_DAY`
   limita cuantos trades como maximo puede abrir el bot en un dia; cuantos
   realmente abre depende de que aparezcan señales validas y de que haya
   margen disponible. No fuerza operaciones para llegar a un numero.
+- **`MAX_DAILY_DRAWDOWN_PCT` corta en tiempo real, no solo entre trades.**
+  El stop-loss por defecto es ancho (ver la seccion de backtest mas abajo -
+  `sl_atr_multiple=4.0`), asi que una posicion abierta puede acumular una
+  perdida flotante grande antes de tocar su propio SL. `core/engine.py`
+  revisa el equity (no solo el balance realizado) en cada ciclo y, si se
+  pasa del limite de drawdown diario, **cierra de inmediato cualquier
+  posicion abierta** en vez de esperar a que el SL la alcance por su
+  cuenta.
 
 ## Arquitectura
 
@@ -137,41 +153,61 @@ manda ninguna orden a la cuenta. Cambia a `DRY_RUN=false` solo cuando:
 `scripts/fetch_market_data.py` descarga futuros de oro COMEX (GC=F) reales
 via Yahoo Finance - no es el feed exacto de FBS, pero es un proxy liquido
 y correlacionado, util para revisar que la estrategia tenga sentido sobre
-movimiento de mercado real en vez de puro ruido sintetico. Con eso se hizo
-esta ronda de analisis (julio 2026, ~5 dias reales de 1m, split 60/40
-cronologico en train/test para no reportar un numero sobreajustado):
+movimiento de mercado real en vez de puro ruido sintetico. Esta seccion es
+el historial completo y honesto de esa validacion, incluyendo el momento
+en que un backtest con mas datos tumbo una conclusion anterior.
 
-1. **El backtest original tenia un bug serio**: solo miraba el precio de
-   cierre de cada vela para decidir si el SL/TP se habian tocado, ignorando
-   el rango intra-vela (`high`/`low`). Eso subestimaba el riesgo real - una
-   perdida de -$14 aparecio en los datos cuando el limite configurado era
-   -$1. Se corrigio para usar `high`/`low` (con el criterio conservador de
-   que, si una vela pudo tocar tanto el SL como un TP, se asume que el
-   movimiento adverso ocurrio primero).
-2. Con esa correccion, la configuracion original (SL = ATR × 1.2) **perdia
-   dinero de forma consistente** en datos reales: el stop era demasiado
-   ajustado para el ruido normal de 1 minuto en oro, así que la mayoria de
-   los trades se cerraban en perdida antes de que la reversion a la media
-   tuviera espacio para funcionar.
-3. Se agrego un **trailing stop** despues del primer TP (en vez de dejar el
-   stop plano en breakeven) para capturar mas de un movimiento favorable
-   que se revierte antes de llegar al segundo/tercer nivel de TP.
-4. Se probaron varios valores de `sl_atr_multiple` con el split train/test:
-   5.0 se veia mejor en el tramo de entrenamiento pero **se volvia negativo
-   en el tramo de prueba** (la firma clasica de sobreajuste). 4.0 fue el
-   valor mas ancho que se mantuvo positivo en ambos tramos, y quedo como
-   nuevo default.
-5. Resultado final sobre los 5 dias completos: **+$7.50 sobre $50 inicial
-   (91.7% de operaciones ganadoras, pero 39.3% de drawdown maximo)**.
+**Ronda 1 (5 dias reales de 1m).** Se encontraron y corrigieron dos bugs
+del backtester: (a) solo miraba el precio de cierre de cada vela para
+decidir si el SL/TP se habian tocado, ignorando el rango intra-vela
+(`high`/`low`) - eso escondio una perdida de -$14 contra un limite
+configurado de -$1; y (b) clasificaba mal ganadas/perdidas cuando una
+operacion aseguraba ganancia en el primer TP y despues cerraba en
+breakeven. Con esos bugs corregidos, la configuracion original
+(`sl_atr_multiple=1.2`) perdia dinero de forma consistente - el stop era
+demasiado ajustado para el ruido normal de 1 minuto en oro. Se agrego un
+**trailing stop** despues del primer TP, y se probaron varios valores de
+`sl_atr_multiple` con un split train/test 60/40: `4.0` fue el mas ancho
+que se mantuvo positivo en ambos tramos, dando +$7.50 sobre $50 en los 5
+dias completos (91.7% de operaciones ganadoras).
 
-Esto **no es una garantia de nada**. Es evidencia direccional de una
-muestra corta, sobre un instrumento proxy, no sobre el feed real de FBS.
-El 39.3% de drawdown maximo sigue siendo alto para una cuenta de $50 -
-`MAX_DAILY_DRAWDOWN_PCT` en `.env` (20% por defecto) corta la operativa
-mucho antes de llegar ahi en un solo dia, pero en varios dias seguidos con
-mala suerte la cuenta si puede sufrir una caida grande. Antes de operar en
-real: repeti este proceso con historial real de FBS (exportado del bridge
-una vez conectado) y volve a revisar los numeros.
+**Ronda 2 (8 dias reales de 1m - mas datos, misma metodologia) reveló que
+la Ronda 1 estaba mal.** Con una ventana un poco mas larga, la MISMA
+configuracion (`sl_atr_multiple=4.0`) **quebro la cuenta por completo**:
+-$55 sobre $50 iniciales, balance final negativo, 108.8% de drawdown
+maximo. Investigando operacion por operacion aparecio la causa real, un
+**tercer bug, mas serio que los dos anteriores**: `size_position` siempre
+opera como minimo el lote minimo del broker (0.01), incluso cuando ese
+lote - dada una distancia de stop ancha por un pico de volatilidad -
+implica arriesgar mucho mas que `RISK_PER_TRADE_USD`. Se reprodujo
+exacto: un presupuesto de riesgo de $1 se convirtio en una perdida real
+de $16 en una sola operacion; una secuencia de esas volo la cuenta en
+horas. **Esto explica por que la Ronda 1 se vio bien**: la ventana de 5
+dias que se uso para "validar" el parametro simplemente no incluyo ningun
+pico de volatilidad lo bastante fuerte como para disparar el bug.
+
+**La correccion:** `core/risk_manager.py` ahora calcula el riesgo real en
+dolares del lote minimo antes de operar, y **rechaza la señal** si supera
+`RISK_PER_TRADE_USD` por mas de un 50% de margen de redondeo (en vez de
+operar igual con el lote minimo y comerse el riesgo real). Con esta
+correccion, sobre los mismos 8 dias reales, el resultado a `RISK_PER_TRADE_USD=1.0`
+es 0 operaciones (el filtro rechaza casi toda señal dada la volatilidad
+real del oro con un lote de 0.01) - subiendo el riesgo por operacion a
+$2-5 habilita mas trades pero **el resultado siguio siendo negativo en
+todos los niveles probados** (-$5.48 a $2, -$7.80 a $3, -$9.97 a $5).
+
+**Conclusion honesta:** la combinacion actual de señal (Bollinger+RSI en
+1m) y gestion de stops **no muestra una ventaja real** sobre esta muestra
+de datos reales, mas alla de la correccion de bugs de seguridad que si
+son mejoras genuinas y quedan en el codigo. El objetivo original del
+proyecto (miles de operaciones diarias con ganancias altas y perdidas
+minimas) sigue sin ser alcanzable con esta estrategia - el trabajo
+pendiente real seria explorar una señal distinta (con filtro de tendencia,
+por ejemplo, para no operar reversion a la media en contra de un
+movimiento fuerte) y volver a repetir exactamente este proceso de
+validacion antes de confiar en cualquier numero. Antes de operar en real:
+repeti este proceso con historial real de FBS (exportado del bridge una
+vez conectado), con al menos varias semanas de datos, no solo unos dias.
 
 ## Credenciales
 

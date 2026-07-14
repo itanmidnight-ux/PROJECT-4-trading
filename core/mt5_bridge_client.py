@@ -112,6 +112,7 @@ class Mt5BridgeClient:
             volume_step=d["volume_step"],
             point=d["point"],
             trade_tick_value=d["trade_tick_value"],
+            margin_initial=d.get("margin_initial"),
         )
 
     def price(self, symbol: str) -> Tick:
