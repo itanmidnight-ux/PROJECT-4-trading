@@ -8,8 +8,6 @@ crash".
 """
 from datetime import datetime, timezone
 
-import numpy as np
-
 from core.broker import SimulatedBroker
 from core.config import Settings
 from core.database import Database
@@ -17,7 +15,7 @@ from core.engine import TradingEngine
 from core.market_data import LiveState, MarketDataSource
 from core.mt5_bridge_client import Tick
 from core.risk_manager import SymbolSpec
-from tests.test_strategy import build_candles
+from tests.test_strategy import _ranging_base, build_candles
 
 SPEC = SymbolSpec(contract_size=100.0, volume_min=0.01, volume_max=1.0,
                    volume_step=0.01, point=0.01, trade_tick_value=1.0)
@@ -51,8 +49,7 @@ def make_settings(**overrides) -> Settings:
 
 
 def oversold_entry_state():
-    rng = np.random.default_rng(1)
-    closes = list(2400 + rng.normal(0, 0.03, 29))
+    closes = _ranging_base(29)
     closes.append(closes[-1] - 3.0)
     candles = build_candles(closes)
     last_close = closes[-1]
