@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>XAUUSD Scalper — Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app">
+
+  <div class="topbar">
+    <div class="brand">
+      <div class="mark">Au</div>
+      <div>
+        <h1>XAUUSD Scalper</h1>
+        <div class="sub">Cuenta <span id="acct-login">—</span> · <span id="acct-server">—</span></div>
+      </div>
+    </div>
+    <div class="status-pills">
+      <span class="pill" id="pill-mode"><span class="dot"></span><span id="pill-mode-text">—</span></span>
+      <span class="pill" id="pill-conn"><span class="dot"></span><span id="pill-conn-text">Conectando…</span></span>
+      <span class="pill"><span class="dot" style="background:var(--series-1)"></span>Actualizado <span id="pill-updated">—</span></span>
+    </div>
+  </div>
+
+  <div class="tiles">
+    <div class="tile hero">
+      <div class="label">Equity</div>
+      <div class="value" id="tile-equity">$0.00</div>
+      <div class="delta" id="tile-equity-delta"></div>
+    </div>
+    <div class="tile">
+      <div class="label">Balance</div>
+      <div class="value" id="tile-balance">$0.00</div>
+    </div>
+    <div class="tile">
+      <div class="label">Margen libre</div>
+      <div class="value" id="tile-margin">$0.00</div>
+    </div>
+    <div class="tile">
+      <div class="label">P&amp;L total</div>
+      <div class="value" id="tile-pnl">$0.00</div>
+    </div>
+    <div class="tile">
+      <div class="label">Trades</div>
+      <div class="value" id="tile-trades">0</div>
+    </div>
+    <div class="tile">
+      <div class="label">Win rate</div>
+      <div class="value" id="tile-winrate">0%</div>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="panel">
+      <h2>Curva de equity</h2>
+      <div class="panel-sub">Ultimas lecturas de cuenta en vivo</div>
+      <div id="chart-equity"></div>
+    </div>
+    <div class="panel">
+      <h2>Ganadas vs. perdidas</h2>
+      <div class="panel-sub">Trades cerrados</div>
+      <div id="chart-donut"></div>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="panel">
+      <h2>P&amp;L por dia</h2>
+      <div class="panel-sub">Ultimos 14 dias con actividad</div>
+      <div id="chart-daily"></div>
+    </div>
+    <div class="panel">
+      <h2>P&amp;L por mes</h2>
+      <div class="panel-sub">Ultimos 12 meses con actividad</div>
+      <div id="chart-monthly"></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Historial de operaciones</h2>
+    <div class="panel-sub">Ultimas 50</div>
+    <div id="trades-table"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Eventos del motor</h2>
+    <div class="panel-sub">Avisos y errores (margen insuficiente, reconexiones, limites diarios...)</div>
+    <div id="events-list"></div>
+  </div>
+
+  <div class="footer-note">
+    Este bot opera con riesgo real de perdida en cada trade — el limite de riesgo por operacion
+    y las paradas diarias configuradas en <code>.env</code> son las que determinan cuanto se puede
+    perder, no una garantia de ganancia. Modo actual mostrado arriba (DRY_RUN = simulado con
+    precios reales, sin ordenes reales / LIVE = ordenes reales en la cuenta configurada).
+  </div>
+
+</div>
+<div class="tooltip" id="tooltip"></div>
+<script src="app.js"></script>
+</body>
+</html>

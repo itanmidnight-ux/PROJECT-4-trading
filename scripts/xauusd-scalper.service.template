@@ -1,0 +1,28 @@
+# Optional systemd user service for boot-time / crash-time automation.
+# NOT installed automatically - install.sh never enables auto-start of a
+# trading bot without you asking for it explicitly. To use it:
+#
+#   mkdir -p ~/.config/systemd/user
+#   sed "s#__PROJECT_ROOT__#$(pwd)#g" scripts/xauusd-scalper.service.template \
+#       > ~/.config/systemd/user/xauusd-scalper.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now xauusd-scalper.service
+#   loginctl enable-linger "$USER"   # so it keeps running after you log out
+#
+# Logs: journalctl --user -u xauusd-scalper -f  (also see data/logs/*.log)
+# Stop: systemctl --user stop xauusd-scalper
+
+[Unit]
+Description=XAUUSD 1m scalper (run.sh)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__PROJECT_ROOT__
+ExecStart=__PROJECT_ROOT__/run.sh
+ExecStop=__PROJECT_ROOT__/stop.sh
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
