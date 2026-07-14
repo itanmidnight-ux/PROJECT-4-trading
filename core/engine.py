@@ -29,8 +29,12 @@ class ManagedPosition:
     remaining_lot: float
     sl_price: float
     tp_levels: list[TpLevel]
+    sl_distance_price: float  # original ATR-based stop distance, kept for reference/fallback
+    trail_distance_price: float  # tighter distance used once trailing - see _manage_open_positions
     next_tp_index: int = 0
     breakeven_moved: bool = False
+    trail_active: bool = False
+    best_price_since_be: float = 0.0
 
 
 def _now_iso() -> str:
@@ -187,6 +191,8 @@ class TradingEngine:
             trade_id=trade_id, ticket=open_result.ticket, side=signal.side,
             entry_price=open_result.fill_price, original_lot=sizing.lot,
             remaining_lot=sizing.lot, sl_price=sl_price, tp_levels=tp_levels,
+            sl_distance_price=signal.sl_distance_price,
+            trail_distance_price=tp_levels[0].distance_price,
         ))
         self._strategy.on_trade_opened()
         logger.info("Opened %s %.4f lot @ %.3f (SL %.3f)", signal.side, sizing.lot, open_result.fill_price, sl_price)
@@ -196,6 +202,36 @@ class TradingEngine:
         for pos in self._open_positions:
             exit_price = bid if pos.side == "BUY" else ask
             direction = 1 if pos.side == "BUY" else -1
+
+            # Once past breakeven, trail the stop behind the best price seen
+            # instead of leaving it flat at entry. A flat breakeven gives
+            # back 100% of any move between TP1 and a reversal. The trail
+            # distance deliberately reuses the TP1 spacing (tight, on the
+            # same scale as the ladder) rather than the original ATR-based
+            # SL distance - that first version traded flat but was a no-op
+            # in backtesting: the ATR-based SL distance was consistently
+            # several times wider than the gap to TP2/TP3, so price always
+            # reached the next TP level (or reversed to exact breakeven)
+            # long before a stop that wide could ever ratchet above entry.
+            if pos.trail_active:
+                ratcheted = False
+                if direction == 1:
+                    pos.best_price_since_be = max(pos.best_price_since_be, exit_price)
+                    candidate_sl = pos.best_price_since_be - pos.trail_distance_price
+                    if candidate_sl > pos.sl_price:
+                        pos.sl_price = candidate_sl
+                        ratcheted = True
+                else:
+                    pos.best_price_since_be = min(pos.best_price_since_be, exit_price)
+                    candidate_sl = pos.best_price_since_be + pos.trail_distance_price
+                    if candidate_sl < pos.sl_price:
+                        pos.sl_price = candidate_sl
+                        ratcheted = True
+                if ratcheted:
+                    try:
+                        self.broker.modify_sl(pos.ticket, pos.sl_price)
+                    except Exception:
+                        logger.exception("Could not update trailing SL on %s (continuing locally)", pos.ticket)
 
             hit_sl = (direction == 1 and exit_price <= pos.sl_price) or (direction == -1 and exit_price >= pos.sl_price)
             if hit_sl:
@@ -235,10 +271,15 @@ class TradingEngine:
                 moved = True
 
                 # After the first TP locks in profit, move the remainder to
-                # breakeven so a reversal can't turn a winner into a loser.
+                # breakeven (so a reversal can't turn a winner into a loser)
+                # and start trailing from there so a further favorable move
+                # keeps getting captured instead of only ever giving it back
+                # down to flat.
                 if pos.next_tp_index == 1 and not pos.breakeven_moved and not fully_closed:
                     pos.sl_price = pos.entry_price
                     pos.breakeven_moved = True
+                    pos.trail_active = True
+                    pos.best_price_since_be = exit_price
 
                 if fully_closed:
                     break
@@ -295,6 +336,8 @@ class TradingEngine:
             self._open_positions.append(ManagedPosition(
                 trade_id=trade_id, ticket=bp.ticket, side=bp.side, entry_price=bp.price_open,
                 original_lot=bp.volume, remaining_lot=bp.volume, sl_price=sl_price, tp_levels=tp_levels,
+                sl_distance_price=abs(bp.price_open - sl_price),
+                trail_distance_price=tp_levels[0].distance_price,
             ))
             message = (
                 f"Posicion recuperada tras reinicio: {bp.side} {bp.volume} lote @ {bp.price_open:.3f} "

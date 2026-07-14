@@ -64,38 +64,75 @@ def run_backtest(
 
         if open_pos:
             direction = 1 if open_pos["side"] == "BUY" else -1
-            exit_price = bid if open_pos["side"] == "BUY" else ask
-            hit_sl = (direction == 1 and exit_price <= open_pos["sl"]) or (direction == -1 and exit_price >= open_pos["sl"])
+            # Crossings are checked against the bar's intrabar HIGH/LOW, not
+            # just its close - using close-only would let a position ride
+            # straight through the stop during a volatile bar and only get
+            # marked down on some much worse later close, understating risk
+            # by many multiples of the intended per-trade cap. The SIDE that
+            # can hurt the trade is checked first (low for a BUY's stop,
+            # high for a SELL's), on the conservative assumption that if a
+            # single bar's range could have hit both the stop and a TP
+            # target, the adverse move happened first.
+            adverse_extreme = (bar["low"] - assumed_spread_price / 2) if direction == 1 else (bar["high"] + assumed_spread_price / 2)
+            favorable_extreme = (bar["high"] - assumed_spread_price / 2) if direction == 1 else (bar["low"] + assumed_spread_price / 2)
+
+            hit_sl = (direction == 1 and adverse_extreme <= open_pos["sl"]) or (direction == -1 and adverse_extreme >= open_pos["sl"])
             if hit_sl:
+                exit_price = open_pos["sl"]  # filled at the stop level itself; no slippage/gap modeled
                 pnl = direction * (exit_price - open_pos["entry"]) * value_per_point_per_lot * open_pos["remaining_lot"]
                 balance += pnl
                 total_pnl += pnl
+                open_pos["realized_pnl"] += pnl
                 trades += 1
-                wins += pnl > 0
-                losses += pnl <= 0
+                # Win/loss is decided by the trade's TOTAL realized pnl, not
+                # just this final slice - a position that banked profit on
+                # TP1/TP2 and then got stopped at breakeven on the remainder
+                # is still a net winner, even though this last slice was ~0.
+                wins += open_pos["realized_pnl"] > 0
+                losses += open_pos["realized_pnl"] <= 0
                 risk.register_trade_closed(pnl, balance)
                 open_pos = None
             else:
                 while open_pos and open_pos["next_idx"] < len(open_pos["tp_levels"]):
                     level = open_pos["tp_levels"][open_pos["next_idx"]]
                     target = open_pos["entry"] + direction * level.distance_price
-                    reached = (direction == 1 and exit_price >= target) or (direction == -1 and exit_price <= target)
+                    reached = (direction == 1 and favorable_extreme >= target) or (direction == -1 and favorable_extreme <= target)
                     if not reached:
                         break
                     close_lot = min(open_pos["orig_lot"] * level.close_fraction, open_pos["remaining_lot"])
-                    pnl = direction * (exit_price - open_pos["entry"]) * value_per_point_per_lot * close_lot
+                    pnl = direction * (target - open_pos["entry"]) * value_per_point_per_lot * close_lot
                     balance += pnl
                     total_pnl += pnl
+                    open_pos["realized_pnl"] += pnl
                     open_pos["remaining_lot"] -= close_lot
                     open_pos["next_idx"] += 1
                     if open_pos["next_idx"] == 1:
                         open_pos["sl"] = open_pos["entry"]
+                        open_pos["trail_active"] = True
+                        open_pos["best_since_be"] = target
                     if open_pos["remaining_lot"] <= 1e-9:
                         trades += 1
-                        wins += 1  # a position that reached TP1+ nets positive by construction
-                        risk.register_trade_closed(pnl, balance)
+                        wins += open_pos["realized_pnl"] > 0
+                        losses += open_pos["realized_pnl"] <= 0
+                        risk.register_trade_closed(pnl, balance)  # this slice only, matches engine.py's per-fill registration
                         open_pos = None
                         break
+
+                # Trail the stop using this bar's favorable extreme, AFTER
+                # TP fills are resolved - so a bar can't ratchet the stop
+                # tighter and then "immediately" stop itself out on the same
+                # bar's move, which we have no intrabar ordering evidence for.
+                if open_pos and open_pos["trail_active"]:
+                    if direction == 1:
+                        open_pos["best_since_be"] = max(open_pos["best_since_be"], favorable_extreme)
+                        candidate_sl = open_pos["best_since_be"] - open_pos["trail_distance"]
+                        if candidate_sl > open_pos["sl"]:
+                            open_pos["sl"] = candidate_sl
+                    else:
+                        open_pos["best_since_be"] = min(open_pos["best_since_be"], favorable_extreme)
+                        candidate_sl = open_pos["best_since_be"] + open_pos["trail_distance"]
+                        if candidate_sl < open_pos["sl"]:
+                            open_pos["sl"] = candidate_sl
 
         peak = max(peak, balance)
         max_dd = max(max_dd, (peak - balance) / peak * 100 if peak else 0)
@@ -112,7 +149,9 @@ def run_backtest(
                     sl = entry - direction * signal.sl_distance_price
                     tp_levels = strategy.build_tp_ladder(sizing.lot, assumed_spread_price)
                     open_pos = {"side": signal.side, "entry": entry, "sl": sl, "tp_levels": tp_levels,
-                                "next_idx": 0, "remaining_lot": sizing.lot, "orig_lot": sizing.lot}
+                                "next_idx": 0, "remaining_lot": sizing.lot, "orig_lot": sizing.lot,
+                                "realized_pnl": 0.0, "trail_distance": tp_levels[0].distance_price,
+                                "trail_active": False, "best_since_be": 0.0}
                     strategy.on_trade_opened()
 
     return BacktestResult(trades=trades, wins=wins, losses=losses, total_pnl=total_pnl,
