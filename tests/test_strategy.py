@@ -101,6 +101,19 @@ def test_tp_ladder_fractions_sum_to_one_and_distances_increase():
     assert all(d > 0 for d in distances)
 
 
+def test_indicator_periods_are_configurable_and_change_warmup():
+    default = strategy()
+    tuned = ScalpStrategy(min_tp_usd=0.28, tp_levels=3, value_per_point_per_lot=100.0,
+                           bb_period=50, rsi_period=10, atr_period=20)
+    assert tuned._warmup_bars > default._warmup_bars
+
+    # 30 bars is enough for the default (bb_period=20) but not for a
+    # strategy tuned to a 50-period Bollinger band.
+    signal = tuned.generate_signal(oversold_candles(), spread_price=0.2, lot_hint=0.01)
+    assert signal.side is None
+    assert signal.reason == "not enough history"
+
+
 def test_tp1_nets_at_least_min_tp_usd_for_its_slice():
     s = strategy()
     lot = 0.02

@@ -123,6 +123,59 @@ def test_engine_refuses_to_open_when_margin_is_insufficient(tmp_path):
     assert any("insuficiente" in e["message"].lower() for e in events)
 
 
+def test_engine_recovers_a_pre_existing_open_position_on_restart(tmp_path):
+    """Simulates the exact gap auto-restart could otherwise create: a
+    position opened by a PREVIOUS process instance, with a brand new
+    TradingEngine (empty in-memory state) pointed at the same broker."""
+    entry_state, last_close = oversold_entry_state()
+    market_data = ScriptedMarketData([entry_state, entry_state])
+    broker = SimulatedBroker(starting_balance=50_000.0, leverage=100, spec=SPEC)
+    broker.open_order("XAUUSD", "BUY", 0.02, sl_price=last_close - 5, fill_price=last_close)
+
+    db = Database(str(tmp_path / "engine_recover.db"))
+    engine = TradingEngine(make_settings(), market_data, broker, db, poll_seconds=0)
+
+    engine.step()
+
+    assert len(engine._open_positions) == 1
+    recovered = engine._open_positions[0]
+    assert recovered.side == "BUY"
+    assert recovered.original_lot == 0.02
+    assert len(recovered.tp_levels) == 3
+
+    trades = db.recent_trades(limit=5)
+    assert len(trades) == 1
+    assert trades[0]["status"] == "open"
+
+    events = db.recent_events(limit=5)
+    assert any("recuperada" in e["message"].lower() for e in events)
+
+
+def test_market_stale_detection_pauses_signals_but_keeps_protecting_positions(tmp_path, monkeypatch):
+    entry_state, _ = oversold_entry_state()
+    market_data = ScriptedMarketData([entry_state])
+    broker = SimulatedBroker(starting_balance=50_000.0, leverage=100, spec=SPEC)
+    db = Database(str(tmp_path / "engine_stale.db"))
+    engine = TradingEngine(make_settings(), market_data, broker, db, poll_seconds=0)
+    engine._ensure_initialized()
+
+    fake_time = [1000.0]
+    monkeypatch.setattr("core.engine.time.time", lambda: fake_time[0])
+
+    assert engine._is_market_stale(tick_time=123) is False  # first observation
+    fake_time[0] += 60
+    assert engine._is_market_stale(tick_time=123) is False  # below threshold
+
+    fake_time[0] += 200
+    assert engine._is_market_stale(tick_time=123) is True  # now stale
+    events = db.recent_events(limit=5)
+    assert any("cerrado" in e["message"].lower() for e in events)
+
+    assert engine._is_market_stale(tick_time=456) is False  # ticks resumed
+    events = db.recent_events(limit=5)
+    assert any("de nuevo" in e["message"].lower() for e in events)
+
+
 def test_engine_only_holds_one_position_at_a_time(tmp_path):
     entry_state, last_close = oversold_entry_state()
     flat_tick = Tick(bid=last_close, ask=last_close + 0.2, spread_price=0.2, time=1_700_002_060)

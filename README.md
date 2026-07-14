@@ -95,7 +95,14 @@ manualmente y ajusta las rutas al inicio del script.
 .venv/bin/python scripts/run_backtest.py --csv hist.csv    # backtest con historial real exportado del bridge
 
 ./scripts/verify.sh       # compila todo, corre los tests y una prueba de humo del motor
+./scripts/doctor.sh        # diagnostico de la instalacion real (Wine, MT5, bridge, .env, disco...)
 ```
+
+`scripts/doctor.sh` es el primer comando a correr cuando algo no funciona: no
+instala ni cambia nada, solo te dice exactamente que falta (Wine, el
+terminal MT5, el python de Wine, credenciales en `.env`, el bridge
+corriendo, espacio en disco...) en vez de tener que adivinar o re-correr
+`install.sh` a ciegas.
 
 ### Resiliencia
 

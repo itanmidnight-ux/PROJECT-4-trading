@@ -79,6 +79,10 @@ class ScalpStrategy:
         min_atr_price: float = 0.15,
         sl_atr_multiple: float = 1.2,
         cooldown_bars: int = 2,
+        bb_period: int = 20,
+        bb_std: float = 2.0,
+        rsi_period: int = 7,
+        atr_period: int = 14,
     ) -> None:
         self.min_tp_usd = min_tp_usd
         self.tp_levels = max(1, tp_levels)
@@ -89,7 +93,14 @@ class ScalpStrategy:
         self.min_atr_price = min_atr_price
         self.sl_atr_multiple = sl_atr_multiple
         self.cooldown_bars = cooldown_bars
+        self.bb_period = bb_period
+        self.bb_std = bb_std
+        self.rsi_period = rsi_period
+        self.atr_period = atr_period
         self._bars_since_last_trade = cooldown_bars
+        # compute_indicators needs at least this many bars to warm up its
+        # slowest rolling window (Bollinger); generate_signal enforces it.
+        self._warmup_bars = max(bb_period, rsi_period, atr_period) + 5
 
     def on_bar_closed(self) -> None:
         self._bars_since_last_trade += 1
@@ -97,7 +108,7 @@ class ScalpStrategy:
     def on_trade_opened(self) -> None:
         self._bars_since_last_trade = 0
 
-    def _min_tp_distance_for_lot(self, lot: float) -> float:
+    def min_tp_distance_for_lot(self, lot: float) -> float:
         """Price distance needed for the FIRST tp level to net >= min_tp_usd for this lot."""
         value_per_point = self.value_per_point_per_lot * lot
         if value_per_point <= 0:
@@ -110,7 +121,7 @@ class ScalpStrategy:
         possible (plus spread buffer), later levels scale out further out
         for the rest of the move. Fractions sum to 1.0.
         """
-        base_distance = self._min_tp_distance_for_lot(lot) + spread_price
+        base_distance = self.min_tp_distance_for_lot(lot) + spread_price
         n = self.tp_levels
         levels: list[TpLevel] = []
         # geometric spacing: 1x, 1.8x, 3x, ... of the base distance
@@ -127,10 +138,11 @@ class ScalpStrategy:
         if self._bars_since_last_trade < self.cooldown_bars:
             return Signal(side=None, reason="cooldown")
 
-        if len(df) < 25:
+        if len(df) < self._warmup_bars:
             return Signal(side=None, reason="not enough history")
 
-        ind = compute_indicators(df)
+        ind = compute_indicators(df, bb_period=self.bb_period, bb_std=self.bb_std,
+                                  rsi_period=self.rsi_period, atr_period=self.atr_period)
         last = ind.iloc[-1]
 
         if any(pd.isna(last[c]) for c in ("bb_upper", "bb_lower", "rsi", "atr")):
@@ -152,7 +164,7 @@ class ScalpStrategy:
         if side is None:
             return Signal(side=None, reason="no setup")
 
-        sl_distance = max(last["atr"] * self.sl_atr_multiple, self._min_tp_distance_for_lot(lot_hint) * 1.5)
+        sl_distance = max(last["atr"] * self.sl_atr_multiple, self.min_tp_distance_for_lot(lot_hint) * 1.5)
         tp_levels = self.build_tp_ladder(lot_hint, spread_price)
 
         return Signal(side=side, sl_distance_price=sl_distance, tp_levels=tp_levels, reason="signal")
