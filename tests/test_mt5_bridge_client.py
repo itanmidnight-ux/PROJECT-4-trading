@@ -2,6 +2,8 @@
 response instead of a real Wine/MT5 bridge process."""
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from core.mt5_bridge_client import BridgeError, Mt5BridgeClient
 
 
@@ -48,9 +50,31 @@ def test_symbol_spec_handles_missing_margin_initial_gracefully():
 def test_bridge_error_raised_on_not_ok_response():
     payload = {"ok": False, "error": "symbol_select(XAUUSD) failed"}
     client = Mt5BridgeClient("http://127.0.0.1:5001", max_retries=1)
-    with patch("requests.get", return_value=_fake_response(payload)):
-        try:
-            client.symbol_spec("XAUUSD")
-            assert False, "expected BridgeError"
-        except BridgeError as exc:
-            assert "symbol_select" in str(exc)
+    with patch("requests.get", return_value=_fake_response(payload)), \
+            pytest.raises(BridgeError, match="symbol_select"):
+        client.symbol_spec("XAUUSD")
+
+
+def test_auth_token_sent_as_header_when_configured():
+    """The bridge can open/close real trades - a configured token must
+    actually be sent, or the auth check added to the bridge server would
+    be silently pointless."""
+    payload = {"ok": True, "contract_size": 100.0, "volume_min": 0.01, "volume_max": 50.0,
+               "volume_step": 0.01, "point": 0.01, "digits": 2, "trade_tick_value": 1.0,
+               "trade_tick_size": 0.01, "spread": 20, "margin_initial": None}
+    client = Mt5BridgeClient("http://127.0.0.1:5001", auth_token="secret-token-123")
+    with patch("requests.get", return_value=_fake_response(payload)) as mock_get:
+        client.symbol_spec("XAUUSD")
+    _, kwargs = mock_get.call_args
+    assert kwargs["headers"]["X-Bridge-Token"] == "secret-token-123"
+
+
+def test_no_auth_header_sent_when_token_not_configured():
+    payload = {"ok": True, "contract_size": 100.0, "volume_min": 0.01, "volume_max": 50.0,
+               "volume_step": 0.01, "point": 0.01, "digits": 2, "trade_tick_value": 1.0,
+               "trade_tick_size": 0.01, "spread": 20, "margin_initial": None}
+    client = Mt5BridgeClient("http://127.0.0.1:5001")
+    with patch("requests.get", return_value=_fake_response(payload)) as mock_get:
+        client.symbol_spec("XAUUSD")
+    _, kwargs = mock_get.call_args
+    assert "X-Bridge-Token" not in kwargs["headers"]

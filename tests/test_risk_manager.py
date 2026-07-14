@@ -5,8 +5,8 @@ STANDARD_SPEC = SymbolSpec(contract_size=100.0, volume_min=0.01, volume_max=1.0,
 
 
 def make_risk(**overrides):
-    defaults = dict(risk_per_trade_usd=1.0, max_daily_loss_usd=8.0,
-                     max_daily_drawdown_pct=20.0, max_trades_per_day=1000)
+    defaults = {"risk_per_trade_usd": 1.0, "max_daily_loss_usd": 8.0,
+                "max_daily_drawdown_pct": 20.0, "max_trades_per_day": 1000}
     defaults.update(overrides)
     return RiskManager(**defaults)
 

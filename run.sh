@@ -22,7 +22,7 @@
 set -uo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$PROJECT_ROOT"
+cd "$PROJECT_ROOT" || exit 1
 
 VENV_DIR="$PROJECT_ROOT/.venv"
 WINEPREFIX_DIR="$PROJECT_ROOT/.wine"
@@ -159,8 +159,13 @@ if [ -z "$SYNTHETIC_FLAG" ]; then
     export WINEPREFIX="$WINEPREFIX_DIR"
     export WINEDEBUG=-all
 
+    BRIDGE_AUTH_TOKEN="$(grep -E '^BRIDGE_AUTH_TOKEN=' "$PROJECT_ROOT/.env" 2>/dev/null | head -1 | cut -d= -f2-)"
+    if [ -z "$BRIDGE_AUTH_TOKEN" ]; then
+        err "BRIDGE_AUTH_TOKEN no esta en .env - corre ./install.sh para generarlo (el bridge arrancara sin autenticacion mientras tanto)."
+    fi
+
     supervise "bridge MT5" "$RUN_DIR/bridge.pid" "$LOG_DIR/bridge.log" \
-        wine "$WIN_PYTHON" "$PROJECT_ROOT/bridge/mt5_bridge_server.py" --port 5001 &
+        wine "$WIN_PYTHON" "$PROJECT_ROOT/bridge/mt5_bridge_server.py" --port 5001 --token "$BRIDGE_AUTH_TOKEN" &
     disown
 
     log "Esperando a que el bridge responda en http://127.0.0.1:5001/health ..."

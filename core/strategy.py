@@ -165,7 +165,7 @@ class ScalpStrategy:
         raw_fractions = [1.0 / (i + 1) for i in range(n)]
         total = sum(raw_fractions)
         fractions = [f / total for f in raw_fractions]
-        for mult, frac in zip(multipliers, fractions):
+        for mult, frac in zip(multipliers, fractions, strict=True):
             levels.append(TpLevel(distance_price=base_distance * mult, close_fraction=frac))
         return levels
 

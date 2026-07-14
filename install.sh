@@ -150,6 +150,20 @@ if [ ! -f "$PROJECT_ROOT/.env" ]; then
 else
     log ".env already exists, leaving it as is."
 fi
+
+# Generate a bridge auth token if one isn't set yet - covers both a fresh
+# .env (created above, BRIDGE_AUTH_TOKEN still blank from .env.example)
+# and an existing .env from before this feature existed.
+if ! grep -qE '^BRIDGE_AUTH_TOKEN=.+' "$PROJECT_ROOT/.env" 2>/dev/null; then
+    token="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+    if grep -qE '^BRIDGE_AUTH_TOKEN=' "$PROJECT_ROOT/.env" 2>/dev/null; then
+        sed -i "s|^BRIDGE_AUTH_TOKEN=.*|BRIDGE_AUTH_TOKEN=${token}|" "$PROJECT_ROOT/.env"
+    else
+        echo "BRIDGE_AUTH_TOKEN=${token}" >> "$PROJECT_ROOT/.env"
+    fi
+    log "Generated a bridge auth token (the bridge API will reject requests without it)."
+fi
+
 chmod 600 "$PROJECT_ROOT/.env" 2>/dev/null || true
 
 # ------------------------------------------------------------ 5. done

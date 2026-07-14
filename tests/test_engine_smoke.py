@@ -6,12 +6,12 @@ strategy -> risk_manager -> broker -> database), just with prices we
 control, so trade outcomes are asserted precisely instead of "did not
 crash".
 """
-from datetime import datetime, timezone
+import pytest
 
 from core.broker import SimulatedBroker
 from core.config import Settings
 from core.database import Database
-from core.engine import TradingEngine
+from core.engine import EngineHalted, TradingEngine
 from core.market_data import LiveState, MarketDataSource
 from core.mt5_bridge_client import Tick
 from core.risk_manager import SymbolSpec
@@ -36,14 +36,14 @@ class ScriptedMarketData(MarketDataSource):
 
 
 def make_settings(**overrides) -> Settings:
-    defaults = dict(
-        mt5_login="", mt5_password="", mt5_server="FBS-Demo", mt5_is_demo=True,
-        bridge_url="http://127.0.0.1:5001", bridge_timeout_ms=8000,
-        symbol="XAUUSD", timeframe="M1",
-        risk_per_trade_usd=1.0, max_daily_loss_usd=8.0, max_daily_drawdown_pct=20.0,
-        max_trades_per_day=1000, min_tp_usd=0.28, tp_levels=3,
-        dry_run=True, db_path=":memory:",
-    )
+    defaults = {
+        "mt5_login": "", "mt5_password": "", "mt5_server": "FBS-Demo", "mt5_is_demo": True,
+        "bridge_url": "http://127.0.0.1:5001", "bridge_timeout_ms": 8000,
+        "symbol": "XAUUSD", "timeframe": "M1",
+        "risk_per_trade_usd": 1.0, "max_daily_loss_usd": 8.0, "max_daily_drawdown_pct": 20.0,
+        "max_trades_per_day": 1000, "min_tp_usd": 0.28, "tp_levels": 3,
+        "dry_run": True, "db_path": ":memory:",
+    }
     defaults.update(overrides)
     return Settings(**defaults)
 
@@ -225,3 +225,51 @@ def test_engine_only_holds_one_position_at_a_time(tmp_path):
         engine.step()
 
     assert len(engine._open_positions) <= 1
+
+
+def test_kill_switch_file_force_closes_open_position_and_halts(tmp_path):
+    """The manual kill switch (data/EMERGENCY_STOP by default) is the only
+    way to stop the bot without terminal/process access - this must
+    actually close any open position at market, not just block new ones."""
+    kill_switch = tmp_path / "EMERGENCY_STOP"
+    entry_state, last_close = oversold_entry_state()
+    flat_tick = Tick(bid=last_close, ask=last_close + 0.2, spread_price=0.2, time=1_700_002_060)
+    flat_state = LiveState(tick=flat_tick, candles=entry_state.candles)
+
+    market_data = ScriptedMarketData([entry_state, flat_state])
+    broker = SimulatedBroker(starting_balance=50_000.0, leverage=100, spec=SPEC)
+    db = Database(str(tmp_path / "engine_killswitch.db"))
+    settings = make_settings(kill_switch_path=str(kill_switch))
+    engine = TradingEngine(settings, market_data, broker, db, poll_seconds=0)
+
+    engine.step()  # opens the BUY on the oversold signal
+    assert len(engine._open_positions) == 1
+
+    kill_switch.touch()
+    with pytest.raises(EngineHalted):
+        engine.step()
+
+    assert len(engine._open_positions) == 0, "kill switch must force-close the open position"
+    trades = db.recent_trades(limit=5)
+    assert trades[0]["status"] == "closed"
+    assert trades[0]["tp_level"] == -2, "closed via the emergency path, not a normal SL/TP hit"
+
+    events = db.recent_events(limit=5)
+    assert any("emergencia" in e["message"].lower() for e in events)
+
+
+def test_kill_switch_file_blocks_new_trades_when_flat(tmp_path):
+    kill_switch = tmp_path / "EMERGENCY_STOP"
+    kill_switch.touch()
+    entry_state, _ = oversold_entry_state()
+    market_data = ScriptedMarketData([entry_state])
+    broker = SimulatedBroker(starting_balance=50_000.0, leverage=100, spec=SPEC)
+    db = Database(str(tmp_path / "engine_killswitch_flat.db"))
+    settings = make_settings(kill_switch_path=str(kill_switch))
+    engine = TradingEngine(settings, market_data, broker, db, poll_seconds=0)
+
+    with pytest.raises(EngineHalted):
+        engine.step()
+
+    assert len(engine._open_positions) == 0
+    assert db.recent_trades(limit=5) == []
