@@ -97,7 +97,7 @@ def main() -> None:
                             settings.mt5_login, settings.mt5_server)
             broker = BridgeBroker(client)
 
-    engine = TradingEngine(settings, market_data, broker, db)
+    engine = TradingEngine(settings, market_data, broker, db, poll_seconds=settings.poll_seconds)
     engine.run_forever()
 
 

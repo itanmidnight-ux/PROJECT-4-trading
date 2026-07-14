@@ -7,6 +7,8 @@
 data/*.db
 data/*.db-journal
 data/*.sqlite
+data/*.csv
+data/run/
 logs/
 *.log
 

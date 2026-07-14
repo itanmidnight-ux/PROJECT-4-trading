@@ -60,6 +60,14 @@ class Settings:
 
     db_path: str
 
+    # How often the engine polls the bridge for a fresh price/candles and
+    # re-checks open positions. Lower = reacts faster to price moves (matters
+    # most for not giving back gains between TP levels), but every poll is a
+    # round trip through the Wine bridge process - going far below ~0.5s on
+    # typical hardware just means most polls return the same tick without
+    # the broker having produced a new one yet, not real extra speed.
+    poll_seconds: float = 2.0
+
     # Strategy tuning - defaults match ScalpStrategy's own defaults, kept
     # here too so they show up in .env.example instead of only in code.
     strat_rsi_oversold: float = 25.0
@@ -96,10 +104,11 @@ def load_settings() -> Settings:
         strat_rsi_overbought=_float("STRAT_RSI_OVERBOUGHT", 75.0),
         strat_max_spread_price=_float("STRAT_MAX_SPREAD_PRICE", 0.5),
         strat_min_atr_price=_float("STRAT_MIN_ATR_PRICE", 0.15),
-        strat_sl_atr_multiple=_float("STRAT_SL_ATR_MULTIPLE", 1.2),
+        strat_sl_atr_multiple=_float("STRAT_SL_ATR_MULTIPLE", 4.0),
         strat_cooldown_bars=_int("STRAT_COOLDOWN_BARS", 2),
         strat_bb_period=_int("STRAT_BB_PERIOD", 20),
         strat_bb_std=_float("STRAT_BB_STD", 2.0),
         strat_rsi_period=_int("STRAT_RSI_PERIOD", 7),
         strat_atr_period=_int("STRAT_ATR_PERIOD", 14),
+        poll_seconds=max(_float("POLL_SECONDS", 2.0), 0.25),
     )

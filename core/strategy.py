@@ -10,6 +10,19 @@ so a trade is only taken when the expected move comfortably clears the
 live spread plus a small buffer. There is no configuration of this file
 that makes losses impossible; the spread/RSI/ATR filters exist to keep
 the number of low-quality trades down, not to guarantee wins.
+
+Backtest evidence on sl_atr_multiple (2026-07, ~5 real trading days of
+COMEX gold futures 1m data, 60/40 chronological train/test split, see
+scripts/fetch_market_data.py + scripts/run_backtest.py): the previous
+default of 1.2 lost money in both halves (stops too tight for 1m gold
+noise - positions got stopped out before the reversion thesis had room
+to play out). 5.0 looked best on the training half but flipped negative
+out of sample - a textbook overfitting signature, not a real edge. 4.0
+was the widest multiple that stayed net positive on BOTH halves, so
+that's the new default. This is directional evidence from one short,
+proxy (not FBS's actual feed) dataset, not a validated edge - rerun
+scripts/run_backtest.py against real FBS history before trusting any of
+these numbers on the actual account.
 """
 from __future__ import annotations
 
@@ -77,7 +90,7 @@ class ScalpStrategy:
         rsi_overbought: float = 75.0,
         max_spread_price: float = 0.5,
         min_atr_price: float = 0.15,
-        sl_atr_multiple: float = 1.2,
+        sl_atr_multiple: float = 4.0,
         cooldown_bars: int = 2,
         bb_period: int = 20,
         bb_std: float = 2.0,

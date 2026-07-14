@@ -31,3 +31,16 @@ def test_malformed_numeric_env_var_falls_back_to_default(monkeypatch):
     monkeypatch.setenv("STRAT_RSI_OVERSOLD", "not-a-number")
     settings = load_settings()
     assert settings.strat_rsi_oversold == 25.0
+
+
+def test_poll_seconds_default_and_override(monkeypatch):
+    monkeypatch.delenv("POLL_SECONDS", raising=False)
+    assert load_settings().poll_seconds == 2.0
+
+    monkeypatch.setenv("POLL_SECONDS", "0.75")
+    assert load_settings().poll_seconds == 0.75
+
+
+def test_poll_seconds_is_floored_to_avoid_hammering_the_bridge(monkeypatch):
+    monkeypatch.setenv("POLL_SECONDS", "0.01")
+    assert load_settings().poll_seconds == 0.25
