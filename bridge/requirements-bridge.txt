@@ -1,0 +1,5 @@
+# Wine side ONLY. Installed by install.sh using the Windows python.exe
+# running inside the Wine prefix (MetaTrader5 package needs the real
+# Windows terminal DLLs, it cannot run under native Linux python).
+MetaTrader5==5.0.45
+Flask==3.0.3

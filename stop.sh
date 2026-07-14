@@ -1,17 +1,34 @@
 #!/usr/bin/env bash
-set -euo pipefail
+# Stops a ./run.sh --daemon instance cleanly (bridge + engine + Xvfb).
+set -uo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RUN_DIR="$PROJECT_ROOT/data/run"
+PIDFILE="$RUN_DIR/supervisor.pid"
 
-echo "[deprecated] Este proyecto ahora usa stop.bat en Windows."
-if command -v cmd.exe >/dev/null 2>&1; then
-  exec cmd.exe /c stop.bat "$@"
+log()  { printf '\033[1;36m[stop]\033[0m %s\n' "$*"; }
+err()  { printf '\033[1;31m[stop][error]\033[0m %s\n' "$*" >&2; }
+
+if [ ! -f "$PIDFILE" ]; then
+    err "No hay una instancia registrada en $PIDFILE (no esta corriendo, o no se inicio con --daemon)."
+    exit 1
 fi
 
-if command -v node >/dev/null 2>&1; then
-  exec node scripts/stop.mjs "$@"
+PID=$(cat "$PIDFILE")
+if ! kill -0 "$PID" 2>/dev/null; then
+    err "El proceso $PID ya no existe. Limpiando pidfile."
+    rm -f "$PIDFILE"
+    exit 0
 fi
 
-echo "[stop] Node.js no está instalado." >&2
-exit 1
+log "Enviando señal de parada al supervisor (PID $PID)..."
+kill "$PID" 2>/dev/null || true
+
+for _ in $(seq 1 20); do
+    kill -0 "$PID" 2>/dev/null || { log "Detenido."; exit 0; }
+    sleep 1
+done
+
+err "No se detuvo a tiempo, forzando con SIGKILL."
+kill -9 "$PID" 2>/dev/null || true
+rm -f "$PIDFILE"

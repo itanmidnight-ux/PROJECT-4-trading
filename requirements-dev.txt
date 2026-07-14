@@ -1,0 +1,2 @@
+# Dev/test-only deps, on top of requirements.txt. Not needed to run the bot.
+pytest>=8.0.0
