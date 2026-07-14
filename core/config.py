@@ -74,12 +74,14 @@ class Settings:
     strat_rsi_overbought: float = 75.0
     strat_max_spread_price: float = 0.5
     strat_min_atr_price: float = 0.15
-    strat_sl_atr_multiple: float = 1.2
+    strat_sl_atr_multiple: float = 4.0
     strat_cooldown_bars: int = 2
     strat_bb_period: int = 20
     strat_bb_std: float = 2.0
     strat_rsi_period: int = 7
     strat_atr_period: int = 14
+    strat_adx_period: int = 14
+    strat_trend_filter_adx_threshold: float = 35.0
 
 
 def load_settings() -> Settings:
@@ -110,5 +112,7 @@ def load_settings() -> Settings:
         strat_bb_std=_float("STRAT_BB_STD", 2.0),
         strat_rsi_period=_int("STRAT_RSI_PERIOD", 7),
         strat_atr_period=_int("STRAT_ATR_PERIOD", 14),
+        strat_adx_period=_int("STRAT_ADX_PERIOD", 14),
+        strat_trend_filter_adx_threshold=_float("STRAT_TREND_FILTER_ADX_THRESHOLD", 35.0),
         poll_seconds=max(_float("POLL_SECONDS", 2.0), 0.25),
     )

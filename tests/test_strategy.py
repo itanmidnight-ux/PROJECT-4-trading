@@ -16,24 +16,30 @@ def build_candles(closes: list[float]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _ranging_base(n: int = 29) -> list[float]:
+    """A bounded, oscillating price path (not a flat line, not a trend) -
+    deliberately NOT quiet noise before a spike: a single sharp move out of
+    genuine quiet chop reads as a strong trend to ADX (see the trend filter
+    in core/strategy.py), which made the old fixture here trip that filter
+    and fail every 'oversold' test. Oscillation keeps ADX low the way real
+    ranging chop would, the same regime this filter is meant to allow."""
+    return [2400 + 0.3 * np.sin(i * 0.9) for i in range(n)]
+
+
 def oversold_candles() -> pd.DataFrame:
-    rng = np.random.default_rng(1)
-    closes = list(2400 + rng.normal(0, 0.03, 29))
-    closes.append(closes[-1] - 3.0)  # sharp drop on the last bar
+    closes = _ranging_base(29)
+    closes.append(closes[-1] - 3.0)  # sharp drop out of the range, on the last bar
     return build_candles(closes)
 
 
 def overbought_candles() -> pd.DataFrame:
-    rng = np.random.default_rng(2)
-    closes = list(2400 + rng.normal(0, 0.03, 29))
-    closes.append(closes[-1] + 3.0)  # sharp jump on the last bar
+    closes = _ranging_base(29)
+    closes.append(closes[-1] + 3.0)  # sharp jump out of the range, on the last bar
     return build_candles(closes)
 
 
 def flat_candles() -> pd.DataFrame:
-    rng = np.random.default_rng(3)
-    closes = list(2400 + rng.normal(0, 0.01, 30))
-    return build_candles(closes)
+    return build_candles(_ranging_base(39))  # no breakout bar - stays neutral (RSI ~50)
 
 
 def strategy() -> ScalpStrategy:
@@ -112,6 +118,51 @@ def test_indicator_periods_are_configurable_and_change_warmup():
     signal = tuned.generate_signal(oversold_candles(), spread_price=0.2, lot_hint=0.01)
     assert signal.side is None
     assert signal.reason == "not enough history"
+
+
+def _trending_candles() -> pd.DataFrame:
+    """A steady climb (not chop with a breakout bar) - exactly what ADX is
+    supposed to flag as a strong trend, unlike the ranging fixtures above.
+    A little noise is essential: a perfectly linear, zero-noise series has
+    zero down-ticks, which is its own RSI edge case (avg_loss=0 exactly),
+    not a realistic 'strong trend' stand-in."""
+    rng = np.random.default_rng(4)
+    return build_candles([2400 + i * 0.15 + rng.normal(0, 0.12) for i in range(30)])
+
+
+def test_trend_filter_blocks_signals_in_a_strong_trend():
+    """This is the fix for the bug that blew up the 8-day backtest: fading
+    a strong directional move (instead of only genuine range-bound chop)
+    is what produced the sequence of large losses."""
+    from core.strategy import compute_indicators
+    candles = _trending_candles()
+    adx = compute_indicators(candles)["adx"].iloc[-1]
+    assert adx >= 35.0, f"fixture should read as a strong trend, got ADX={adx:.1f}"
+
+    s = strategy()
+    signal = s.generate_signal(candles, spread_price=0.2, lot_hint=0.01)
+    assert signal.side is None
+    assert "trend" in signal.reason.lower()
+
+
+def test_trend_filter_threshold_is_configurable():
+    candles = _trending_candles()
+    strict = strategy()  # default threshold (35.0)
+    assert "trend" in strict.generate_signal(candles, spread_price=0.2, lot_hint=0.01).reason.lower()
+
+    permissive = ScalpStrategy(min_tp_usd=0.28, tp_levels=3, value_per_point_per_lot=100.0,
+                                trend_filter_adx_threshold=99.0)
+    permissive_reason = permissive.generate_signal(candles, spread_price=0.2, lot_hint=0.01).reason
+    assert "trend" not in permissive_reason.lower()
+
+
+def test_ranging_oversold_setup_clears_the_trend_filter():
+    """The companion check: genuine range-bound chop with a breakout bar
+    must NOT be mistaken for a strong trend (this is what the fixture
+    generators in this file are specifically built to produce)."""
+    from core.strategy import compute_indicators
+    adx = compute_indicators(oversold_candles())["adx"].iloc[-1]
+    assert adx < 35.0, f"ranging fixture should NOT read as a strong trend, got ADX={adx:.1f}"
 
 
 def test_tp1_nets_at_least_min_tp_usd_for_its_slice():

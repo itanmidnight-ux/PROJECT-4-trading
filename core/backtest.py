@@ -37,11 +37,16 @@ def run_backtest(
     tp_levels: int,
     assumed_spread_price: float,
     max_trades_per_day: int = 1000,
+    strategy_overrides: dict | None = None,
 ) -> BacktestResult:
-    """candles: columns open, high, low, close, time (oldest -> newest)."""
+    """candles: columns open, high, low, close, time (oldest -> newest).
+    strategy_overrides passes extra kwargs straight to ScalpStrategy (e.g.
+    sl_atr_multiple, trend_filter_adx_threshold) for sweeping parameters
+    without a dedicated CLI flag for every single one."""
     value_per_point_per_lot = spec.trade_tick_value / spec.point
     strategy = ScalpStrategy(min_tp_usd=min_tp_usd, tp_levels=tp_levels,
-                              value_per_point_per_lot=value_per_point_per_lot)
+                              value_per_point_per_lot=value_per_point_per_lot,
+                              **(strategy_overrides or {}))
     risk = RiskManager(risk_per_trade_usd=risk_per_trade_usd, max_daily_loss_usd=10**9,
                         max_daily_drawdown_pct=100.0, max_trades_per_day=max_trades_per_day)
 
