@@ -13,6 +13,7 @@ from core.broker import BrokerExecutor, SimulatedBroker
 from core.config import Settings
 from core.database import Database
 from core.market_data import MarketDataSource
+from core.mt5_bridge_client import Tick
 from core.risk_manager import RiskManager
 from core.strategy import ScalpStrategy, TpLevel
 
@@ -144,6 +145,18 @@ class TradingEngine:
         account = self.broker.account()
         self.db.record_snapshot(ts=_now_iso(), balance=account.balance,
                                  equity=account.equity, free_margin=account.free_margin)
+
+        # Checked BEFORE normal TP/SL processing, using floating equity
+        # (not just realized balance): a wide ATR-based stop can carry a
+        # large unrealized loss well before it's ever realized, and the
+        # balance-based check in can_open_new_trade can't see that until
+        # the position closes on its own. This is the circuit breaker that
+        # actually protects the account in real time, not just between
+        # trades.
+        breached, reason = self._risk.check_equity_drawdown(account.equity)
+        if breached:
+            self._emergency_close_all_positions(tick, reason)
+            return
 
         self._manage_open_positions(tick.bid, tick.ask)  # always: protect any open position first
 
@@ -288,6 +301,30 @@ class TradingEngine:
                 still_open.append(pos)
 
         self._open_positions = still_open
+
+    def _emergency_close_all_positions(self, tick: Tick, reason: str) -> None:
+        """Force-closes every open position at market, immediately, because
+        the real-time equity drawdown breaker tripped. This is the one
+        place the engine closes a position for a reason OTHER than its own
+        SL/TP - it exists specifically because a wide ATR-based stop can
+        otherwise carry a floating loss well past what a same-day realized
+        check would catch."""
+        message = f"PARADA DE EMERGENCIA: {reason}. Cerrando todas las posiciones abiertas."
+        logger.critical(message)
+        self.db.log_event(ts=_now_iso(), level="CRITICAL", message=message)
+
+        for pos in self._open_positions:
+            exit_price = tick.bid if pos.side == "BUY" else tick.ask
+            pnl = self.broker.close_partial(pos.ticket, pos.remaining_lot, exit_price)
+            self.db.close_trade_partial(
+                pos.trade_id, exit_price=exit_price, closed_at=_now_iso(), pnl_usd=pnl,
+                close_fraction=pos.remaining_lot / pos.original_lot, tp_level=-2, fully_closed=True,
+            )
+            account = self.broker.account()
+            self._risk.register_trade_closed(pnl, account.balance)
+            logger.critical("Emergency-closed %s, pnl=%.2f", pos.ticket, pnl)
+
+        self._open_positions = []
 
     def _reconcile_open_positions(self) -> None:
         """

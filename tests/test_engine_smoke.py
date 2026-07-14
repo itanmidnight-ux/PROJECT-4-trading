@@ -123,6 +123,44 @@ def test_engine_refuses_to_open_when_margin_is_insufficient(tmp_path):
     assert any("insuficiente" in e["message"].lower() for e in events)
 
 
+def test_engine_emergency_closes_on_equity_drawdown_before_sl_is_hit(tmp_path):
+    """The real-time circuit breaker: a floating loss well inside the
+    (now much wider, ATR x 4) stop distance must still force-close the
+    position once it breaches the daily equity drawdown limit, instead of
+    waiting for the SL to eventually catch up."""
+    entry_state, last_close = oversold_entry_state()
+    settings = make_settings(max_daily_drawdown_pct=0.1)  # deliberately far tighter than any single trade's SL risk
+    broker = SimulatedBroker(starting_balance=50.0, leverage=100, spec=SPEC)
+    db = Database(str(tmp_path / "engine_emergency.db"))
+    engine = TradingEngine(settings, ScriptedMarketData([entry_state]), broker, db, poll_seconds=0)
+
+    engine.step()  # opens the BUY on the oversold signal
+    assert len(engine._open_positions) == 1
+    pos = engine._open_positions[0]
+    sl_distance = pos.entry_price - pos.sl_price
+    assert sl_distance > 0
+
+    # Comfortably inside the SL (30% of the distance to it), but a real
+    # floating loss on a $50 account with a 0.1% drawdown limit.
+    adverse_move = sl_distance * 0.3
+    down_price = last_close - adverse_move
+    down_tick = Tick(bid=down_price - 0.1, ask=down_price + 0.1, spread_price=0.2, time=1_700_002_060)
+    engine.market_data = ScriptedMarketData([LiveState(tick=down_tick, candles=entry_state.candles)])
+
+    engine.step()
+
+    assert len(engine._open_positions) == 0, "the position must be force-closed, not left riding toward its SL"
+    trades = db.recent_trades(limit=5)
+    assert len(trades) == 1
+    assert trades[0]["status"] == "closed"
+    assert trades[0]["tp_level"] == -2, "closed via the emergency path, not a normal SL hit (-1)"
+    assert trades[0]["pnl_usd"] < 0
+
+    events = db.recent_events(limit=5)
+    assert any("PARADA DE EMERGENCIA" in e["message"] for e in events)
+    assert any(e["level"] == "CRITICAL" for e in events)
+
+
 def test_engine_recovers_a_pre_existing_open_position_on_restart(tmp_path):
     """Simulates the exact gap auto-restart could otherwise create: a
     position opened by a PREVIOUS process instance, with a brand new
