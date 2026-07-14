@@ -51,6 +51,7 @@ class RiskManager:
     """
 
     MAX_MARGIN_USAGE_FRACTION = 0.6  # never commit more than 60% of free margin to one trade
+    MAX_RISK_OVERSHOOT_FACTOR = 1.5  # tolerate lot-step rounding overshoot; reject anything wider
 
     def __init__(
         self,
@@ -111,6 +112,30 @@ class RiskManager:
     def pnl_today(self) -> float:
         return self._pnl_today
 
+    def check_equity_drawdown(self, equity: float) -> tuple[bool, str]:
+        """
+        Real-time check against floating EQUITY (balance + unrealized pnl
+        of whatever is open right now), not just realized balance. Meant
+        to be called every engine step, not only before opening a new
+        trade: `can_open_new_trade`'s balance-based check can't see a
+        large floating loss on an already-open position until it's
+        realized, and a wide ATR-based stop can let that floating loss
+        run well past what a same-day realized check would catch in time.
+        Returns (breached, reason) - the caller is responsible for acting
+        on a breach (emergency-closing the open position), this only
+        detects it.
+        """
+        self._roll_day_if_needed(equity)
+        if self._start_of_day_balance is None:
+            self._start_of_day_balance = equity
+        if not self._start_of_day_balance:
+            return False, "ok"
+
+        drawdown_pct = max(0.0, (self._start_of_day_balance - equity) / self._start_of_day_balance * 100)
+        if drawdown_pct >= self.max_daily_drawdown_pct:
+            return True, f"Drawdown de equity en tiempo real alcanzado ({drawdown_pct:.1f}%)"
+        return False, "ok"
+
     # -------------------------------------------------------------- sizing
     def size_position(
         self,
@@ -140,6 +165,28 @@ class RiskManager:
         step = spec.volume_step or 0.01
         lot = max(spec.volume_min, self._round_to_step(risk_based_lot, step))
         lot = min(lot, spec.volume_max)
+
+        # The floor above (spec.volume_min) is a REAL bug fix, not a nicety:
+        # during a volatility spike the ATR-based stop distance widens, so
+        # the risk-appropriate lot can shrink below the broker's minimum
+        # tradable size. Silently trading volume_min anyway means the real
+        # dollar risk on that one trade can be many times risk_per_trade_usd
+        # - reproduced directly against real market data: a $1 risk budget
+        # became a real $16 loss this way, and a sequence of those wiped an
+        # entire $50 account in hours. Refuse instead of quietly eating it.
+        actual_risk_usd = lot * sl_distance_price * value_per_point_per_lot
+        risk_budget = self.risk_per_trade_usd * self.MAX_RISK_OVERSHOOT_FACTOR
+        if actual_risk_usd > risk_budget:
+            return SizingResult(
+                ok=False,
+                reason=(
+                    f"Volatilidad demasiado alta para el lote minimo del broker ({spec.volume_min}): "
+                    f"con esta distancia de stop ({sl_distance_price:.2f}) ese lote arriesgaria "
+                    f"~{actual_risk_usd:.2f} USD, muy por encima del limite de "
+                    f"{self.risk_per_trade_usd:.2f} USD por operacion. Se descarta la señal en vez "
+                    f"de operar con un riesgo real muy superior al configurado."
+                ),
+            )
 
         # Margin required for this lot at this price
         if spec.margin_initial:
