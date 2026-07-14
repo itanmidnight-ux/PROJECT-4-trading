@@ -101,6 +101,12 @@ def api_trades():
     return jsonify([_row_to_dict(r) for r in rows])
 
 
+@app.route("/api/events")
+def api_events():
+    rows = db.recent_events(limit=30)
+    return jsonify([_row_to_dict(r) for r in rows])
+
+
 def run_server():
     app.run(host="127.0.0.1", port=8765, debug=False, use_reloader=False)
 

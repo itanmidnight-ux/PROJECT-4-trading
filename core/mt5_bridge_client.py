@@ -1,7 +1,14 @@
 """HTTP client for the Wine-side MT5 bridge (see bridge/mt5_bridge_server.py).
-This is the only way the Linux-side engine talks to the broker."""
+This is the only way the Linux-side engine talks to the broker.
+
+Resilient to two real-world failure modes: the bridge process being
+mid-restart (connection refused - retried with backoff) and the bridge
+having lost its MT5 session (reports "not logged in" - the client
+transparently re-sends the last known credentials and retries once)."""
 from __future__ import annotations
 
+import logging
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -9,6 +16,8 @@ import pandas as pd
 import requests
 
 from core.risk_manager import AccountState, SymbolSpec
+
+logger = logging.getLogger("bridge_client")
 
 
 class BridgeError(RuntimeError):
@@ -24,23 +33,55 @@ class Tick:
 
 
 class Mt5BridgeClient:
-    def __init__(self, base_url: str, timeout_ms: int = 8000) -> None:
+    def __init__(self, base_url: str, timeout_ms: int = 8000, max_retries: int = 3) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout_ms / 1000
+        self.max_retries = max_retries
+        self._credentials: Optional[dict] = None
+
+    def _raw_get(self, path: str, **params) -> dict:
+        resp = requests.get(f"{self.base_url}{path}", params=params, timeout=self.timeout)
+        return resp.json()
+
+    def _raw_post(self, path: str, payload: dict) -> dict:
+        resp = requests.post(f"{self.base_url}{path}", json=payload, timeout=self.timeout)
+        return resp.json()
+
+    def _call(self, raw_fn, *args, allow_relogin: bool = True, **kwargs) -> dict:
+        last_exc: Exception | None = None
+        for attempt in range(self.max_retries):
+            try:
+                data = raw_fn(*args, **kwargs)
+            except requests.RequestException as exc:
+                last_exc = exc
+                wait = min(2 ** attempt, 8)
+                logger.warning("Bridge unreachable (%s), retrying in %ss...", exc, wait)
+                time.sleep(wait)
+                continue
+
+            if data.get("ok"):
+                return data
+
+            error = data.get("error", "bridge error")
+            if allow_relogin and "not logged in" in error.lower() and self._credentials:
+                logger.warning("Bridge session dropped, re-logging in and retrying...")
+                try:
+                    self._raw_post("/login", self._credentials)
+                except requests.RequestException as exc:
+                    last_exc = exc
+                    time.sleep(min(2 ** attempt, 8))
+                    continue
+                continue  # retry the original call now that we're logged in again
+
+            raise BridgeError(error)
+
+        raise BridgeError(f"bridge unreachable after {self.max_retries} attempts: {last_exc}")
 
     def _get(self, path: str, **params) -> dict:
-        resp = requests.get(f"{self.base_url}{path}", params=params, timeout=self.timeout)
-        data = resp.json()
-        if not data.get("ok"):
-            raise BridgeError(data.get("error", f"bridge error on {path}"))
-        return data
+        return self._call(self._raw_get, path, **params)
 
     def _post(self, path: str, payload: dict) -> dict:
-        resp = requests.post(f"{self.base_url}{path}", json=payload, timeout=self.timeout)
-        data = resp.json()
-        if not data.get("ok"):
-            raise BridgeError(data.get("error", f"bridge error on {path}"))
-        return data
+        return self._call(self._raw_post, path, payload)
 
     def health(self) -> bool:
         try:
@@ -50,7 +91,8 @@ class Mt5BridgeClient:
             return False
 
     def login(self, login: str, password: str, server: str) -> None:
-        self._post("/login", {"login": login, "password": password, "server": server})
+        self._credentials = {"login": login, "password": password, "server": server}
+        self._call(self._raw_post, "/login", self._credentials, allow_relogin=False)
 
     def account(self) -> AccountState:
         d = self._get("/account")

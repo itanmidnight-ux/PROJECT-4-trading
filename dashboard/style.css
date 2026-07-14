@@ -241,3 +241,27 @@ tbody tr:hover { background: var(--surface-2); }
 }
 
 .empty { color: var(--text-muted); font-size: 13px; padding: 30px 0; text-align: center; }
+
+/* ---------- events ---------- */
+.event-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 8px 4px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+.event-row:last-child { border-bottom: none; }
+.event-time { color: var(--text-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.event-level {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.event-level.info { color: var(--series-1); background: rgba(57,135,229,0.14); }
+.event-level.warn { color: var(--warning); background: rgba(201,133,0,0.16); }
+.event-level.error { color: var(--critical); background: rgba(230,103,103,0.16); }
+.event-message { color: var(--text-secondary); }

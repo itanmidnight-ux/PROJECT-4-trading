@@ -186,16 +186,38 @@ function renderTrades(containerId, trades) {
     <tbody>${rows}</tbody></table>`;
 }
 
+// ------------------------------------------------------------------ events
+function renderEvents(containerId, events) {
+  const container = document.getElementById(containerId);
+  if (!events || events.length === 0) {
+    container.innerHTML = '<div class="empty">Sin eventos todavia</div>';
+    return;
+  }
+  const levelClass = (lvl) => {
+    const l = (lvl || '').toLowerCase();
+    if (l === 'error') return 'error';
+    if (l === 'warn' || l === 'warning') return 'warn';
+    return 'info';
+  };
+  container.innerHTML = events.map(e => `
+    <div class="event-row">
+      <span class="event-time">${new Date(e.ts).toLocaleString()}</span>
+      <span class="event-level ${levelClass(e.level)}">${e.level}</span>
+      <span class="event-message">${e.message}</span>
+    </div>`).join('');
+}
+
 // -------------------------------------------------------------------- poll
 async function refresh() {
   try {
-    const [status, summary, equity, daily, monthly, trades] = await Promise.all([
+    const [status, summary, equity, daily, monthly, trades, events] = await Promise.all([
       fetch('/api/status').then(r => r.json()),
       fetch('/api/summary').then(r => r.json()),
       fetch('/api/equity_curve').then(r => r.json()),
       fetch('/api/pnl_daily').then(r => r.json()),
       fetch('/api/pnl_monthly').then(r => r.json()),
       fetch('/api/trades').then(r => r.json()),
+      fetch('/api/events').then(r => r.json()),
     ]);
 
     document.getElementById('acct-login').textContent = status.login || '—';
@@ -229,6 +251,7 @@ async function refresh() {
     renderBarChart('chart-daily', [...daily].reverse(), { xKey: 'day', valueKey: 'pnl' });
     renderBarChart('chart-monthly', [...monthly].reverse(), { xKey: 'month', valueKey: 'pnl' });
     renderTrades('trades-table', trades);
+    renderEvents('events-list', events);
   } catch (e) {
     document.getElementById('pill-conn').className = 'pill off';
     document.getElementById('pill-conn-text').textContent = 'Sin conexion al motor';

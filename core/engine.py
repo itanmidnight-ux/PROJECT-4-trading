@@ -61,8 +61,14 @@ class TradingEngine:
     def _ensure_initialized(self) -> None:
         if self._spec is not None:
             return
-        self._spec = self.broker.symbol_spec(self.settings.symbol)
-        value_per_point_per_lot = self._spec.trade_tick_value / self._spec.point
+        spec = self.broker.symbol_spec(self.settings.symbol)
+        if not spec.point or not spec.trade_tick_value:
+            raise RuntimeError(
+                f"Broker returned an invalid symbol spec for {self.settings.symbol} "
+                f"(point={spec.point}, trade_tick_value={spec.trade_tick_value}). "
+                "Refusing to trade with a spec that would divide by zero."
+            )
+        value_per_point_per_lot = spec.trade_tick_value / spec.point
         self._risk = RiskManager(
             risk_per_trade_usd=self.settings.risk_per_trade_usd,
             max_daily_loss_usd=self.settings.max_daily_loss_usd,
@@ -74,16 +80,28 @@ class TradingEngine:
             tp_levels=self.settings.tp_levels,
             value_per_point_per_lot=value_per_point_per_lot,
         )
+        self._spec = spec  # assign last: an exception above must leave state uninitialized
 
     def run_forever(self) -> None:
         self._ensure_initialized()
         logger.info("Engine started. dry_run=%s symbol=%s", self.settings.dry_run, self.settings.symbol)
+        self.db.log_event(ts=_now_iso(), level="INFO", message="Engine started")
+        consecutive_errors = 0
         while True:
             try:
                 self.step()
-            except Exception:
+                consecutive_errors = 0
+            except Exception as exc:
+                consecutive_errors += 1
                 logger.exception("Error in engine step, continuing after pause")
-                time.sleep(self.poll_seconds)
+                try:
+                    self.db.log_event(ts=_now_iso(), level="ERROR", message=f"{type(exc).__name__}: {exc}")
+                except Exception:
+                    logger.exception("Could not even log the error to the database")
+                # Back off harder after repeated failures (e.g. bridge down for a while)
+                # instead of hammering it every poll_seconds.
+                backoff = min(self.poll_seconds * min(consecutive_errors, 10), 60)
+                time.sleep(backoff)
                 continue
             time.sleep(self.poll_seconds)
 
