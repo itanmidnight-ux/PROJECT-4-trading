@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import itertools
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 from core.mt5_bridge_client import Mt5BridgeClient

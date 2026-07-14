@@ -6,7 +6,7 @@
 set -uo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$PROJECT_ROOT"
+cd "$PROJECT_ROOT" || exit 1
 
 PASS=0
 FAIL=0
@@ -44,9 +44,20 @@ if [ -f ".env" ]; then
     else
         warn "DRY_RUN=false: el motor mandara ORDENES REALES a la cuenta ${MT5_LOGIN:-?} (${MT5_SERVER:-?})"
     fi
+    if [ -n "${BRIDGE_AUTH_TOKEN:-}" ]; then
+        ok "BRIDGE_AUTH_TOKEN configurado (el bridge exige autenticacion)"
+    else
+        warn "BRIDGE_AUTH_TOKEN vacio - el bridge correra sin autenticacion (protegido solo por estar en 127.0.0.1). Corre ./install.sh para generarlo."
+    fi
     perms=$(stat -c '%a' .env 2>/dev/null || echo '?')
     if [ "$perms" != "600" ]; then
         warn ".env tiene permisos $perms (se recomienda 600: chmod 600 .env)"
+    fi
+    kill_switch="${KILL_SWITCH_PATH:-data/EMERGENCY_STOP}"
+    if [ -f "$PROJECT_ROOT/$kill_switch" ]; then
+        warn "El interruptor de emergencia esta ACTIVO ($kill_switch existe) - el motor no abrira operaciones. Corre ./emergency_stop.sh --clear para reanudar."
+    else
+        ok "Interruptor de emergencia inactivo ($kill_switch no existe)"
     fi
 else
     bad "no existe .env - corre ./install.sh"

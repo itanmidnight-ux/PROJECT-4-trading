@@ -104,6 +104,7 @@ manualmente y ajusta las rutas al inicio del script.
 ./run.sh --synthetic      # sin broker: precios simulados, solo para probar que todo corre
 ./run.sh --daemon          # igual, pero corre en segundo plano (usar ./stop.sh para pararlo)
 ./stop.sh                   # detiene una instancia arrancada con --daemon
+./emergency_stop.sh         # PARADA DE EMERGENCIA: cierra posiciones abiertas y detiene el motor ya
 
 .venv/bin/python dashboard.py     # abre el dashboard nativo (independiente del motor)
 
@@ -134,6 +135,29 @@ Para que arranque solo al iniciar el sistema (opcional, no se activa
 por defecto): hay una plantilla de servicio systemd de usuario en
 `scripts/xauusd-scalper.service.template` con instrucciones de instalacion
 en el propio archivo.
+
+### Parada de emergencia (interruptor manual)
+
+`stop.sh` requiere acceso por terminal a la maquina que corre el bot. Para
+cubrir el caso en que eso no este disponible (SSH caido, terminal
+inaccesible, querés que alguien mas pueda frenarlo), el motor revisa en
+cada ciclo si existe un archivo (`KILL_SWITCH_PATH` en `.env`, por defecto
+`data/EMERGENCY_STOP`). Si existe:
+
+1. Cierra a mercado cualquier posicion abierta inmediatamente (no espera
+   a que el SL/TP la alcance).
+2. Se detiene, y evita que `run.sh` lo reinicie solo (a diferencia de un
+   crash comun, que si se reintenta con backoff).
+
+```bash
+./emergency_stop.sh            # activa: cierra posiciones y detiene el motor
+./emergency_stop.sh --clear    # desactiva: borra el interruptor, listo para ./run.sh
+```
+
+Tambien alcanza con `touch data/EMERGENCY_STOP` desde cualquier cosa que
+pueda escribir al filesystem (no hace falta el script ni una sesion de
+shell interactiva). `scripts/doctor.sh` reporta si el interruptor esta
+activo.
 
 ### Antes de operar en real
 

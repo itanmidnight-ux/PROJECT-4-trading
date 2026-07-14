@@ -48,6 +48,7 @@ app = Flask(__name__)
 _lock = threading.RLock()
 _connected = False
 _last_credentials: dict | None = None  # kept in memory only, to allow auto re-login
+_expected_token: str | None = None  # set from --token; None means auth is disabled
 
 logger = logging.getLogger("mt5_bridge")
 
@@ -83,6 +84,25 @@ def synchronized(fn):
 def _err(message: str, code: int = 400):
     logger.warning("error %s: %s", code, message)
     return jsonify({"ok": False, "error": message}), code
+
+
+@app.before_request
+def _check_auth():
+    """
+    Defense in depth: this API can open/close real trades and log in with
+    real credentials, and binds to 127.0.0.1 by default - but a shared
+    token means a misconfiguration that widens that binding (--host
+    0.0.0.0, an unexpected Docker/WSL network path, a future change that
+    forgets why the default matters) doesn't also hand out unauthenticated
+    trade execution. /health is exempt (pure liveness, no account access)
+    so orchestration scripts can poll it without needing the token.
+    """
+    if _expected_token is None or request.path == "/health":
+        return None
+    supplied = request.headers.get("X-Bridge-Token")
+    if supplied != _expected_token:
+        return _err("unauthorized: missing or invalid X-Bridge-Token", 401)
+    return None
 
 
 def _try_reconnect() -> bool:
@@ -378,7 +398,19 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=5001)
     parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--token", default="", help="Shared secret required on every request "
+                         "(except /health) via the X-Bridge-Token header. Passed by run.sh from "
+                         "BRIDGE_AUTH_TOKEN in .env; leave unset only for local manual debugging.")
     args = parser.parse_args()
     _setup_logging()
-    logger.info("Starting MT5 bridge on %s:%s", args.host, args.port)
+    if args.token:
+        _expected_token = args.token
+    else:
+        logger.warning(
+            "No --token supplied: this bridge is running WITHOUT authentication. Fine for "
+            "manual debugging on 127.0.0.1, but install.sh normally generates BRIDGE_AUTH_TOKEN "
+            "and run.sh passes it automatically - if you're seeing this from run.sh, check .env."
+        )
+    logger.info("Starting MT5 bridge on %s:%s (auth %s)", args.host, args.port,
+                "enabled" if _expected_token else "DISABLED")
     app.run(host=args.host, port=args.port, threaded=True)

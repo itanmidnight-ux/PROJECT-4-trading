@@ -34,7 +34,7 @@ app = Flask(__name__, static_folder=None)
 
 
 def _row_to_dict(row) -> dict:
-    return {k: row[k] for k in row.keys()}
+    return {k: row[k] for k in row.keys()}  # sqlite3.Row isn't a dict; .keys() is required here
 
 
 @app.route("/")
