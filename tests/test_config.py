@@ -44,3 +44,19 @@ def test_poll_seconds_default_and_override(monkeypatch):
 def test_poll_seconds_is_floored_to_avoid_hammering_the_bridge(monkeypatch):
     monkeypatch.setenv("POLL_SECONDS", "0.01")
     assert load_settings().poll_seconds == 0.25
+
+
+def test_bridge_auth_token_defaults_blank_and_reads_from_env(monkeypatch):
+    monkeypatch.delenv("BRIDGE_AUTH_TOKEN", raising=False)
+    assert load_settings().bridge_auth_token == ""
+
+    monkeypatch.setenv("BRIDGE_AUTH_TOKEN", "abc123")
+    assert load_settings().bridge_auth_token == "abc123"
+
+
+def test_kill_switch_path_defaults_and_reads_from_env(monkeypatch):
+    monkeypatch.delenv("KILL_SWITCH_PATH", raising=False)
+    assert load_settings().kill_switch_path == "data/EMERGENCY_STOP"
+
+    monkeypatch.setenv("KILL_SWITCH_PATH", "/tmp/custom_stop")
+    assert load_settings().kill_switch_path == "/tmp/custom_stop"

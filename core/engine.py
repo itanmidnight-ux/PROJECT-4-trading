@@ -6,8 +6,9 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 
 from core.broker import BrokerExecutor, SimulatedBroker
 from core.config import Settings
@@ -18,6 +19,14 @@ from core.risk_manager import RiskManager
 from core.strategy import ScalpStrategy, TpLevel
 
 logger = logging.getLogger("engine")
+
+
+class EngineHalted(Exception):
+    """Raised out of step()/run_forever() when the manual kill switch file
+    is found. Deliberately a distinct exception (not a generic error path):
+    main.py catches it specifically to also stop run.sh's auto-restart, so
+    a manual stop actually stays stopped instead of respawning on the next
+    supervise() backoff."""
 
 
 @dataclass
@@ -116,6 +125,11 @@ class TradingEngine:
             try:
                 self.step()
                 consecutive_errors = 0
+            except EngineHalted:
+                # Deliberately not caught by the generic handler below: a
+                # manual stop must actually stop, not get treated as a
+                # transient error and retried after a backoff.
+                raise
             except Exception as exc:
                 consecutive_errors += 1
                 logger.exception("Error in engine step, continuing after pause")
@@ -147,6 +161,18 @@ class TradingEngine:
         account = self.broker.account()
         self.db.record_snapshot(ts=_now_iso(), balance=account.balance,
                                  equity=account.equity, free_margin=account.free_margin)
+
+        # Manual kill switch: checked every step, independent of run.sh/
+        # stop.sh process supervision, so it works even without terminal
+        # access to whatever machine is running the bot - e.g. `touch
+        # data/EMERGENCY_STOP` from anything that can write to the
+        # filesystem. Takes priority over the drawdown breaker below since
+        # it's an explicit operator decision, not a derived risk check.
+        if Path(self.settings.kill_switch_path).exists():
+            self._emergency_close_all_positions(
+                tick, f"interruptor de emergencia manual activado ({self.settings.kill_switch_path} existe)"
+            )
+            raise EngineHalted(f"Kill switch file present at {self.settings.kill_switch_path}")
 
         # Checked BEFORE normal TP/SL processing, using floating equity
         # (not just realized balance): a wide ATR-based stop can carry a
@@ -259,7 +285,6 @@ class TradingEngine:
                 logger.info("SL hit on %s, pnl=%.2f", pos.ticket, pnl)
                 continue
 
-            moved = False
             while pos.next_tp_index < len(pos.tp_levels):
                 level = pos.tp_levels[pos.next_tp_index]
                 target_price = pos.entry_price + direction * level.distance_price
@@ -283,7 +308,6 @@ class TradingEngine:
                 self._risk.register_trade_closed(pnl, account.balance)
                 logger.info("TP%d hit on %s, closed %.4f lot, pnl=%.2f", pos.next_tp_index + 1, pos.ticket, close_lot, pnl)
                 pos.next_tp_index += 1
-                moved = True
 
                 # After the first TP locks in profit, move the remainder to
                 # breakeven (so a reversal can't turn a winner into a loser)

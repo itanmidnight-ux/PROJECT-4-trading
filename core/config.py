@@ -68,6 +68,20 @@ class Settings:
     # the broker having produced a new one yet, not real extra speed.
     poll_seconds: float = 2.0
 
+    # Shared secret sent as X-Bridge-Token on every bridge request. Blank
+    # means the bridge is running without auth (see bridge/mt5_bridge_server.py) -
+    # install.sh generates one automatically; only expect this to be blank
+    # if .env was hand-written instead of created by install.sh.
+    bridge_auth_token: str = ""
+
+    # Manual kill switch: if this file exists, the engine force-closes any
+    # open position at market on its next poll and halts (see core/engine.py,
+    # main.py). Checked every step independent of run.sh/stop.sh, so it
+    # works even without terminal access to the machine running the bot -
+    # e.g. `touch data/EMERGENCY_STOP` from anything that can write to the
+    # filesystem (a synced folder, a cron job, a phone SSH app).
+    kill_switch_path: str = "data/EMERGENCY_STOP"
+
     # Strategy tuning - defaults match ScalpStrategy's own defaults, kept
     # here too so they show up in .env.example instead of only in code.
     strat_rsi_oversold: float = 25.0
@@ -115,4 +129,6 @@ def load_settings() -> Settings:
         strat_adx_period=_int("STRAT_ADX_PERIOD", 14),
         strat_trend_filter_adx_threshold=_float("STRAT_TREND_FILTER_ADX_THRESHOLD", 35.0),
         poll_seconds=max(_float("POLL_SECONDS", 2.0), 0.25),
+        bridge_auth_token=os.getenv("BRIDGE_AUTH_TOKEN", ""),
+        kill_switch_path=os.getenv("KILL_SWITCH_PATH", "data/EMERGENCY_STOP"),
     )
