@@ -7,7 +7,7 @@ from core.strategy import ScalpStrategy, compute_indicators
 def build_candles(closes: list[float]) -> pd.DataFrame:
     opens = [closes[0]] + closes[:-1]
     rows = []
-    for i, (o, c) in enumerate(zip(opens, closes)):
+    for i, (o, c) in enumerate(zip(opens, closes, strict=True)):
         rows.append({
             "time": 1_700_000_000 + i * 60,
             "open": o, "high": max(o, c), "low": min(o, c), "close": c,

@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from core.broker import BridgeBroker, SimulatedBroker  # noqa: E402
 from core.config import load_settings  # noqa: E402
 from core.database import Database  # noqa: E402
-from core.engine import TradingEngine  # noqa: E402
+from core.engine import EngineHalted, TradingEngine  # noqa: E402
 from core.market_data import BridgeMarketData, SyntheticMarketData  # noqa: E402
 from core.mt5_bridge_client import Mt5BridgeClient  # noqa: E402
 
@@ -60,7 +60,12 @@ def main() -> None:
                            volume_step=0.01, point=0.01, trade_tick_value=1.0)
         broker = SimulatedBroker(starting_balance=starting_balance, leverage=1, spec=spec)
     else:
-        client = Mt5BridgeClient(settings.bridge_url, settings.bridge_timeout_ms)
+        client = Mt5BridgeClient(settings.bridge_url, settings.bridge_timeout_ms,
+                                  auth_token=settings.bridge_auth_token)
+        if not settings.bridge_auth_token:
+            logger.warning("BRIDGE_AUTH_TOKEN is not set in .env - the bridge is running without "
+                            "authentication. Fine on a trusted single-user machine, but re-run "
+                            "install.sh (or set it by hand) to close that gap.")
         logger.info("Waiting for MT5 bridge at %s ...", settings.bridge_url)
         import time
         for _ in range(60):
@@ -98,7 +103,24 @@ def main() -> None:
             broker = BridgeBroker(client)
 
     engine = TradingEngine(settings, market_data, broker, db, poll_seconds=settings.poll_seconds)
-    engine.run_forever()
+    try:
+        engine.run_forever()
+    except EngineHalted as exc:
+        logger.critical("Motor detenido: %s", exc)
+        # run.sh's supervise() restarts main.py on ANY exit unless this
+        # exact file exists (see run.sh's STOP_FLAG) - without touching it
+        # here, a manual kill switch would just get respawned on the next
+        # backoff and immediately re-trigger, looping forever instead of
+        # actually stopping.
+        stop_flag = ROOT / "data" / "run" / "stop.flag"
+        stop_flag.parent.mkdir(parents=True, exist_ok=True)
+        stop_flag.touch()
+        logger.critical(
+            "Se creo %s para que run.sh no reinicie el motor. Para reanudar: borra el "
+            "interruptor de emergencia (%s) y %s, luego corre ./run.sh de nuevo.",
+            stop_flag, settings.kill_switch_path, stop_flag,
+        )
+        sys.exit(0)
 
 
 if __name__ == "__main__":
