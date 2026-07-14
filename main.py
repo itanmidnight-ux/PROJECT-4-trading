@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -17,6 +18,24 @@ from core.engine import TradingEngine  # noqa: E402
 from core.market_data import BridgeMarketData, SyntheticMarketData  # noqa: E402
 from core.mt5_bridge_client import Mt5BridgeClient  # noqa: E402
 
+ROOT = Path(__file__).resolve().parent
+
+
+def _setup_logging(level: str) -> None:
+    log_dir = ROOT / "data" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+    file_handler = RotatingFileHandler(log_dir / "engine.log", maxBytes=5_000_000, backupCount=5)
+    file_handler.setFormatter(fmt)
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(fmt)
+
+    root = logging.getLogger()
+    root.setLevel(level)
+    root.addHandler(file_handler)
+    root.addHandler(console_handler)
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="XAUUSD 1m scalper engine")
@@ -26,7 +45,7 @@ def main() -> None:
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
 
-    logging.basicConfig(level=args.log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    _setup_logging(args.log_level)
     logger = logging.getLogger("main")
 
     settings = load_settings()
@@ -56,7 +75,15 @@ def main() -> None:
             logger.error("MT5_LOGIN/MT5_PASSWORD missing in .env. Run install.sh or edit .env.")
             sys.exit(1)
 
-        client.login(settings.mt5_login, settings.mt5_password, settings.mt5_server)
+        from core.mt5_bridge_client import BridgeError
+        try:
+            client.login(settings.mt5_login, settings.mt5_password, settings.mt5_server)
+        except BridgeError as exc:
+            logger.error("Could not log in to MT5 (login=%s server=%s): %s",
+                         settings.mt5_login, settings.mt5_server, exc)
+            logger.error("Check MT5_LOGIN/MT5_PASSWORD/MT5_SERVER in .env - the password "
+                         "resets in 2 days on the demo account provided, this is a common cause.")
+            sys.exit(1)
         market_data = BridgeMarketData(client)
 
         if settings.dry_run:

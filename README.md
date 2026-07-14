@@ -84,14 +84,33 @@ manualmente y ajusta las rutas al inicio del script.
 ## Uso
 
 ```bash
-./run.sh                 # arranca el bridge MT5 + el motor, usando .env
+./run.sh                 # arranca el bridge MT5 + el motor, usando .env (foreground)
 ./run.sh --synthetic      # sin broker: precios simulados, solo para probar que todo corre
+./run.sh --daemon          # igual, pero corre en segundo plano (usar ./stop.sh para pararlo)
+./stop.sh                   # detiene una instancia arrancada con --daemon
 
 .venv/bin/python dashboard.py     # abre el dashboard nativo (independiente del motor)
 
 .venv/bin/python scripts/run_backtest.py                 # backtest con datos sinteticos (solo prueba de humo)
 .venv/bin/python scripts/run_backtest.py --csv hist.csv    # backtest con historial real exportado del bridge
+
+./scripts/verify.sh       # compila todo, corre los tests y una prueba de humo del motor
 ```
+
+### Resiliencia
+
+`run.sh` supervisa tanto el bridge MT5 como el motor: si cualquiera de los
+dos se cae (crash de Wine, excepcion no manejada, perdida de conexion),
+se reinicia solo con backoff exponencial (2s, 4s, 8s... hasta 60s) en vez
+de tirar todo el sistema abajo. El cliente del bridge tambien reintenta
+llamadas individuales y vuelve a loguearse solo si la sesion de MT5 se
+cae sin que el proceso del bridge muera. Los logs quedan en `data/logs/`
+(rotan automaticamente, no crecen sin limite).
+
+Para que arranque solo al iniciar el sistema (opcional, no se activa
+por defecto): hay una plantilla de servicio systemd de usuario en
+`scripts/xauusd-scalper.service.template` con instrucciones de instalacion
+en el propio archivo.
 
 ### Antes de operar en real
 

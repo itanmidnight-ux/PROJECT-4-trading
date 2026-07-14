@@ -11,6 +11,12 @@ core/mt5_bridge_client.py. That split is what lets the trading logic,
 dashboard, and risk manager run in ordinary Linux Python while still
 reaching a real MT5 account.
 
+The MetaTrader5 package is NOT thread-safe, so every endpoint that
+touches it runs under a single global lock (@synchronized below) even
+though Flask serves requests on multiple threads - that keeps /health
+responsive while an order or history call is in flight, without ever
+letting two mt5.* calls race each other.
+
 Run manually for debugging:
     wine python.exe bridge/mt5_bridge_server.py --port 5001
 (run.sh does this for you.)
@@ -18,9 +24,12 @@ Run manually for debugging:
 from __future__ import annotations
 
 import argparse
+import functools
+import logging
 import sys
 import threading
-import time
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 from flask import Flask, jsonify, request
 
@@ -36,8 +45,11 @@ except ImportError:
     raise
 
 app = Flask(__name__)
-_lock = threading.Lock()
+_lock = threading.RLock()
 _connected = False
+_last_credentials: dict | None = None  # kept in memory only, to allow auto re-login
+
+logger = logging.getLogger("mt5_bridge")
 
 TIMEFRAME_MAP = {
     "M1": mt5.TIMEFRAME_M1,
@@ -47,8 +59,50 @@ TIMEFRAME_MAP = {
 }
 
 
+def _setup_logging() -> None:
+    log_dir = Path(__file__).resolve().parent.parent / "data" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    handler = RotatingFileHandler(log_dir / "bridge.log", maxBytes=5_000_000, backupCount=5)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    logger.addHandler(handler)
+    console = logging.StreamHandler()
+    console.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    logger.addHandler(console)
+    logger.setLevel(logging.INFO)
+
+
+def synchronized(fn):
+    """Serializes access to the MetaTrader5 API across Flask's request threads."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with _lock:
+            return fn(*args, **kwargs)
+    return wrapper
+
+
 def _err(message: str, code: int = 400):
+    logger.warning("error %s: %s", code, message)
     return jsonify({"ok": False, "error": message}), code
+
+
+def _try_reconnect() -> bool:
+    """Best-effort silent re-login after a dropped connection, using the
+    credentials from the last successful /login call. Returns True if the
+    connection is (now) usable."""
+    global _connected
+    if _last_credentials is None:
+        return False
+    logger.warning("Connection appears down, attempting silent reconnect...")
+    if not mt5.initialize():
+        logger.error("reconnect: mt5.initialize() failed: %s", mt5.last_error())
+        return False
+    ok = mt5.login(**_last_credentials)
+    _connected = bool(ok)
+    if ok:
+        logger.info("Reconnected successfully.")
+    else:
+        logger.error("reconnect: mt5.login() failed: %s", mt5.last_error())
+    return _connected
 
 
 @app.route("/health")
@@ -57,28 +111,33 @@ def health():
 
 
 @app.route("/login", methods=["POST"])
+@synchronized
 def login():
-    global _connected
+    global _connected, _last_credentials
     data = request.get_json(force=True)
     login_id = int(data["login"])
     password = data["password"]
     server = data["server"]
 
-    with _lock:
-        if not mt5.initialize():
-            return _err(f"mt5.initialize() failed: {mt5.last_error()}", 500)
-        ok = mt5.login(login_id, password=password, server=server)
-        if not ok:
-            return _err(f"mt5.login() failed: {mt5.last_error()}", 401)
-        _connected = True
+    if not mt5.initialize():
+        return _err(f"mt5.initialize() failed: {mt5.last_error()}", 500)
+    ok = mt5.login(login_id, password=password, server=server)
+    if not ok:
+        return _err(f"mt5.login() failed: {mt5.last_error()}", 401)
+    _connected = True
+    _last_credentials = {"login": login_id, "password": password, "server": server}
+    logger.info("Logged in to %s on %s", login_id, server)
     return jsonify({"ok": True})
 
 
 @app.route("/account")
+@synchronized
 def account():
-    if not _connected:
+    if not _connected and not _try_reconnect():
         return _err("not logged in", 409)
     info = mt5.account_info()
+    if info is None and _try_reconnect():
+        info = mt5.account_info()
     if info is None:
         return _err(f"account_info() failed: {mt5.last_error()}", 500)
     return jsonify({
@@ -93,6 +152,7 @@ def account():
 
 
 @app.route("/symbol/<symbol>")
+@synchronized
 def symbol_info(symbol: str):
     if not mt5.symbol_select(symbol, True):
         return _err(f"symbol_select({symbol}) failed: {mt5.last_error()}", 404)
@@ -114,6 +174,7 @@ def symbol_info(symbol: str):
 
 
 @app.route("/price/<symbol>")
+@synchronized
 def price(symbol: str):
     tick = mt5.symbol_info_tick(symbol)
     if tick is None:
@@ -128,6 +189,7 @@ def price(symbol: str):
 
 
 @app.route("/candles/<symbol>")
+@synchronized
 def candles(symbol: str):
     tf = request.args.get("timeframe", "M1")
     count = int(request.args.get("count", 200))
@@ -152,6 +214,7 @@ def candles(symbol: str):
 
 
 @app.route("/positions")
+@synchronized
 def positions():
     symbol = request.args.get("symbol")
     pos = mt5.positions_get(symbol=symbol) if symbol else mt5.positions_get()
@@ -177,6 +240,7 @@ def positions():
 
 
 @app.route("/order/open", methods=["POST"])
+@synchronized
 def order_open():
     data = request.get_json(force=True)
     symbol = data["symbol"]
@@ -211,6 +275,7 @@ def order_open():
         code = result.retcode if result else mt5.last_error()
         return _err(f"order_send failed: {code}", 500)
 
+    logger.info("OPEN %s %.4f %s @ %.3f", side, lot, symbol, result.price)
     return jsonify({
         "ok": True,
         "ticket": result.order,
@@ -220,6 +285,7 @@ def order_open():
 
 
 @app.route("/order/close", methods=["POST"])
+@synchronized
 def order_close():
     """Closes `lot` volume of an existing position (partial close support
     for the multi-scale take-profit ladder)."""
@@ -234,6 +300,8 @@ def order_close():
 
     close_type = mt5.ORDER_TYPE_SELL if p.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
     tick = mt5.symbol_info_tick(p.symbol)
+    if tick is None:
+        return _err(f"no tick for {p.symbol}", 404)
     price = tick.bid if close_type == mt5.ORDER_TYPE_SELL else tick.ask
 
     request_dict = {
@@ -254,6 +322,7 @@ def order_close():
         code = result.retcode if result else mt5.last_error()
         return _err(f"order_send (close) failed: {code}", 500)
 
+    logger.info("CLOSE %.4f of ticket %s @ %.3f", result.volume, ticket, result.price)
     return jsonify({
         "ok": True,
         "price": result.price,
@@ -262,6 +331,7 @@ def order_close():
 
 
 @app.route("/order/modify", methods=["POST"])
+@synchronized
 def order_modify():
     """Move SL (used to push a position to breakeven after TP1 hits)."""
     data = request.get_json(force=True)
@@ -292,4 +362,6 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=5001)
     parser.add_argument("--host", default="127.0.0.1")
     args = parser.parse_args()
+    _setup_logging()
+    logger.info("Starting MT5 bridge on %s:%s", args.host, args.port)
     app.run(host=args.host, port=args.port, threaded=True)

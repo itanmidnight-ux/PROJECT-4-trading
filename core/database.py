@@ -74,7 +74,12 @@ class Database:
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.db_path)
+        # WAL + a busy timeout let the engine (writer) and the dashboard
+        # (reader, polling every few seconds) hit the same file concurrently
+        # without "database is locked" errors, even at high trade volume.
+        conn = sqlite3.connect(self.db_path, timeout=5.0)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
         conn.row_factory = sqlite3.Row
         try:
             yield conn
@@ -126,6 +131,12 @@ class Database:
         with self._connect() as conn:
             return conn.execute(
                 "SELECT * FROM trades ORDER BY opened_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+
+    def recent_events(self, limit: int = 50) -> list[sqlite3.Row]:
+        with self._connect() as conn:
+            return conn.execute(
+                "SELECT * FROM engine_events ORDER BY id DESC LIMIT ?", (limit,)
             ).fetchall()
 
     def pnl_by_day(self, days: int = 30) -> list[sqlite3.Row]:
