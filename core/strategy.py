@@ -50,7 +50,8 @@ class Signal:
 
 
 def compute_indicators(df: pd.DataFrame, bb_period: int = 20, bb_std: float = 2.0,
-                        rsi_period: int = 7, atr_period: int = 14) -> pd.DataFrame:
+                        rsi_period: int = 7, atr_period: int = 14,
+                        adx_period: int = 14) -> pd.DataFrame:
     """df must have columns: open, high, low, close (oldest -> newest)."""
     out = df.copy()
 
@@ -77,6 +78,23 @@ def compute_indicators(df: pd.DataFrame, bb_period: int = 20, bb_std: float = 2.
     ], axis=1).max(axis=1)
     out["atr"] = tr.ewm(alpha=1 / atr_period, min_periods=atr_period, adjust=False).mean()
 
+    # ADX (Wilder): measures trend STRENGTH regardless of direction, used
+    # to keep the mean-reversion signal out of strong trends instead of
+    # repeatedly fading them - see the module docstring for why that
+    # matters (it's what caused the account-blowing loss sequence found in
+    # backtesting before this filter existed).
+    up_move = out["high"].diff()
+    down_move = -out["low"].diff()
+    plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=out.index)
+    minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=out.index)
+    tr_smoothed = tr.ewm(alpha=1 / adx_period, min_periods=adx_period, adjust=False).mean()
+    plus_dm_smoothed = plus_dm.ewm(alpha=1 / adx_period, min_periods=adx_period, adjust=False).mean()
+    minus_dm_smoothed = minus_dm.ewm(alpha=1 / adx_period, min_periods=adx_period, adjust=False).mean()
+    plus_di = 100 * (plus_dm_smoothed / tr_smoothed.replace(0, np.nan))
+    minus_di = 100 * (minus_dm_smoothed / tr_smoothed.replace(0, np.nan))
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
+    out["adx"] = dx.ewm(alpha=1 / adx_period, min_periods=adx_period, adjust=False).mean().fillna(0)
+
     return out
 
 
@@ -96,6 +114,8 @@ class ScalpStrategy:
         bb_std: float = 2.0,
         rsi_period: int = 7,
         atr_period: int = 14,
+        adx_period: int = 14,
+        trend_filter_adx_threshold: float = 35.0,
     ) -> None:
         self.min_tp_usd = min_tp_usd
         self.tp_levels = max(1, tp_levels)
@@ -110,10 +130,12 @@ class ScalpStrategy:
         self.bb_std = bb_std
         self.rsi_period = rsi_period
         self.atr_period = atr_period
+        self.adx_period = adx_period
+        self.trend_filter_adx_threshold = trend_filter_adx_threshold
         self._bars_since_last_trade = cooldown_bars
         # compute_indicators needs at least this many bars to warm up its
         # slowest rolling window (Bollinger); generate_signal enforces it.
-        self._warmup_bars = max(bb_period, rsi_period, atr_period) + 5
+        self._warmup_bars = max(bb_period, rsi_period, atr_period, adx_period) + 5
 
     def on_bar_closed(self) -> None:
         self._bars_since_last_trade += 1
@@ -155,10 +177,11 @@ class ScalpStrategy:
             return Signal(side=None, reason="not enough history")
 
         ind = compute_indicators(df, bb_period=self.bb_period, bb_std=self.bb_std,
-                                  rsi_period=self.rsi_period, atr_period=self.atr_period)
+                                  rsi_period=self.rsi_period, atr_period=self.atr_period,
+                                  adx_period=self.adx_period)
         last = ind.iloc[-1]
 
-        if any(pd.isna(last[c]) for c in ("bb_upper", "bb_lower", "rsi", "atr")):
+        if any(pd.isna(last[c]) for c in ("bb_upper", "bb_lower", "rsi", "atr", "adx")):
             return Signal(side=None, reason="indicators warming up")
 
         if spread_price > self.max_spread_price:
@@ -166,6 +189,9 @@ class ScalpStrategy:
 
         if last["atr"] < self.min_atr_price:
             return Signal(side=None, reason="volatility too low for target to clear spread")
+
+        if last["adx"] >= self.trend_filter_adx_threshold:
+            return Signal(side=None, reason=f"strong trend (ADX {last['adx']:.1f}), skipping mean-reversion")
 
         close = last["close"]
         side: Optional[Side] = None

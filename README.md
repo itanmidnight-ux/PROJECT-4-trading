@@ -196,18 +196,50 @@ real del oro con un lote de 0.01) - subiendo el riesgo por operacion a
 $2-5 habilita mas trades pero **el resultado siguio siendo negativo en
 todos los niveles probados** (-$5.48 a $2, -$7.80 a $3, -$9.97 a $5).
 
-**Conclusion honesta:** la combinacion actual de señal (Bollinger+RSI en
-1m) y gestion de stops **no muestra una ventaja real** sobre esta muestra
-de datos reales, mas alla de la correccion de bugs de seguridad que si
-son mejoras genuinas y quedan en el codigo. El objetivo original del
+**Conclusion de la Ronda 2:** la combinacion actual de señal (Bollinger+RSI
+en 1m) y gestion de stops **no muestra una ventaja real** sobre esta
+muestra de datos reales, mas alla de la correccion de bugs de seguridad
+que si son mejoras genuinas y quedan en el codigo. El trabajo pendiente
+que quedo anotado: agregar un filtro de tendencia para no operar reversion
+a la media en contra de un movimiento fuerte - exactamente lo que produjo
+la secuencia de perdidas de la Ronda 2.
+
+**Ronda 3: se agrego el filtro de tendencia (ADX) y se lo puso a prueba
+con el mismo rigor.** `core/strategy.py` ahora calcula ADX(14) y descarta
+cualquier señal de reversion a la media si ADX >= 35 (umbral estandar de
+"tendencia fuerte" en analisis tecnico, no ajustado a este dataset). Con
+el filtro fijo en su umbral por defecto, sobre los mismos 8 dias reales
+(risk-usd=$3, split 60/40): TRAIN -$0.42 (6 operaciones, 83.3% ganadas),
+TEST -$4.74 (5 operaciones, 60% ganadas, 13.2% drawdown maximo). Sin el
+filtro (umbral 99, efectivamente desactivado), el mismo split: TRAIN
++$0.38 (7 operaciones), TEST **-$8.19 (7 operaciones, 21.1% drawdown
+maximo)**. El filtro reduce la perdida y el drawdown fuera de muestra de
+forma clara - hace exactamente lo que se diseño para hacer (evitar las
+peores operaciones, las que pelean contra una tendencia confirmada) - pero
+**no convierte la estrategia en ganadora**.
+
+Se probaron tambien umbrales de ADX mas ajustados (15-22) buscando un
+resultado positivo: en el tramo de entrenamiento llegaron a mostrar 100%
+de aciertos, pero eso fue sobre 3 a 6 operaciones - una muestra demasiado
+chica para significar nada - y en el tramo de prueba la mayoria no genero
+ninguna operacion o perdio la unica que hizo. Se descarto ese resultado
+en vez de reportarlo como un hallazgo: es la misma trampa de sobreajuste
+que ya aparecio en la Ronda 1, esta vez mas facil de detectar porque el
+conteo de operaciones era demasiado bajo para tomarlo en serio.
+
+**Conclusion honesta acumulada (Rondas 1-3):** el objetivo original del
 proyecto (miles de operaciones diarias con ganancias altas y perdidas
-minimas) sigue sin ser alcanzable con esta estrategia - el trabajo
-pendiente real seria explorar una señal distinta (con filtro de tendencia,
-por ejemplo, para no operar reversion a la media en contra de un
-movimiento fuerte) y volver a repetir exactamente este proceso de
-validacion antes de confiar en cualquier numero. Antes de operar en real:
-repeti este proceso con historial real de FBS (exportado del bridge una
-vez conectado), con al menos varias semanas de datos, no solo unos dias.
+minimas) sigue sin ser alcanzable con esta estrategia sobre gold real.
+Lo que si son mejoras genuinas y quedan en el codigo: los tres bugs de
+seguridad corregidos (deteccion de cruces intra-vela, clasificacion de
+ganada/perdida, tope de riesgo del lote minimo) y el filtro de tendencia,
+que reduce la severidad de las perdidas sin prometer rentabilidad. El
+trabajo pendiente real para encontrar una ventaja genuina necesitaria
+mucho mas historial (semanas a meses, no dias) del feed real de FBS -
+con la cantidad de datos disponible en este entorno, cualquier resultado
+mas optimista que este seria, con alta probabilidad, ruido estadistico
+maquillado de señal. Antes de operar en real: repeti este proceso con
+historial real de FBS (exportado del bridge una vez conectado).
 
 ## Credenciales
 
