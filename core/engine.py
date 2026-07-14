@@ -38,6 +38,10 @@ def _now_iso() -> str:
 
 
 class TradingEngine:
+    # No new tick time for this long => assume the market is closed
+    # (weekend/holiday) rather than a strategy signal worth chasing.
+    STALE_AFTER_SECONDS = 180
+
     def __init__(
         self,
         settings: Settings,
@@ -57,6 +61,10 @@ class TradingEngine:
         self._strategy: ScalpStrategy | None = None
         self._spec = None
         self._last_bar_time: int | None = None
+        self._reconciled = False
+        self._last_seen_tick_time: int | None = None
+        self._last_tick_change_wallclock: float | None = None
+        self._stale_warned = False
 
     def _ensure_initialized(self) -> None:
         if self._spec is not None:
@@ -79,6 +87,16 @@ class TradingEngine:
             min_tp_usd=self.settings.min_tp_usd,
             tp_levels=self.settings.tp_levels,
             value_per_point_per_lot=value_per_point_per_lot,
+            rsi_oversold=self.settings.strat_rsi_oversold,
+            rsi_overbought=self.settings.strat_rsi_overbought,
+            max_spread_price=self.settings.strat_max_spread_price,
+            min_atr_price=self.settings.strat_min_atr_price,
+            sl_atr_multiple=self.settings.strat_sl_atr_multiple,
+            cooldown_bars=self.settings.strat_cooldown_bars,
+            bb_period=self.settings.strat_bb_period,
+            bb_std=self.settings.strat_bb_std,
+            rsi_period=self.settings.strat_rsi_period,
+            atr_period=self.settings.strat_atr_period,
         )
         self._spec = spec  # assign last: an exception above must leave state uninitialized
 
@@ -107,6 +125,11 @@ class TradingEngine:
 
     def step(self) -> None:
         self._ensure_initialized()
+
+        if not self._reconciled:
+            self._reconcile_open_positions()
+            self._reconciled = True
+
         state = self.market_data.get_state(self.settings.symbol, self.settings.timeframe, 200)
         tick = state.tick
         mid_price = (tick.bid + tick.ask) / 2
@@ -118,7 +141,10 @@ class TradingEngine:
         self.db.record_snapshot(ts=_now_iso(), balance=account.balance,
                                  equity=account.equity, free_margin=account.free_margin)
 
-        self._manage_open_positions(tick.bid, tick.ask)
+        self._manage_open_positions(tick.bid, tick.ask)  # always: protect any open position first
+
+        if self._is_market_stale(tick.time):
+            return  # market likely closed (weekend/holiday) - don't attempt new signals on dead data
 
         candles = state.candles
         is_new_bar = not candles.empty and (self._last_bar_time != int(candles.iloc[-1]["time"]))
@@ -221,3 +247,88 @@ class TradingEngine:
                 still_open.append(pos)
 
         self._open_positions = still_open
+
+    def _reconcile_open_positions(self) -> None:
+        """
+        Runs once, on the first step() after startup. Auto-restart means a
+        crash mid-trade can leave a position open at the broker with no
+        in-memory ManagedPosition tracking it - this adopts any such
+        position instead of silently abandoning it to whatever SL it had
+        (or didn't have) at open time.
+
+        Best-effort by nature: we don't know how much of the original TP
+        ladder already fired before the crash, so the ladder is rebuilt
+        fresh from the current price. That's not identical to the original
+        plan, but it's a real risk-managed position instead of an orphan.
+        """
+        try:
+            broker_positions = self.broker.open_positions(self.settings.symbol)
+        except Exception:
+            logger.exception("Could not check for pre-existing open positions on startup")
+            return
+        if not broker_positions:
+            return
+
+        try:
+            state = self.market_data.get_state(self.settings.symbol, self.settings.timeframe, 5)
+            spread_price = state.tick.spread_price
+        except Exception:
+            spread_price = 0.3  # conservative guess if even a price read fails right now
+
+        for bp in broker_positions:
+            sl_price = bp.sl
+            if not sl_price:
+                fallback_distance = max(spread_price * 5, self._strategy.min_tp_distance_for_lot(bp.volume) * 3)
+                sl_price = (bp.price_open - fallback_distance if bp.side == "BUY"
+                            else bp.price_open + fallback_distance)
+                try:
+                    self.broker.modify_sl(bp.ticket, sl_price)
+                except Exception:
+                    logger.exception("Could not set a fallback SL on recovered position %s", bp.ticket)
+
+            tp_levels = self._strategy.build_tp_ladder(bp.volume, spread_price)
+            trade_id = self.db.open_trade(
+                ticket=bp.ticket, symbol=self.settings.symbol, side=bp.side, lot=bp.volume,
+                entry_price=bp.price_open, sl_price=sl_price, opened_at=_now_iso(),
+                dry_run=self.settings.dry_run,
+            )
+            self._open_positions.append(ManagedPosition(
+                trade_id=trade_id, ticket=bp.ticket, side=bp.side, entry_price=bp.price_open,
+                original_lot=bp.volume, remaining_lot=bp.volume, sl_price=sl_price, tp_levels=tp_levels,
+            ))
+            message = (
+                f"Posicion recuperada tras reinicio: {bp.side} {bp.volume} lote @ {bp.price_open:.3f} "
+                f"(ticket {bp.ticket}). Escalera de TP reconstruida desde el precio actual, "
+                "puede no coincidir exactamente con el plan original."
+            )
+            logger.warning(message)
+            self.db.log_event(ts=_now_iso(), level="WARN", message=message)
+
+    def _is_market_stale(self, tick_time: int) -> bool:
+        now = time.time()
+        if self._last_seen_tick_time != tick_time:
+            self._last_seen_tick_time = tick_time
+            self._last_tick_change_wallclock = now
+            if self._stale_warned:
+                logger.info("Market data is moving again.")
+                self.db.log_event(ts=_now_iso(), level="INFO", message="Datos de mercado activos de nuevo")
+                self._stale_warned = False
+            return False
+
+        if self._last_tick_change_wallclock is None:
+            self._last_tick_change_wallclock = now
+            return False
+
+        stale_for = now - self._last_tick_change_wallclock
+        if stale_for >= self.STALE_AFTER_SECONDS:
+            if not self._stale_warned:
+                message = (
+                    f"Sin ticks nuevos hace {int(stale_for)}s en {self.settings.symbol} - "
+                    "mercado probablemente cerrado (fin de semana/feriado). Pausando nuevas señales "
+                    "hasta que vuelva a moverse el precio; las posiciones abiertas se siguen protegiendo."
+                )
+                logger.warning(message)
+                self.db.log_event(ts=_now_iso(), level="WARN", message=message)
+                self._stale_warned = True
+            return True
+        return False
