@@ -6,6 +6,8 @@ strategy -> risk_manager -> broker -> database), just with prices we
 control, so trade outcomes are asserted precisely instead of "did not
 crash".
 """
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from core.broker import SimulatedBroker
@@ -209,6 +211,38 @@ def test_market_stale_detection_pauses_signals_but_keeps_protecting_positions(tm
     assert engine._is_market_stale(tick_time=456) is False  # ticks resumed
     events = db.recent_events(limit=5)
     assert any("de nuevo" in e["message"].lower() for e in events)
+
+
+def test_prune_old_snapshots_is_throttled_to_once_per_check_interval(tmp_path, monkeypatch):
+    """account_snapshots is written every poll, so pruning must NOT run a
+    DELETE on every step - only after PRUNE_CHECK_INTERVAL_SECONDS of wall
+    clock time has actually passed."""
+    entry_state, _ = oversold_entry_state()
+    market_data = ScriptedMarketData([entry_state])
+    broker = SimulatedBroker(starting_balance=50_000.0, leverage=100, spec=SPEC)
+    db = Database(str(tmp_path / "engine_prune.db"))
+    engine = TradingEngine(make_settings(snapshot_retention_days=30), market_data, broker, db, poll_seconds=0)
+    engine._ensure_initialized()
+
+    old_ts = (datetime.now(timezone.utc) - timedelta(days=45)).isoformat()
+    db.record_snapshot(ts=old_ts, balance=50.0, equity=50.0, free_margin=50.0)
+
+    # _last_prune_wallclock starts at 0.0, so the fake clock must already be
+    # past the check interval for the first call to actually run the prune.
+    fake_time = [TradingEngine.PRUNE_CHECK_INTERVAL_SECONDS + 1.0]
+    monkeypatch.setattr("core.engine.time.time", lambda: fake_time[0])
+
+    engine._maybe_prune_old_snapshots()  # first call: past the interval since wallclock 0, runs
+    assert len(db.equity_curve(limit=10)) == 0, "the old snapshot should have been pruned"
+
+    db.record_snapshot(ts=old_ts, balance=50.0, equity=50.0, free_margin=50.0)
+    fake_time[0] += 10  # well under the hourly check interval
+    engine._maybe_prune_old_snapshots()
+    assert len(db.equity_curve(limit=10)) == 1, "throttled: must not have pruned again yet"
+
+    fake_time[0] += TradingEngine.PRUNE_CHECK_INTERVAL_SECONDS
+    engine._maybe_prune_old_snapshots()
+    assert len(db.equity_curve(limit=10)) == 0, "interval elapsed: should prune again"
 
 
 def test_engine_only_holds_one_position_at_a_time(tmp_path):

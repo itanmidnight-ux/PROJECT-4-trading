@@ -89,3 +89,32 @@ def test_snapshots_and_events_roundtrip(tmp_path):
     assert curve[0]["equity"] == 50.2
     assert len(events) == 1
     assert events[0]["level"] == "WARN"
+
+
+def test_prune_old_snapshots_deletes_only_rows_past_retention(tmp_path):
+    """account_snapshots gets a row every engine poll (unlike trades/events,
+    which only grow with real activity) - unbounded on a long-running
+    deployment unless something prunes it. Old rows go, recent ones stay."""
+    db = make_db(tmp_path)
+    old_ts = (datetime.now(timezone.utc) - timedelta(days=45)).isoformat()
+    recent_ts = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    db.record_snapshot(ts=old_ts, balance=50.0, equity=50.0, free_margin=50.0)
+    db.record_snapshot(ts=recent_ts, balance=51.0, equity=51.0, free_margin=51.0)
+
+    deleted = db.prune_old_snapshots(keep_days=30)
+
+    assert deleted == 1
+    remaining = db.equity_curve(limit=10)
+    assert len(remaining) == 1
+    assert remaining[0]["ts"] == recent_ts
+
+
+def test_prune_old_snapshots_is_a_noop_when_nothing_is_old_enough(tmp_path):
+    db = make_db(tmp_path)
+    now = datetime.now(timezone.utc).isoformat()
+    db.record_snapshot(ts=now, balance=50.0, equity=50.0, free_margin=50.0)
+
+    deleted = db.prune_old_snapshots(keep_days=30)
+
+    assert deleted == 0
+    assert len(db.equity_curve(limit=10)) == 1

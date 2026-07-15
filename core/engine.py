@@ -56,6 +56,12 @@ class TradingEngine:
     # (weekend/holiday) rather than a strategy signal worth chasing.
     STALE_AFTER_SECONDS = 180
 
+    # How often to check whether old account_snapshots rows need pruning.
+    # This is a wall-clock gate around a DELETE, not the retention window
+    # itself (settings.snapshot_retention_days) - hourly is frequent enough
+    # to keep the table bounded without adding a DELETE to every poll.
+    PRUNE_CHECK_INTERVAL_SECONDS = 3600
+
     def __init__(
         self,
         settings: Settings,
@@ -79,6 +85,7 @@ class TradingEngine:
         self._last_seen_tick_time: int | None = None
         self._last_tick_change_wallclock: float | None = None
         self._stale_warned = False
+        self._last_prune_wallclock: float = 0.0
 
     def _ensure_initialized(self) -> None:
         if self._spec is not None:
@@ -150,6 +157,8 @@ class TradingEngine:
         if not self._reconciled:
             self._reconcile_open_positions()
             self._reconciled = True
+
+        self._maybe_prune_old_snapshots()
 
         state = self.market_data.get_state(self.settings.symbol, self.settings.timeframe, 200)
         tick = state.tick
@@ -438,3 +447,17 @@ class TradingEngine:
                 self._stale_warned = True
             return True
         return False
+
+    def _maybe_prune_old_snapshots(self) -> None:
+        now = time.time()
+        if now - self._last_prune_wallclock < self.PRUNE_CHECK_INTERVAL_SECONDS:
+            return
+        self._last_prune_wallclock = now
+        try:
+            deleted = self.db.prune_old_snapshots(keep_days=self.settings.snapshot_retention_days)
+        except Exception:
+            logger.exception("Could not prune old account snapshots (continuing)")
+            return
+        if deleted:
+            logger.info("Pruned %d account snapshot rows older than %d days",
+                        deleted, self.settings.snapshot_retention_days)
