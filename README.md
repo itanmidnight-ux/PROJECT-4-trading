@@ -139,6 +139,20 @@ cae sin que el proceso del bridge muera. Los logs quedan en `data/logs/`
 limite: el motor borra filas mas viejas que `SNAPSHOT_RETENTION_DAYS`
 (30 dias por defecto) en un chequeo cada una hora.
 
+**Un cierre de posicion (SL, TP, cierre de emergencia) que falla a nivel
+de red nunca deja una posicion fantasma bloqueando el motor.** Antes de
+esto, si `close_partial` fallaba justo cuando la orden ya habia llegado al
+broker (la orden se ejecuto pero la respuesta HTTP se perdio), el motor
+seguia creyendo que la posicion estaba abierta para siempre: cada paso
+intentaba cerrarla de nuevo, el broker respondia "no encontrada", y - como
+el motor solo sostiene una posicion a la vez - eso bloqueaba cualquier
+operacion nueva hasta un reinicio manual. Ahora, ante un fallo de cierre,
+el motor primero revisa si el broker todavia tiene esa posicion: si la
+tiene, la deja para reintentar en el proximo paso (fallo real, sin
+cambios); si no la tiene, la reconcilia como cerrada con PnL marcado
+explicitamente como no confirmado y sigue operando en vez de quedar
+trabado.
+
 Para que arranque solo al iniciar el sistema (opcional, no se activa
 por defecto): hay una plantilla de servicio systemd de usuario en
 `scripts/xauusd-scalper.service.template` con instrucciones de instalacion
