@@ -82,6 +82,12 @@ class Settings:
     # filesystem (a synced folder, a cron job, a phone SSH app).
     kill_switch_path: str = "data/EMERGENCY_STOP"
 
+    # account_snapshots gets a row every engine poll with no natural cap
+    # (unlike trades/events, which only grow with real activity) - the
+    # engine prunes rows older than this on an hourly check so the DB
+    # doesn't grow unbounded on a long-running deployment.
+    snapshot_retention_days: int = 30
+
     # Strategy tuning - defaults match ScalpStrategy's own defaults, kept
     # here too so they show up in .env.example instead of only in code.
     strat_rsi_oversold: float = 25.0
@@ -116,6 +122,7 @@ def load_settings() -> Settings:
         tp_levels=_int("TP_LEVELS", 3),
         dry_run=_bool("DRY_RUN", True),
         db_path=os.getenv("DASHBOARD_DB_PATH", "data/trades.db"),
+        snapshot_retention_days=_int("SNAPSHOT_RETENTION_DAYS", 30),
         strat_rsi_oversold=_float("STRAT_RSI_OVERSOLD", 25.0),
         strat_rsi_overbought=_float("STRAT_RSI_OVERBOUGHT", 75.0),
         strat_max_spread_price=_float("STRAT_MAX_SPREAD_PRICE", 0.5),

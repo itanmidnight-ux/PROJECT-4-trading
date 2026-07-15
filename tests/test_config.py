@@ -60,3 +60,11 @@ def test_kill_switch_path_defaults_and_reads_from_env(monkeypatch):
 
     monkeypatch.setenv("KILL_SWITCH_PATH", "/tmp/custom_stop")
     assert load_settings().kill_switch_path == "/tmp/custom_stop"
+
+
+def test_snapshot_retention_days_defaults_and_reads_from_env(monkeypatch):
+    monkeypatch.delenv("SNAPSHOT_RETENTION_DAYS", raising=False)
+    assert load_settings().snapshot_retention_days == 30
+
+    monkeypatch.setenv("SNAPSHOT_RETENTION_DAYS", "7")
+    assert load_settings().snapshot_retention_days == 7
