@@ -168,6 +168,7 @@ chmod 600 "$PROJECT_ROOT/.env" 2>/dev/null || true
 
 # ------------------------------------------------------------ 5. done
 log "Step 5/5: sanity check"
+# shellcheck disable=SC1091
 source "$VENV_DIR/bin/activate"
 python3 -c "import pandas, numpy, flask, requests, dotenv, webview" && log "Linux dependencies import cleanly."
 deactivate
