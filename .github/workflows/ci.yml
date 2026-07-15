@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "claude/**"]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Create venv and install dependencies
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -r requirements.txt -r requirements-dev.txt
+
+      # scripts/verify.sh is the same script documented in the README for
+      # local use (compile check + pytest + a synthetic-mode engine smoke
+      # test + dashboard API check) - CI runs exactly that, not a separate
+      # parallel definition of "passing", so a green check here means the
+      # same thing ./scripts/verify.sh means locally. It needs no
+      # Wine/MT5/broker connection by design.
+      - name: Run scripts/verify.sh
+        run: ./scripts/verify.sh
+
+      - name: ruff (real-bug categories only)
+        run: |
+          .venv/bin/pip install -q ruff
+          .venv/bin/ruff check core/ bridge/ tests/ scripts/ main.py dashboard.py \
+            --select F,B,SIM,C4 --ignore SIM118
+
+      - name: shellcheck
+        run: shellcheck run.sh install.sh stop.sh emergency_stop.sh scripts/*.sh

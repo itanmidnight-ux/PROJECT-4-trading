@@ -70,7 +70,7 @@ if [ ! -f "$PROJECT_ROOT/.env" ]; then
     exit 1
 fi
 
-# shellcheck disable=SC1090
+# shellcheck disable=SC1091
 source "$VENV_DIR/bin/activate"
 
 # Kills whatever PID is recorded in a pidfile, if it's still alive. Used

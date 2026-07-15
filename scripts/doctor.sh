@@ -32,8 +32,10 @@ fi
 section "2. Configuracion (.env)"
 if [ -f ".env" ]; then
     ok ".env existe"
+    set -a
     # shellcheck disable=SC1091
-    set -a; source .env; set +a
+    source .env
+    set +a
     if [ -n "${MT5_LOGIN:-}" ] && [ -n "${MT5_PASSWORD:-}" ]; then
         ok "MT5_LOGIN y MT5_PASSWORD estan configurados"
     else
