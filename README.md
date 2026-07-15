@@ -121,6 +121,11 @@ terminal MT5, el python de Wine, credenciales en `.env`, el bridge
 corriendo, espacio en disco...) en vez de tener que adivinar o re-correr
 `install.sh` a ciegas.
 
+`.github/workflows/ci.yml` corre exactamente `scripts/verify.sh` (mismo
+script, no una definicion paralela de "pasa") mas `ruff` y `shellcheck` en
+cada push/PR - no necesita Wine ni un broker, asi que corre en cualquier
+runner de GitHub Actions estandar.
+
 ### Resiliencia
 
 `run.sh` supervisa tanto el bridge MT5 como el motor: si cualquiera de los
