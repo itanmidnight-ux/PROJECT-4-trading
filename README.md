@@ -134,7 +134,10 @@ se reinicia solo con backoff exponencial (2s, 4s, 8s... hasta 60s) en vez
 de tirar todo el sistema abajo. El cliente del bridge tambien reintenta
 llamadas individuales y vuelve a loguearse solo si la sesion de MT5 se
 cae sin que el proceso del bridge muera. Los logs quedan en `data/logs/`
-(rotan automaticamente, no crecen sin limite).
+(rotan automaticamente, no crecen sin limite). La tabla `account_snapshots`
+(una fila por cada poll del motor, no solo por operacion) tampoco crece sin
+limite: el motor borra filas mas viejas que `SNAPSHOT_RETENTION_DAYS`
+(30 dias por defecto) en un chequeo cada una hora.
 
 Para que arranque solo al iniciar el sistema (opcional, no se activa
 por defecto): hay una plantilla de servicio systemd de usuario en

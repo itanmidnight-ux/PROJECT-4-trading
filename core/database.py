@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator, Optional
 
@@ -125,6 +126,19 @@ class Database:
                 "INSERT INTO engine_events (ts, level, message) VALUES (?, ?, ?)",
                 (ts, level, message),
             )
+
+    def prune_old_snapshots(self, keep_days: int = 30) -> int:
+        """account_snapshots gets a row every engine poll (as often as every
+        0.25s) with no natural cap, unlike trades/events which only grow
+        with real activity - left alone this table grows unbounded on a
+        long-running deployment (millions of rows/month at the default poll
+        rate). ts is an ISO8601 UTC string, so a lexicographic comparison
+        against another ISO8601 cutoff is a correct chronological
+        comparison without needing to parse every row. Returns rows deleted."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=keep_days)).isoformat()
+        with self._connect() as conn:
+            cur = conn.execute("DELETE FROM account_snapshots WHERE ts < ?", (cutoff,))
+            return cur.rowcount
 
     # ---------------------------------------------------------------- read
     def recent_trades(self, limit: int = 100) -> list[sqlite3.Row]:
