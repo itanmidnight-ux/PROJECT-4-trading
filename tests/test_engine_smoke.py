@@ -51,10 +51,13 @@ class FlakyBroker(SimulatedBroker):
     happens for real before raising, so open_positions() no longer reports
     the ticket, exactly like a real "acknowledgement lost" scenario."""
 
-    def __init__(self, *args, fail_times: int = 1, broker_actually_closed: bool = False, **kwargs):
+    def __init__(self, *args, fail_times: int = 1, broker_actually_closed: bool = False,
+                 fail_open_times: int = 0, broker_actually_opened: bool = False, **kwargs):
         super().__init__(*args, **kwargs)
         self._fail_remaining = fail_times
         self._broker_actually_closed = broker_actually_closed
+        self._fail_open_remaining = fail_open_times
+        self._broker_actually_opened = broker_actually_opened
 
     def close_partial(self, ticket: str, lot: float, fill_price: float) -> float:
         if self._fail_remaining > 0:
@@ -63,6 +66,14 @@ class FlakyBroker(SimulatedBroker):
                 super().close_partial(ticket, lot, fill_price)
             raise RuntimeError("simulated bridge communication failure")
         return super().close_partial(ticket, lot, fill_price)
+
+    def open_order(self, symbol: str, side: str, lot: float, sl_price: float, fill_price: float):
+        if self._fail_open_remaining > 0:
+            self._fail_open_remaining -= 1
+            if self._broker_actually_opened:
+                super().open_order(symbol, side, lot, sl_price, fill_price)
+            raise RuntimeError("simulated bridge communication failure on open")
+        return super().open_order(symbol, side, lot, sl_price, fill_price)
 
 
 def make_settings(**overrides) -> Settings:
@@ -281,6 +292,47 @@ def test_emergency_close_failure_keeps_position_tracked_for_retry(tmp_path):
     assert len(engine._open_positions) == 0
     trades = db.recent_trades(limit=5)
     assert trades[0]["status"] == "closed"
+
+
+def test_open_order_failure_when_broker_never_received_it_retries_cleanly(tmp_path):
+    """A genuine transient failure on open: nothing must be tracked, and
+    the same signal is free to try again on the next poll."""
+    entry_state, _ = oversold_entry_state()
+    market_data = ScriptedMarketData([entry_state] * 4)
+    broker = FlakyBroker(starting_balance=50_000.0, leverage=100, spec=SPEC,
+                          fail_open_times=1, broker_actually_opened=False)
+    db = Database(str(tmp_path / "engine_open_flaky_retry.db"))
+    engine = TradingEngine(make_settings(), market_data, broker, db, poll_seconds=0)
+
+    engine.step()  # open_order fails (order never reached the broker)
+    assert len(engine._open_positions) == 0
+    assert db.recent_trades(limit=5) == []
+
+    engine.step()  # retried on the next poll, now succeeds
+    assert len(engine._open_positions) == 1
+    assert db.recent_trades(limit=5)[0]["status"] == "open"
+
+
+def test_open_order_failure_when_broker_actually_opened_it_does_not_duplicate(tmp_path):
+    """The dangerous case this exists for: open_order's HTTP response was
+    lost, but the order DID execute at the broker. If the engine assumed
+    nothing happened and just tried the same signal again, it would place
+    a second, genuinely duplicate real position - a direct doubling of
+    real risk, not just a bookkeeping glitch."""
+    entry_state, _ = oversold_entry_state()
+    market_data = ScriptedMarketData([entry_state] * 4)
+    broker = FlakyBroker(starting_balance=50_000.0, leverage=100, spec=SPEC,
+                          fail_open_times=1, broker_actually_opened=True)
+    db = Database(str(tmp_path / "engine_open_flaky_reconcile.db"))
+    engine = TradingEngine(make_settings(), market_data, broker, db, poll_seconds=0)
+
+    engine.step()  # open_order raises, but the order DID fill at the broker
+    assert len(engine._open_positions) == 1, "must adopt the real position instead of assuming nothing happened"
+    assert len(broker._positions) == 1, "and must not have placed a second order at the broker"
+
+    engine.step()  # would-be retry: must NOT place a duplicate now that one is tracked
+    assert len(engine._open_positions) == 1
+    assert len(broker._positions) == 1
 
 
 def test_engine_recovers_a_pre_existing_open_position_on_restart(tmp_path):

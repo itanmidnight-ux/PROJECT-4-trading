@@ -240,7 +240,26 @@ class TradingEngine:
         fill_price = tick.ask if signal.side == "BUY" else tick.bid
         sl_price = fill_price - signal.sl_distance_price if signal.side == "BUY" else fill_price + signal.sl_distance_price
 
-        open_result = self.broker.open_order(self.settings.symbol, signal.side, sizing.lot, sl_price, fill_price)
+        try:
+            open_result = self.broker.open_order(self.settings.symbol, signal.side, sizing.lot, sl_price, fill_price)
+        except Exception:
+            # open_order is a mutating call - unlike a failed read, we
+            # genuinely don't know whether the order reached the broker
+            # before the failure (e.g. the order filled but the HTTP
+            # response back was lost). If the engine just assumed nothing
+            # happened and tried the same signal again next step, a lost
+            # acknowledgement here - not just a real failure - would place
+            # a second, genuinely duplicate real position. Reconcile
+            # against the broker's actual state first; only if it truly
+            # has nothing do we treat this as a clean failure and retry
+            # from scratch on the next step.
+            logger.exception("open_order failed for a %s signal - confirming with the broker before retrying", signal.side)
+            self._reconcile_open_positions()
+            if self._open_positions:
+                logger.warning("open_order actually went through despite the failure - adopted %d position(s) instead of placing a duplicate.",
+                                len(self._open_positions))
+            return
+
         trade_id = self.db.open_trade(
             ticket=open_result.ticket, symbol=self.settings.symbol, side=signal.side,
             lot=sizing.lot, entry_price=open_result.fill_price, sl_price=sl_price,
@@ -453,6 +472,17 @@ class TradingEngine:
         except Exception:
             logger.exception("Could not check for pre-existing open positions on startup")
             return
+        if not broker_positions:
+            return
+
+        # Defensive, not just relevant at startup: this method is also
+        # called reactively after an open_order failure (see step()) to
+        # check whether the order actually went through despite a comms
+        # failure. Skipping tickets we already track keeps it safe to call
+        # more than once instead of relying on every caller guaranteeing
+        # self._open_positions is empty first.
+        already_tracked = {p.ticket for p in self._open_positions}
+        broker_positions = [bp for bp in broker_positions if bp.ticket not in already_tracked]
         if not broker_positions:
             return
 
