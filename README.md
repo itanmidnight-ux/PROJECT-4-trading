@@ -153,6 +153,17 @@ cambios); si no la tiene, la reconcilia como cerrada con PnL marcado
 explicitamente como no confirmado y sigue operando en vez de quedar
 trabado.
 
+**Lo mismo del lado de abrir una operacion, que es el caso mas peligroso:**
+`open_order` es una llamada que modifica estado (a diferencia de una
+lectura de precio), asi que un fallo de red justo despues de que la orden
+ya se ejecuto en el broker no se puede asumir como "no paso nada" - hacerlo
+arriesgaba mandar una SEGUNDA orden real duplicada en el siguiente intento,
+doblando el riesgo real sin que nadie lo pidiera. Ahora, si `open_order`
+falla, el motor revisa el estado real del broker antes de reintentar: si la
+orden si se ejecuto, adopta esa posicion (en vez de abrir una nueva) y
+sigue con una sola; si de verdad no se ejecuto, no queda nada rastreado y
+la misma señal puede reintentarse limpio en el proximo ciclo.
+
 Para que arranque solo al iniciar el sistema (opcional, no se activa
 por defecto): hay una plantilla de servicio systemd de usuario en
 `scripts/xauusd-scalper.service.template` con instrucciones de instalacion
