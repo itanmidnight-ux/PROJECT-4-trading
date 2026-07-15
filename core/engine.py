@@ -30,6 +30,15 @@ class EngineHalted(Exception):
 
 
 @dataclass
+class CloseAttempt:
+    """Result of _safe_close_partial - see that method for why this needs
+    three states, not just success/failure."""
+    ok: bool           # a pnl value is known - either the close was confirmed, or it was reconciled as already gone
+    pnl: float = 0.0
+    confirmed: bool = True  # False when ok=True but pnl is a placeholder (reconciled, not confirmed by the broker)
+
+
+@dataclass
 class ManagedPosition:
     trade_id: int
     ticket: str
@@ -247,6 +256,53 @@ class TradingEngine:
         self._strategy.on_trade_opened()
         logger.info("Opened %s %.4f lot @ %.3f (SL %.3f)", signal.side, sizing.lot, open_result.fill_price, sl_price)
 
+    def _safe_close_partial(self, pos: ManagedPosition, lot: float, exit_price: float) -> CloseAttempt:
+        """Wraps broker.close_partial so a failed close can never silently
+        wedge the engine. Without this, an exception here (bridge timeout,
+        dropped connection right as the order lands) propagates straight
+        out of _manage_open_positions BEFORE self._open_positions is
+        reassigned - the position then stays tracked as fully open forever.
+        If the close order actually executed at the broker and only the
+        HTTP response was lost, every future step() re-attempts a close on
+        a position the broker no longer has, gets "not found" every time,
+        and - since the engine only ever holds one position at a time -
+        that phantom position permanently blocks all future trades until
+        someone notices and manually restarts the process.
+
+        Instead: on failure, check whether the broker still actually has
+        this ticket. If it does, this was a genuine transient failure -
+        report "not ok" so the caller leaves the position untouched for a
+        normal retry next step. If the broker does NOT have it anymore, the
+        order got through and only the acknowledgement was lost - reconcile
+        it as closed with a clearly-flagged unconfirmed pnl (0.0, since the
+        real fill price/pnl were in the response we never received) rather
+        than let a communication failure become a permanent trading halt.
+        """
+        try:
+            pnl = self.broker.close_partial(pos.ticket, lot, exit_price)
+            return CloseAttempt(ok=True, pnl=pnl)
+        except Exception:
+            logger.exception("close_partial failed for %s - checking if the broker still has it", pos.ticket)
+
+        try:
+            still_at_broker = any(p.ticket == pos.ticket for p in self.broker.open_positions(self.settings.symbol))
+        except Exception:
+            logger.exception("Could not check open_positions for %s either - will retry next step", pos.ticket)
+            return CloseAttempt(ok=False)
+
+        if still_at_broker:
+            return CloseAttempt(ok=False)
+
+        message = (
+            f"No se pudo confirmar el cierre de {pos.ticket} (fallo de comunicacion tras enviar la "
+            "orden), pero el broker ya no tiene esa posicion - se asume cerrada para no bloquear el "
+            "motor. PnL registrado como 0.0 (DESCONOCIDO, no confirmado) - revisa el historial real "
+            "de la cuenta para el PnL exacto de esta operacion."
+        )
+        logger.critical(message)
+        self.db.log_event(ts=_now_iso(), level="CRITICAL", message=message)
+        return CloseAttempt(ok=True, pnl=0.0, confirmed=False)
+
     def _manage_open_positions(self, bid: float, ask: float) -> None:
         still_open: list[ManagedPosition] = []
         for pos in self._open_positions:
@@ -285,13 +341,18 @@ class TradingEngine:
 
             hit_sl = (direction == 1 and exit_price <= pos.sl_price) or (direction == -1 and exit_price >= pos.sl_price)
             if hit_sl:
-                pnl = self.broker.close_partial(pos.ticket, pos.remaining_lot, exit_price)
+                lot_to_close = pos.remaining_lot
+                attempt = self._safe_close_partial(pos, lot_to_close, exit_price)
+                if not attempt.ok:
+                    still_open.append(pos)  # genuine failure or unconfirmed - retry next step
+                    continue
                 self.db.close_trade_partial(pos.trade_id, exit_price=exit_price, closed_at=_now_iso(),
-                                             pnl_usd=pnl, close_fraction=pos.remaining_lot / pos.original_lot,
+                                             pnl_usd=attempt.pnl, close_fraction=lot_to_close / pos.original_lot,
                                              tp_level=-1, fully_closed=True)
                 account = self.broker.account()
-                self._risk.register_trade_closed(pnl, account.balance)
-                logger.info("SL hit on %s, pnl=%.2f", pos.ticket, pnl)
+                self._risk.register_trade_closed(attempt.pnl, account.balance)
+                logger.info("SL hit on %s, pnl=%.2f%s", pos.ticket, attempt.pnl,
+                            "" if attempt.confirmed else " (UNCONFIRMED - reconciled after a comms failure)")
                 continue
 
             while pos.next_tp_index < len(pos.tp_levels):
@@ -305,7 +366,10 @@ class TradingEngine:
                 if close_lot <= 0:
                     pos.next_tp_index += 1
                     continue
-                pnl = self.broker.close_partial(pos.ticket, close_lot, exit_price)
+                attempt = self._safe_close_partial(pos, close_lot, exit_price)
+                if not attempt.ok:
+                    break  # genuine failure or unconfirmed - stop the ladder here, retry next step
+                pnl = attempt.pnl
                 pos.remaining_lot = round(pos.remaining_lot - close_lot, 8)
                 fully_closed = pos.remaining_lot <= 1e-9
                 self.db.close_trade_partial(
@@ -315,7 +379,8 @@ class TradingEngine:
                 )
                 account = self.broker.account()
                 self._risk.register_trade_closed(pnl, account.balance)
-                logger.info("TP%d hit on %s, closed %.4f lot, pnl=%.2f", pos.next_tp_index + 1, pos.ticket, close_lot, pnl)
+                logger.info("TP%d hit on %s, closed %.4f lot, pnl=%.2f%s", pos.next_tp_index + 1, pos.ticket, close_lot, pnl,
+                            "" if attempt.confirmed else " (UNCONFIRMED - reconciled after a comms failure)")
                 pos.next_tp_index += 1
 
                 # After the first TP locks in profit, move the remainder to
@@ -348,18 +413,27 @@ class TradingEngine:
         logger.critical(message)
         self.db.log_event(ts=_now_iso(), level="CRITICAL", message=message)
 
+        still_open: list[ManagedPosition] = []
         for pos in self._open_positions:
             exit_price = tick.bid if pos.side == "BUY" else tick.ask
-            pnl = self.broker.close_partial(pos.ticket, pos.remaining_lot, exit_price)
+            lot_to_close = pos.remaining_lot
+            attempt = self._safe_close_partial(pos, lot_to_close, exit_price)
+            if not attempt.ok:
+                logger.critical(
+                    "No se pudo cerrar/confirmar el cierre de emergencia de %s - queda con su propio "
+                    "SL en el broker si tenia uno; verificar manualmente.", pos.ticket)
+                still_open.append(pos)
+                continue
             self.db.close_trade_partial(
-                pos.trade_id, exit_price=exit_price, closed_at=_now_iso(), pnl_usd=pnl,
-                close_fraction=pos.remaining_lot / pos.original_lot, tp_level=-2, fully_closed=True,
+                pos.trade_id, exit_price=exit_price, closed_at=_now_iso(), pnl_usd=attempt.pnl,
+                close_fraction=lot_to_close / pos.original_lot, tp_level=-2, fully_closed=True,
             )
             account = self.broker.account()
-            self._risk.register_trade_closed(pnl, account.balance)
-            logger.critical("Emergency-closed %s, pnl=%.2f", pos.ticket, pnl)
+            self._risk.register_trade_closed(attempt.pnl, account.balance)
+            logger.critical("Emergency-closed %s, pnl=%.2f%s", pos.ticket, attempt.pnl,
+                             "" if attempt.confirmed else " (UNCONFIRMED - reconciled after a comms failure)")
 
-        self._open_positions = []
+        self._open_positions = still_open
 
     def _reconcile_open_positions(self) -> None:
         """

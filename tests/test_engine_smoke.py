@@ -37,6 +37,34 @@ class ScriptedMarketData(MarketDataSource):
         return state
 
 
+class FlakyBroker(SimulatedBroker):
+    """Wraps SimulatedBroker to inject a controlled close_partial failure -
+    simulates a bridge/network hiccup right as an order lands, where the
+    caller never finds out whether the close actually reached the broker.
+
+    broker_actually_closed=False: the order never went through (genuine
+    transient failure) - the underlying position is untouched, so
+    open_positions() still reports it.
+
+    broker_actually_closed=True: the order DID execute at the broker, only
+    the HTTP response back to the engine was lost - the underlying close
+    happens for real before raising, so open_positions() no longer reports
+    the ticket, exactly like a real "acknowledgement lost" scenario."""
+
+    def __init__(self, *args, fail_times: int = 1, broker_actually_closed: bool = False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._fail_remaining = fail_times
+        self._broker_actually_closed = broker_actually_closed
+
+    def close_partial(self, ticket: str, lot: float, fill_price: float) -> float:
+        if self._fail_remaining > 0:
+            self._fail_remaining -= 1
+            if self._broker_actually_closed:
+                super().close_partial(ticket, lot, fill_price)
+            raise RuntimeError("simulated bridge communication failure")
+        return super().close_partial(ticket, lot, fill_price)
+
+
 def make_settings(**overrides) -> Settings:
     defaults = {
         "mt5_login": "", "mt5_password": "", "mt5_server": "FBS-Demo", "mt5_is_demo": True,
@@ -105,6 +133,69 @@ def test_engine_stops_out_a_losing_trade_on_a_big_adverse_move(tmp_path):
     assert trades[0]["pnl_usd"] < 0
 
 
+def test_close_failure_when_position_is_still_at_the_broker_retries_next_step(tmp_path):
+    """A genuine transient failure (bridge timeout, order never executed):
+    the position must stay tracked, untouched, and get retried - not get
+    silently dropped or double-closed."""
+    entry_state, last_close = oversold_entry_state()
+    down_tick = Tick(bid=last_close - 50, ask=last_close - 49.8, spread_price=0.2, time=1_700_002_060)
+    down_state = LiveState(tick=down_tick, candles=entry_state.candles)
+
+    market_data = ScriptedMarketData([entry_state, down_state, down_state])
+    broker = FlakyBroker(starting_balance=50_000.0, leverage=100, spec=SPEC,
+                          fail_times=1, broker_actually_closed=False)
+    db = Database(str(tmp_path / "engine_flaky_retry.db"))
+    engine = TradingEngine(make_settings(), market_data, broker, db, poll_seconds=0)
+
+    engine.step()  # opens the BUY
+    assert len(engine._open_positions) == 1
+
+    engine.step()  # SL hit, but close_partial fails (order never reached the broker)
+    assert len(engine._open_positions) == 1, "must stay tracked for a retry, not vanish"
+    assert db.recent_trades(limit=5)[0]["status"] == "open"
+
+    engine.step()  # retried automatically on the next poll, now succeeds
+    assert len(engine._open_positions) == 0
+    trades = db.recent_trades(limit=5)
+    assert trades[0]["status"] == "closed"
+    assert trades[0]["pnl_usd"] < 0
+
+
+def test_close_failure_after_broker_already_closed_it_does_not_wedge_the_engine(tmp_path):
+    """The dangerous case this exists for: the close order DID execute at
+    the broker, only the HTTP response back was lost. Without reconciling
+    this, the engine would retry closing a ticket the broker no longer
+    has, get 'not found' forever, and - since it only ever holds one
+    position at a time - never be able to open a new trade again."""
+    entry_state, last_close = oversold_entry_state()
+    down_tick = Tick(bid=last_close - 50, ask=last_close - 49.8, spread_price=0.2, time=1_700_002_060)
+    down_state = LiveState(tick=down_tick, candles=entry_state.candles)
+
+    market_data = ScriptedMarketData([entry_state, down_state, down_state, down_state])
+    broker = FlakyBroker(starting_balance=50_000.0, leverage=100, spec=SPEC,
+                          fail_times=1, broker_actually_closed=True)
+    db = Database(str(tmp_path / "engine_flaky_reconcile.db"))
+    engine = TradingEngine(make_settings(), market_data, broker, db, poll_seconds=0)
+
+    engine.step()  # opens the BUY
+    assert len(engine._open_positions) == 1
+
+    engine.step()  # SL hit; the close executes at the broker but the response is lost
+    assert len(engine._open_positions) == 0, "must be reconciled as closed, not stuck forever"
+    trades = db.recent_trades(limit=5)
+    assert trades[0]["status"] == "closed"
+
+    events = db.recent_events(limit=5)
+    assert any("no se pudo confirmar" in e["message"].lower() for e in events)
+    assert any(e["level"] == "CRITICAL" for e in events)
+
+    # The real point of the fix: the engine must be free to trade again,
+    # not permanently blocked by a phantom open position. Reaching this
+    # line without an exception (and with room for a new position) proves it.
+    engine.step()
+    assert len(engine._open_positions) <= 1
+
+
 def test_engine_refuses_to_open_when_margin_is_insufficient(tmp_path):
     """Mirrors the real 1:1-leverage / $50-balance scenario: the engine
     must NOT crash or send an impossible order, just skip the trade and
@@ -158,6 +249,38 @@ def test_engine_emergency_closes_on_equity_drawdown_before_sl_is_hit(tmp_path):
     events = db.recent_events(limit=5)
     assert any("PARADA DE EMERGENCIA" in e["message"] for e in events)
     assert any(e["level"] == "CRITICAL" for e in events)
+
+
+def test_emergency_close_failure_keeps_position_tracked_for_retry(tmp_path):
+    """The drawdown circuit breaker's close must not silently drop the
+    position if the broker call fails - same class of bug as a normal
+    SL/TP close failure (test_close_failure_* above), just reached via the
+    emergency-close path instead."""
+    entry_state, last_close = oversold_entry_state()
+    settings = make_settings(max_daily_drawdown_pct=0.1)
+    broker = FlakyBroker(starting_balance=50.0, leverage=100, spec=SPEC,
+                          fail_times=1, broker_actually_closed=False)
+    db = Database(str(tmp_path / "engine_emergency_flaky.db"))
+    engine = TradingEngine(settings, ScriptedMarketData([entry_state]), broker, db, poll_seconds=0)
+
+    engine.step()
+    assert len(engine._open_positions) == 1
+    pos = engine._open_positions[0]
+    sl_distance = pos.entry_price - pos.sl_price
+    adverse_move = sl_distance * 0.3
+    down_price = last_close - adverse_move
+    down_tick = Tick(bid=down_price - 0.1, ask=down_price + 0.1, spread_price=0.2, time=1_700_002_060)
+    down_state = LiveState(tick=down_tick, candles=entry_state.candles)
+    engine.market_data = ScriptedMarketData([down_state])
+
+    engine.step()  # drawdown breached, emergency close attempted, fails (transient)
+    assert len(engine._open_positions) == 1, "must stay tracked for a retry, not silently dropped"
+    assert db.recent_trades(limit=5)[0]["status"] == "open"
+
+    engine.step()  # retried: drawdown is still breached (nothing actually closed last time), now succeeds
+    assert len(engine._open_positions) == 0
+    trades = db.recent_trades(limit=5)
+    assert trades[0]["status"] == "closed"
 
 
 def test_engine_recovers_a_pre_existing_open_position_on_restart(tmp_path):
