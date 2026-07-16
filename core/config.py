@@ -88,8 +88,9 @@ class Settings:
 
     # Manual kill switch: if this file exists, the engine force-closes any
     # open position at market on its next poll and halts (see core/engine.py,
-    # main.py). Checked every step independent of run.sh/stop.sh, so it
-    # works even without terminal access to the machine running the bot -
+    # main.py). Checked every step independent of run.sh's own process
+    # supervision (`./run.sh stop`), so it works even without terminal
+    # access to the machine running the bot -
     # e.g. `touch data/EMERGENCY_STOP` from anything that can write to the
     # filesystem (a synced folder, a cron job, a phone SSH app).
     kill_switch_path: str = "data/EMERGENCY_STOP"

@@ -21,14 +21,16 @@ jobs:
           .venv/bin/pip install --upgrade pip
           .venv/bin/pip install -r requirements.txt -r requirements-dev.txt
 
-      # scripts/verify.sh is the same script documented in the README for
-      # local use (compile check + pytest + a synthetic-mode engine smoke
-      # test + dashboard API check) - CI runs exactly that, not a separate
-      # parallel definition of "passing", so a green check here means the
-      # same thing ./scripts/verify.sh means locally. It needs no
-      # Wine/MT5/broker connection by design.
-      - name: Run scripts/verify.sh
-        run: ./scripts/verify.sh
+      # `./run.sh verify` is the same subcommand documented in the README
+      # for local use (compile check + pytest + a synthetic-mode engine
+      # smoke test + dashboard API check) - CI runs exactly that, not a
+      # separate parallel definition of "passing", so a green check here
+      # means the same thing `./run.sh verify` means locally. It needs no
+      # Wine/MT5/broker connection by design. install.sh and run.sh are the
+      # only two .sh files in the project - stop/emergency-stop/verify/
+      # doctor all live as subcommands inside run.sh now.
+      - name: Run ./run.sh verify
+        run: ./run.sh verify
 
       - name: ruff (real-bug categories only)
         run: |
@@ -37,4 +39,4 @@ jobs:
             --select F,B,SIM,C4 --ignore SIM118
 
       - name: shellcheck
-        run: shellcheck run.sh install.sh stop.sh emergency_stop.sh scripts/*.sh
+        run: shellcheck run.sh install.sh
