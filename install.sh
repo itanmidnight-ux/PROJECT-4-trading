@@ -41,6 +41,35 @@ err()  { printf '\033[1;31m[install][error]\033[0m %s\n' "$*" >&2; }
 
 require_cmd() { command -v "$1" >/dev/null 2>&1; }
 
+# Wraps `pip install` with visible progress and a bounded timeout instead
+# of pip's default quiet (-q), unbounded behavior - a stalled network or a
+# package with no precompiled wheel for this platform (pip falling back
+# to compiling it from source, common on ARM/Android/anything off the
+# manylinux beaten path) used to look EXACTLY like the installer being
+# frozen, with no way to tell "still working" from "actually stuck". Used
+# by every platform branch below, not just Termux (where this was first
+# found) - a stalled download or a slow compile can happen on any system.
+# $1: max seconds to allow. $@ (rest): passed straight through to
+# `pip install`, e.g. `run_pip_install 1200 -r requirements.txt`.
+run_pip_install() {
+    local max_seconds="$1"
+    shift
+    if ! timeout "$max_seconds" pip install --progress-bar on "$@"; then
+        err "pip install se paso de $((max_seconds / 60)) minutos, o fallo."
+        err "Si fue un paquete compilando desde el codigo fuente (comun en ARM/Termux, sin"
+        err "wheels precompilados), instala las herramientas de compilacion primero"
+        err "(ej. build-essential/clang, make, pkg-config) y volve a correr ./install.sh."
+        return 1
+    fi
+}
+
+# Same idea for a network download that could otherwise hang forever on a
+# stalled connection instead of failing fast with a clear message.
+# $1: URL, $2: output path.
+download_with_timeout() {
+    wget --timeout=30 --tries=3 -q -O "$2" "$1"
+}
+
 # ------------------------------------------------------- platform detection
 # Termux sets $PREFIX to its own userland root (no root access, no real
 # /usr) - the standard, most reliable way to detect it. $TERMUX_VERSION is
@@ -134,15 +163,25 @@ install_termux() {
     [ "$got_numpy_via_pkg" -eq 1 ] && skip_pattern="${skip_pattern}|^numpy"
     [ "$got_pandas_via_pkg" -eq 1 ] && skip_pattern="${skip_pattern}|^pandas"
 
+    # Exported (not just a prefix on the next command) so the pip install
+    # on the other side of the "|" below inherits it too - a plain
+    # VAR=val prefix only applies to the single command it's attached to.
+    # -j$cpu_count paralelizes any C/C++/Cython compile across every core
+    # of the phone instead of the default single-threaded build - doesn't
+    # change WHAT gets installed or which version, only how long compiling
+    # whatever needed compiling anyway takes.
+    local cpu_count
+    cpu_count="$(nproc 2>/dev/null || echo 2)"
+    export MAKEFLAGS="-j${cpu_count}"
+
     log "Instalando el resto de las dependencias con pip (con progreso visible)..."
-    log "Si numpy o pandas terminan compilando desde el codigo fuente esto puede tardar bastante - no se colgo, mostrando progreso real."
-    if ! grep -vE "$skip_pattern" requirements.txt | timeout 2400 pip install -r /dev/stdin --progress-bar on; then
+    log "Si pandas termina compilando desde el codigo fuente (normal en Termux, no hay wheels"
+    log "para Android en PyPI) puede tardar bastante - no se colgo, va mostrando progreso real."
+    log "Compilando con $cpu_count nucleo(s) en paralelo para acelerarlo."
+    if ! grep -vE "$skip_pattern" requirements.txt | run_pip_install 5400 -r /dev/stdin; then
         deactivate
-        err "La instalacion de dependencias de Python fallo, o paso los 40 minutos de limite."
-        err "Si fue numpy/pandas compilando desde el codigo fuente, instala las herramientas de compilacion primero:"
-        err "  pkg install -y clang make pkg-config"
-        err "y volve a correr ./install.sh. Tambien podes revisar 'pkg search python-pandas' para confirmar si tu"
-        err "repo de Termux lo tiene como paquete binario (evita la compilacion por completo)."
+        err "'pkg search python-pandas' te dice si tu repo de Termux lo tiene como paquete binario"
+        err "(evita la compilacion por completo, ver arriba)."
         return 1
     fi
     deactivate
@@ -160,18 +199,19 @@ install_termux() {
 =====================================================================
  Instalacion completa (modo Termux / cliente remoto).
 
- Esta maquina puede: correr el dashboard, correr backtests, y correr
- el motor en modo --synthetic para probar. Para trading real necesita
- un bridge corriendo en una Linux de verdad (Kali/Ubuntu) en la misma
- red o alcanzable por red - configuralo en MT5_BRIDGE_URL (.env) antes
- de correr ./run.sh sin --synthetic.
+ Esta maquina puede: correr el dashboard, correr backtests, y probar
+ el motor en modo --synthetic. Para trading real necesita un bridge
+ corriendo en una Linux de verdad (Kali/Ubuntu) en la misma red o
+ alcanzable por red - configuralo en MT5_BRIDGE_URL (.env) antes de
+ iniciar el motor desde el dashboard.
 
- Para ver el dashboard (recomendado --web en Termux, no hay entorno
- grafico nativo):
-   .venv/bin/python dashboard.py --web
+ Para arrancar el dashboard (recomendado --web en Termux, no hay
+ entorno grafico nativo):
+   ./run.sh --start
+   luego abrí http://127.0.0.1:9000 e iniciá el motor desde ahí.
 
- Para probar el motor sin broker:
-   ./run.sh --synthetic
+ Para probar el motor sin broker, sin pasar por el dashboard:
+   .venv/bin/python main.py --synthetic
 
  Diagnostico completo (que falta, que esta bien):
    ./run.sh doctor
@@ -194,11 +234,20 @@ install_debian_like() {
     fi
     export DEBIAN_FRONTEND=noninteractive
     $SUDO dpkg --add-architecture i386 2>/dev/null || true
-    $SUDO apt-get update -y
-    $SUDO apt-get install -y --no-install-recommends \
+    # apt can hang indefinitely waiting on another apt/dpkg process holding
+    # the lock (e.g. unattended-upgrades) - bounded here too rather than
+    # blocking forever with no indication why.
+    if ! timeout 1200 "$SUDO" apt-get update -y; then
+        err "apt-get update fallo o se paso de 20 minutos - revisa la conexion, o si otro proceso (unattended-upgrades) tiene el lock de apt/dpkg."
+        exit 1
+    fi
+    if ! timeout 1800 "$SUDO" apt-get install -y --no-install-recommends \
         python3 python3-venv python3-pip \
         wine wine64 winbind \
-        xvfb xdotool cabextract wget curl unzip ca-certificates
+        xvfb xdotool cabextract wget curl unzip ca-certificates; then
+        err "apt-get install fallo o se paso de 30 minutos."
+        exit 1
+    fi
 
     if ! require_cmd wine; then
         err "wine no esta disponible despues de instalar. No puedo continuar - el terminal MT5 lo necesita."
@@ -212,7 +261,10 @@ install_debian_like() {
     # shellcheck disable=SC1091
     source "$VENV_DIR/bin/activate"
     pip install --upgrade pip -q
-    pip install -r requirements.txt -q
+    if ! run_pip_install 1200 -r requirements.txt; then
+        deactivate
+        exit 1
+    fi
     deactivate
     log "venv de Linux listo en $VENV_DIR"
 
@@ -236,13 +288,17 @@ install_debian_like() {
     MT5_MARKER="$WINEPREFIX_DIR/drive_c/Program Files/MetaTrader 5/terminal64.exe"
     if [ ! -f "$MT5_MARKER" ]; then
         log "Descargando el instalador de MetaTrader 5..."
-        wget -q -O /tmp/mt5setup.exe "$MT5_INSTALLER_URL" || {
+        if ! download_with_timeout "$MT5_INSTALLER_URL" /tmp/mt5setup.exe; then
             err "No se pudo descargar el instalador de MT5 desde $MT5_INSTALLER_URL"
             err "Revisa el acceso a internet, o descarga mt5setup.exe a mano a /tmp/mt5setup.exe y corre de nuevo."
             exit 1
-        }
+        fi
         log "Instalando MetaTrader 5 bajo Wine (silencioso)..."
-        $XVFB_CMD wine /tmp/mt5setup.exe /auto || warn "El instalador de MT5 devolvio codigo distinto de cero; verificando la ruta de instalacion de todos modos."
+        # timeout como red de seguridad: /auto deberia ser silencioso, pero
+        # si igual queda esperando un dialogo que nunca va a aparecer (modo
+        # headless), esto corta en vez de colgarse para siempre.
+        # shellcheck disable=SC2086  # $XVFB_CMD se separa a proposito en "xvfb-run -a" (o queda vacio)
+        timeout 300 $XVFB_CMD wine /tmp/mt5setup.exe /auto || warn "El instalador de MT5 devolvio codigo distinto de cero o se paso de 5 minutos; verificando la ruta de instalacion de todos modos."
         sleep 5
     fi
     if [ -f "$MT5_MARKER" ]; then
@@ -254,19 +310,26 @@ install_debian_like() {
     WIN_PYTHON="$WINEPREFIX_DIR/drive_c/users/$(whoami)/AppData/Local/Programs/Python/Python311/python.exe"
     if [ ! -f "$WIN_PYTHON" ]; then
         log "Descargando Python de Windows (lo necesita el paquete MetaTrader5 dentro de Wine)..."
-        wget -q -O /tmp/winpython.exe "$WIN_PYTHON_URL" || {
+        if ! download_with_timeout "$WIN_PYTHON_URL" /tmp/winpython.exe; then
             err "No se pudo descargar el instalador de Python de Windows desde $WIN_PYTHON_URL"
             exit 1
-        }
+        fi
         log "Instalando Python de Windows bajo Wine (silencioso)..."
-        $XVFB_CMD wine /tmp/winpython.exe /quiet InstallAllUsers=0 PrependPath=1 Include_test=0
+        # shellcheck disable=SC2086  # $XVFB_CMD se separa a proposito en "xvfb-run -a" (o queda vacio)
+        timeout 300 $XVFB_CMD wine /tmp/winpython.exe /quiet InstallAllUsers=0 PrependPath=1 Include_test=0 \
+            || warn "El instalador de Python de Windows devolvio codigo distinto de cero o se paso de 5 minutos; verificando de todos modos."
         sleep 5
     fi
 
     if [ -f "$WIN_PYTHON" ]; then
         log "Paso 4/5: instalando MetaTrader5 + Flask en el Python de Wine..."
-        $XVFB_CMD wine "$WIN_PYTHON" -m pip install --upgrade pip -q
-        $XVFB_CMD wine "$WIN_PYTHON" -m pip install -r bridge/requirements-bridge.txt -q
+        # shellcheck disable=SC2086  # $XVFB_CMD se separa a proposito en "xvfb-run -a" (o queda vacio)
+        timeout 600 $XVFB_CMD wine "$WIN_PYTHON" -m pip install --upgrade pip -q
+        # shellcheck disable=SC2086
+        if ! timeout 1800 $XVFB_CMD wine "$WIN_PYTHON" -m pip install -r bridge/requirements-bridge.txt -q; then
+            err "pip (dentro de Wine) fallo o se paso de 30 minutos instalando bridge/requirements-bridge.txt."
+            err "Podes reintentar solo este paso corriendo ./install.sh de nuevo."
+        fi
         log "Entorno del bridge (lado Wine) listo."
     else
         err "No se encontro el Python de Windows en la ruta esperada: $WIN_PYTHON"
@@ -284,19 +347,19 @@ install_debian_like() {
 
  Antes de operar en real (DRY_RUN=false en .env):
    1. Corre un backtest:  .venv/bin/python scripts/run_backtest.py
-   2. Corre en modo simulado con precios reales del broker (DRY_RUN=true,
+   2. Arranca en modo simulado con precios reales del broker (DRY_RUN=true,
       valor por defecto) durante un tiempo y revisa el dashboard.
    3. Solo entonces, si los numeros te convencen, cambia DRY_RUN=false.
 
- Para arrancar todo:
-   ./run.sh
+ Para arrancar el servidor (bridge MT5 + dashboard):
+   ./run.sh --start
+   luego abrí http://127.0.0.1:9000 e iniciá el motor desde ahí cuando
+   estes listo - el motor NO arranca solo con --start, a proposito.
 
- Para ver el dashboard:
-   .venv/bin/python dashboard.py            # pregunta ventana nativa o web
-   .venv/bin/python dashboard.py --web      # directo como pagina web (puerto 9000)
-
- Diagnostico completo (que falta, que esta bien):
-   ./run.sh doctor
+ Otros comandos utiles:
+   ./run.sh --status    estado actual (bridge, dashboard, motor, cuenta)
+   ./run.sh --stop       apaga todo, no queda nada corriendo
+   ./run.sh doctor         diagnostico completo (que falta, que esta bien)
 =====================================================================
 EOF
 }
@@ -316,7 +379,10 @@ install_unknown() {
     # shellcheck disable=SC1091
     source "$VENV_DIR/bin/activate"
     pip install --upgrade pip -q
-    pip install -r requirements.txt -q
+    if ! run_pip_install 1800 -r requirements.txt; then
+        deactivate
+        exit 1
+    fi
     deactivate
     log "venv listo en $VENV_DIR"
 
@@ -349,7 +415,7 @@ setup_env_file() {
             sed -i "s|^MT5_SERVER=.*|MT5_SERVER=${input_server}|" "$PROJECT_ROOT/.env"
             log "Credenciales guardadas en .env (este archivo esta en .gitignore - nunca se commitea ni se sube)."
         else
-            warn "Shell no interactiva: edita .env a mano antes de correr run.sh."
+            warn "Shell no interactiva: edita .env a mano antes de correr ./run.sh --start."
         fi
     else
         log ".env ya existe, se deja como esta."
