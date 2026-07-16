@@ -137,6 +137,64 @@ class Settings:
     # behavior - see core/strategy.py's build_tp_ladder.
     tp_targets_usd: list[float] = field(default_factory=list)
 
+    # How many M1 candles the engine fetches from the bridge each poll.
+    # 200 (the old hardcoded value) is enough for the mean-reversion
+    # strategy alone, but not for strat_enable_momentum_cross's M5 EMA50
+    # warmup or strat_enable_asian_breakout's range backfill on a fresh
+    # restart - both want several hours of M1 history. One bridge round
+    # trip regardless of this value (bigger JSON payload, not more calls).
+    candle_history_count: int = 600
+
+    # Extra independent M1 entry signals layered on top of the
+    # mean-reversion strategy above - see core/signals.py's module
+    # docstring for what each one does and, importantly, what was
+    # deliberately NOT ported from the reference EA they're adapted from
+    # (no stop-loss-free grid/martingale averaging - every signal here
+    # goes through the exact same RiskManager sizing/SL as mean-reversion,
+    # no exceptions). Individually toggleable, and DEFAULT OFF - a real
+    # backtest on 7 real days of gold (see README, "Ronda 4") found every
+    # single one of these, added on its own, increases trade count a lot
+    # (as intended) but makes real dollar PnL meaningfully WORSE than
+    # mean-reversion alone, not better (small TP1 target vs a
+    # proportionally wider stop is a poor risk:reward for a continuation
+    # entry - mean-reversion gets away with it because it enters AT an
+    # extreme, these don't). Shipped here, tested, and off by default so
+    # turning one on is an informed opt-in after your own backtest, not an
+    # accidental regression versus the already-validated baseline.
+    strat_enable_momentum_cross: bool = False
+    strat_enable_rsi_hysteresis: bool = False
+    strat_enable_directional_candle: bool = False
+    strat_enable_session_open: bool = False
+    strat_enable_asian_breakout: bool = False
+
+    # Indicators shared by the extra signals above (RSI/ATR periods) -
+    # deliberately separate from strat_rsi_period/strat_atr_period, which
+    # only tune the mean-reversion strategy and must stay exactly as
+    # backtested (see README) regardless of what these are set to.
+    strat_composite_rsi_period: int = 14
+    strat_composite_atr_period: int = 14
+
+    strat_momentum_sl_atr_multiple: float = 2.0
+
+    strat_rsi_hysteresis_sl_atr_multiple: float = 2.0
+    strat_rsi_hysteresis_upper: float = 52.0
+    strat_rsi_hysteresis_lower: float = 48.0
+
+    strat_directional_candle_sl_buffer_atr_mult: float = 0.3
+
+    strat_session_sl_atr_multiple: float = 2.0
+    strat_session_london_start_hour: int = 7
+    strat_session_london_end_hour: int = 10
+    strat_session_ny_start_hour: int = 12
+    strat_session_ny_end_hour: int = 16
+
+    strat_asian_sl_atr_multiple: float = 2.0
+    strat_asian_range_start_hour: int = 0
+    strat_asian_range_end_hour: int = 7
+    strat_asian_breakout_start_hour: int = 7
+    strat_asian_breakout_end_hour: int = 10
+    strat_asian_breakout_buffer_pct: float = 0.05
+
 
 def load_settings() -> Settings:
     return Settings(
@@ -175,6 +233,30 @@ def load_settings() -> Settings:
         tp_targets_usd=_float_list("TP_TARGETS_USD", []),
         pause_flag_path=os.getenv("PAUSE_FLAG_PATH", "data/PAUSED"),
         dashboard_auth_token=os.getenv("DASHBOARD_AUTH_TOKEN", ""),
+        candle_history_count=_int("CANDLE_HISTORY_COUNT", 600),
+        strat_enable_momentum_cross=_bool("STRAT_ENABLE_MOMENTUM_CROSS", False),
+        strat_enable_rsi_hysteresis=_bool("STRAT_ENABLE_RSI_HYSTERESIS", False),
+        strat_enable_directional_candle=_bool("STRAT_ENABLE_DIRECTIONAL_CANDLE", False),
+        strat_enable_session_open=_bool("STRAT_ENABLE_SESSION_OPEN", False),
+        strat_enable_asian_breakout=_bool("STRAT_ENABLE_ASIAN_BREAKOUT", False),
+        strat_composite_rsi_period=_int("STRAT_COMPOSITE_RSI_PERIOD", 14),
+        strat_composite_atr_period=_int("STRAT_COMPOSITE_ATR_PERIOD", 14),
+        strat_momentum_sl_atr_multiple=_float("STRAT_MOMENTUM_SL_ATR_MULTIPLE", 2.0),
+        strat_rsi_hysteresis_sl_atr_multiple=_float("STRAT_RSI_HYSTERESIS_SL_ATR_MULTIPLE", 2.0),
+        strat_rsi_hysteresis_upper=_float("STRAT_RSI_HYSTERESIS_UPPER", 52.0),
+        strat_rsi_hysteresis_lower=_float("STRAT_RSI_HYSTERESIS_LOWER", 48.0),
+        strat_directional_candle_sl_buffer_atr_mult=_float("STRAT_DIRECTIONAL_CANDLE_SL_BUFFER_ATR_MULT", 0.3),
+        strat_session_sl_atr_multiple=_float("STRAT_SESSION_SL_ATR_MULTIPLE", 2.0),
+        strat_session_london_start_hour=_int("STRAT_SESSION_LONDON_START_HOUR", 7),
+        strat_session_london_end_hour=_int("STRAT_SESSION_LONDON_END_HOUR", 10),
+        strat_session_ny_start_hour=_int("STRAT_SESSION_NY_START_HOUR", 12),
+        strat_session_ny_end_hour=_int("STRAT_SESSION_NY_END_HOUR", 16),
+        strat_asian_sl_atr_multiple=_float("STRAT_ASIAN_SL_ATR_MULTIPLE", 2.0),
+        strat_asian_range_start_hour=_int("STRAT_ASIAN_RANGE_START_HOUR", 0),
+        strat_asian_range_end_hour=_int("STRAT_ASIAN_RANGE_END_HOUR", 7),
+        strat_asian_breakout_start_hour=_int("STRAT_ASIAN_BREAKOUT_START_HOUR", 7),
+        strat_asian_breakout_end_hour=_int("STRAT_ASIAN_BREAKOUT_END_HOUR", 10),
+        strat_asian_breakout_buffer_pct=_float("STRAT_ASIAN_BREAKOUT_BUFFER_PCT", 0.05),
     )
 
 

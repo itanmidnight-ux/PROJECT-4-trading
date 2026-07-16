@@ -16,7 +16,8 @@ from core.database import Database
 from core.market_data import MarketDataSource
 from core.mt5_bridge_client import Tick
 from core.risk_manager import RiskManager
-from core.strategy import ScalpStrategy, TpLevel
+from core.signals import build_strategy_from_settings
+from core.strategy import TpLevel
 
 logger = logging.getLogger("engine")
 
@@ -87,7 +88,7 @@ class TradingEngine:
 
         self._open_positions: list[ManagedPosition] = []
         self._risk: RiskManager | None = None
-        self._strategy: ScalpStrategy | None = None
+        self._strategy = None
         self._spec = None
         self._last_bar_time: int | None = None
         self._reconciled = False
@@ -113,24 +114,7 @@ class TradingEngine:
             max_daily_drawdown_pct=self.settings.max_daily_drawdown_pct,
             max_trades_per_day=self.settings.max_trades_per_day,
         )
-        self._strategy = ScalpStrategy(
-            min_tp_usd=self.settings.min_tp_usd,
-            tp_levels=self.settings.tp_levels,
-            value_per_point_per_lot=value_per_point_per_lot,
-            rsi_oversold=self.settings.strat_rsi_oversold,
-            rsi_overbought=self.settings.strat_rsi_overbought,
-            max_spread_price=self.settings.strat_max_spread_price,
-            min_atr_price=self.settings.strat_min_atr_price,
-            sl_atr_multiple=self.settings.strat_sl_atr_multiple,
-            cooldown_bars=self.settings.strat_cooldown_bars,
-            bb_period=self.settings.strat_bb_period,
-            bb_std=self.settings.strat_bb_std,
-            rsi_period=self.settings.strat_rsi_period,
-            atr_period=self.settings.strat_atr_period,
-            adx_period=self.settings.strat_adx_period,
-            trend_filter_adx_threshold=self.settings.strat_trend_filter_adx_threshold,
-            tp_targets_usd=self.settings.tp_targets_usd,
-        )
+        self._strategy = build_strategy_from_settings(self.settings, value_per_point_per_lot)
         self._spec = spec  # assign last: an exception above must leave state uninitialized
 
     def run_forever(self) -> None:
@@ -170,7 +154,7 @@ class TradingEngine:
 
         self._maybe_prune_old_snapshots()
 
-        state = self.market_data.get_state(self.settings.symbol, self.settings.timeframe, 200)
+        state = self.market_data.get_state(self.settings.symbol, self.settings.timeframe, self.settings.candle_history_count)
         tick = state.tick
         mid_price = (tick.bid + tick.ask) / 2
 
