@@ -43,7 +43,7 @@ from typing import Optional
 
 import pandas as pd
 
-from core.strategy import ScalpStrategy, Side, Signal, compute_indicators
+from core.strategy import ScalpStrategy, Side, Signal, compute_indicators, compute_vol_ratio
 
 
 @dataclass
@@ -437,8 +437,8 @@ class CompositeStrategy:
     def min_tp_distance_for_lot(self, lot: float) -> float:
         return self._mean_reversion.min_tp_distance_for_lot(lot)
 
-    def build_tp_ladder(self, lot: float, spread_price: float):
-        return self._mean_reversion.build_tp_ladder(lot, spread_price)
+    def build_tp_ladder(self, lot: float, spread_price: float, vol_ratio: float = 1.0):
+        return self._mean_reversion.build_tp_ladder(lot, spread_price, vol_ratio=vol_ratio)
 
     def generate_signal(self, df: pd.DataFrame, spread_price: float, lot_hint: float) -> Signal:
         mr_signal = self._mean_reversion.generate_signal(df, spread_price, lot_hint)
@@ -452,15 +452,17 @@ class CompositeStrategy:
             return Signal(side=None, reason="not enough history")
 
         ind = compute_indicators(df, rsi_period=self._indicator_rsi_period, atr_period=self._indicator_atr_period)
+        last = ind.iloc[-1]
+        vol_ratio = compute_vol_ratio(last["atr"], last["atr_baseline"])
 
         for name, sub in self._extra:
             sub_signal = sub.check(df, ind, spread_price)
             if sub_signal.side is None:
                 continue
             sl_distance = max(sub_signal.sl_distance_price, self._mean_reversion.min_tp_distance_for_lot(lot_hint) * 1.5)
-            tp_levels = self._mean_reversion.build_tp_ladder(lot_hint, spread_price)
+            tp_levels = self._mean_reversion.build_tp_ladder(lot_hint, spread_price, vol_ratio=vol_ratio)
             return Signal(side=sub_signal.side, sl_distance_price=sl_distance, tp_levels=tp_levels,
-                           reason=f"{name}: {sub_signal.reason}")
+                           reason=f"{name}: {sub_signal.reason}", vol_ratio=vol_ratio)
 
         return mr_signal  # nothing fired - surface mean-reversion's own reason, the most informative one
 
