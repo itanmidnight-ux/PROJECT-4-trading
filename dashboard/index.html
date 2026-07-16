@@ -22,8 +22,10 @@
       <div class="status-pills">
         <span class="pill" id="pill-mode"><span class="dot"></span><span id="pill-mode-text">—</span></span>
         <span class="pill" id="pill-conn"><span class="dot"></span><span id="pill-conn-text">Conectando…</span></span>
+        <span class="pill" id="pill-paused" hidden><span class="dot"></span>Pausado</span>
         <span class="pill"><span class="dot" style="background:var(--series-1)"></span>Actualizado <span id="pill-updated">—</span></span>
       </div>
+      <button class="btn-control" id="btn-pause-resume" type="button" data-paused="0">Detener bot</button>
       <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Cambiar tema claro/oscuro" title="Cambiar tema claro/oscuro">
         <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
         <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z"/></svg>
@@ -31,77 +33,152 @@
     </div>
   </div>
 
-  <div class="tiles">
-    <div class="tile hero">
-      <div class="label">Equity</div>
-      <div class="value" id="tile-equity">$0.00</div>
-      <div class="delta" id="tile-equity-delta"></div>
-    </div>
-    <div class="tile">
-      <div class="label">Balance</div>
-      <div class="value" id="tile-balance">$0.00</div>
-    </div>
-    <div class="tile">
-      <div class="label">Margen libre</div>
-      <div class="value" id="tile-margin">$0.00</div>
-    </div>
-    <div class="tile">
-      <div class="label">P&amp;L total</div>
-      <div class="value" id="tile-pnl">$0.00</div>
-    </div>
-    <div class="tile">
-      <div class="label">Trades</div>
-      <div class="value" id="tile-trades">0</div>
-    </div>
-    <div class="tile">
-      <div class="label">Win rate</div>
-      <div class="value" id="tile-winrate">0%</div>
-    </div>
+  <div class="tabs">
+    <button class="tab-btn active" id="tab-btn-dashboard" data-tab="dashboard" type="button">Dashboard</button>
+    <button class="tab-btn" id="tab-btn-settings" data-tab="settings" type="button">Settings</button>
   </div>
 
-  <div class="grid">
+  <div id="tab-dashboard" class="tab-panel active">
+
+    <div class="tiles">
+      <div class="tile hero">
+        <div class="label">Equity</div>
+        <div class="value" id="tile-equity">$0.00</div>
+        <div class="delta" id="tile-equity-delta"></div>
+      </div>
+      <div class="tile">
+        <div class="label">Balance</div>
+        <div class="value" id="tile-balance">$0.00</div>
+      </div>
+      <div class="tile">
+        <div class="label">Margen libre</div>
+        <div class="value" id="tile-margin">$0.00</div>
+      </div>
+      <div class="tile">
+        <div class="label">P&amp;L total</div>
+        <div class="value" id="tile-pnl">$0.00</div>
+      </div>
+      <div class="tile">
+        <div class="label">Trades</div>
+        <div class="value" id="tile-trades">0</div>
+      </div>
+      <div class="tile">
+        <div class="label">Win rate</div>
+        <div class="value" id="tile-winrate">0%</div>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="panel">
+        <h2>Curva de equity</h2>
+        <div class="panel-sub">Ultimas lecturas de cuenta en vivo</div>
+        <div id="chart-equity"></div>
+      </div>
+      <div class="panel">
+        <h2>Ganadas vs. perdidas</h2>
+        <div class="panel-sub">Trades cerrados</div>
+        <div id="chart-donut"></div>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="panel">
+        <h2>P&amp;L por dia</h2>
+        <div class="panel-sub">Ultimos 14 dias con actividad</div>
+        <div id="chart-daily"></div>
+      </div>
+      <div class="panel">
+        <h2>P&amp;L por mes</h2>
+        <div class="panel-sub">Ultimos 12 meses con actividad</div>
+        <div id="chart-monthly"></div>
+      </div>
+    </div>
+
     <div class="panel">
-      <h2>Curva de equity</h2>
-      <div class="panel-sub">Ultimas lecturas de cuenta en vivo</div>
-      <div id="chart-equity"></div>
+      <h2>Historial de operaciones</h2>
+      <div class="panel-sub">Ultimas 50</div>
+      <div id="trades-table"></div>
     </div>
+
     <div class="panel">
-      <h2>Ganadas vs. perdidas</h2>
-      <div class="panel-sub">Trades cerrados</div>
-      <div id="chart-donut"></div>
+      <h2>Eventos del motor</h2>
+      <div class="panel-sub">Avisos y errores (margen insuficiente, reconexiones, limites diarios, pausas manuales...)</div>
+      <div id="events-list"></div>
     </div>
+
+    <div class="footer-note">
+      Este bot opera con riesgo real de perdida en cada trade — el limite de riesgo por operacion
+      y las paradas diarias configuradas determinan cuanto se puede perder, no una garantia de
+      ganancia. Modo actual mostrado arriba (DRY_RUN = simulado con precios reales, sin ordenes
+      reales / LIVE = ordenes reales en la cuenta configurada).
+    </div>
+
   </div>
 
-  <div class="grid">
+  <div id="tab-settings" class="tab-panel">
+
     <div class="panel">
-      <h2>P&amp;L por dia</h2>
-      <div class="panel-sub">Ultimos 14 dias con actividad</div>
-      <div id="chart-daily"></div>
+      <h2>Conexion al broker</h2>
+      <div class="panel-sub">Cuenta MT5 - cualquier broker compatible con MetaTrader 5 (FBS y otros)</div>
+      <form id="settings-form">
+        <div class="field-grid">
+          <label class="field">
+            <span class="field-label">Numero de cuenta (login)</span>
+            <input type="text" id="set-login" inputmode="numeric" autocomplete="off" placeholder="Ej: 12345678">
+          </label>
+          <label class="field">
+            <span class="field-label">Servidor</span>
+            <input type="text" id="set-server" autocomplete="off" placeholder="Ej: FBS-Demo, ICMarkets-Live01...">
+          </label>
+          <label class="field">
+            <span class="field-label">Password</span>
+            <input type="password" id="set-password" autocomplete="new-password" placeholder="">
+          </label>
+          <label class="field field-checkbox">
+            <input type="checkbox" id="set-is-demo">
+            <span>Cuenta demo</span>
+          </label>
+        </div>
+
+        <h3>Riesgo y modo</h3>
+        <div class="field-grid">
+          <label class="field field-checkbox">
+            <input type="checkbox" id="set-dry-run">
+            <span>DRY RUN (simulado, sin ordenes reales)</span>
+          </label>
+          <label class="field">
+            <span class="field-label">Riesgo por operacion (USD)</span>
+            <input type="number" step="0.01" min="0.01" id="set-risk">
+          </label>
+          <label class="field">
+            <span class="field-label">Perdida diaria maxima (USD)</span>
+            <input type="number" step="0.01" min="0.01" id="set-max-loss">
+          </label>
+          <label class="field">
+            <span class="field-label">Drawdown diario maximo (%)</span>
+            <input type="number" step="0.1" min="0.1" id="set-max-dd">
+          </label>
+          <label class="field">
+            <span class="field-label">Trades maximos por dia</span>
+            <input type="number" step="1" min="1" id="set-max-trades">
+          </label>
+        </div>
+
+        <div class="settings-actions">
+          <button type="submit" class="btn-primary">Guardar configuracion</button>
+          <span id="settings-message" class="settings-message"></span>
+        </div>
+      </form>
+
+      <div class="settings-note">
+        Los datos se guardan en la base de datos local (persisten reinicios) y se aplican
+        <strong>la proxima vez que arranque el motor</strong> (<code>./run.sh</code>) - no afectan
+        una sesion que ya esta corriendo, para no cambiar de cuenta/servidor mientras hay una
+        posicion abierta. El campo de password siempre se muestra vacio al cargar esta pestaña:
+        escribi uno nuevo solo si queres cambiarlo, dejalo vacio para conservar el guardado.
+      </div>
     </div>
-    <div class="panel">
-      <h2>P&amp;L por mes</h2>
-      <div class="panel-sub">Ultimos 12 meses con actividad</div>
-      <div id="chart-monthly"></div>
-    </div>
-  </div>
 
-  <div class="panel">
-    <h2>Historial de operaciones</h2>
-    <div class="panel-sub">Ultimas 50</div>
-    <div id="trades-table"></div>
-  </div>
-
-  <div class="panel">
-    <h2>Eventos del motor</h2>
-    <div class="panel-sub">Avisos y errores (margen insuficiente, reconexiones, limites diarios...)</div>
-    <div id="events-list"></div>
-  </div>
-
-  <div class="footer-note">
-    Este bot opera con riesgo real de perdida en cada trade — el limite de riesgo por operacion
-    y las paradas diarias configuradas en <code>.env</code> son las que determinan cuanto se puede
-    perder, no una garantia de ganancia. Modo actual mostrado arriba (DRY_RUN = simulado con
-    precios reales, sin ordenes reales / LIVE = ordenes reales en la cuenta configurada).
   </div>
 
 </div>

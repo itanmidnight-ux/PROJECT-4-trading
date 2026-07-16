@@ -118,3 +118,30 @@ def test_prune_old_snapshots_is_a_noop_when_nothing_is_old_enough(tmp_path):
 
     assert deleted == 0
     assert len(db.equity_curve(limit=10)) == 1
+
+
+def test_settings_roundtrip_and_empty_by_default(tmp_path):
+    db = make_db(tmp_path)
+    assert db.get_all_settings() == {}
+
+    db.set_settings({"mt5_login": "12345", "mt5_server": "FBS-Demo"})
+    assert db.get_all_settings() == {"mt5_login": "12345", "mt5_server": "FBS-Demo"}
+
+
+def test_settings_upsert_overwrites_existing_key_and_leaves_others(tmp_path):
+    db = make_db(tmp_path)
+    db.set_settings({"mt5_login": "12345", "mt5_server": "FBS-Demo"})
+
+    db.set_settings({"mt5_login": "99999"})
+
+    assert db.get_all_settings() == {"mt5_login": "99999", "mt5_server": "FBS-Demo"}
+
+
+def test_settings_persist_across_database_instances(tmp_path):
+    """Same file, a new Database() object (simulating a process restart) -
+    settings must survive, that's the entire point of storing them here."""
+    path = str(tmp_path / "persist.db")
+    Database(path).set_settings({"mt5_server": "ICMarkets-Live"})
+
+    reopened = Database(path)
+    assert reopened.get_all_settings() == {"mt5_server": "ICMarkets-Live"}

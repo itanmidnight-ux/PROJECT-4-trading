@@ -216,6 +216,17 @@ class TradingEngine:
             self._last_bar_time = int(candles.iloc[-1]["time"])
             self._strategy.on_bar_closed()
 
+        # Manual pause: distinct from the kill switch above (which force-
+        # closes positions and halts the process). Pausing only stops NEW
+        # trades - any already-open position keeps being managed/protected
+        # normally, and the engine keeps running so un-pausing (just
+        # deleting the file) takes effect on the very next poll, no restart.
+        if Path(self.settings.pause_flag_path).exists():
+            if is_new_bar:
+                logger.info("Motor pausado manualmente (%s existe) - protegiendo posiciones abiertas, sin abrir nuevas.",
+                             self.settings.pause_flag_path)
+            return
+
         can_trade, reason = self._risk.can_open_new_trade(account.balance)
         if not can_trade:
             if is_new_bar:
