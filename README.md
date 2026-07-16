@@ -164,6 +164,20 @@ orden si se ejecuto, adopta esa posicion (en vez de abrir una nueva) y
 sigue con una sola; si de verdad no se ejecuto, no queda nada rastreado y
 la misma señal puede reintentarse limpio en el proximo ciclo.
 
+**Modo de "filling" de la orden calculado dinamicamente, no fijo.**
+`bridge/mt5_bridge_server.py` mandaba siempre `ORDER_FILLING_IOC` en cada
+orden. MT5 exige que ese modo coincida con lo que el simbolo realmente
+acepta (un bitmask que reporta `symbol_info`) - si no coincide, TODAS las
+ordenes fallan con el error 10030, dejando el bot sin poder operar nunca
+aunque el resto (bridge, sizing, señales) funcione perfecto. Ahora se
+pregunta al broker que modos soporta ese simbolo en vez de asumir uno fijo
+(IOC > FOK > RETURN, en ese orden de preferencia). Nota de honestidad: esto
+sigue el patron documentado oficialmente por MetaTrader5 para este problema
+conocido, pero no se pudo probar contra FBS real - este modulo solo corre
+bajo el python de Windows dentro de Wine, que no esta disponible en este
+entorno de desarrollo. Confirmalo en una sesion real antes de asumir que
+resuelve algo que no se sabe si esta roto en tu cuenta especifica.
+
 Para que arranque solo al iniciar el sistema (opcional, no se activa
 por defecto): hay una plantilla de servicio systemd de usuario en
 `scripts/xauusd-scalper.service.template` con instrucciones de instalacion
