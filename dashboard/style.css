@@ -139,6 +139,12 @@ body {
   margin: 0 auto;
   padding: 28px 28px 60px;
 }
+@media (max-width: 480px) {
+  /* 28px of padding on each side eats ~15% of a 360px-wide phone's width
+     for nothing - tighter margins here leave real room for content
+     (the trades table especially, see #trades-table's overflow-x). */
+  .app { padding: 16px 14px 40px; }
+}
 
 /* ---------- header ---------- */
 .topbar {
@@ -239,6 +245,7 @@ body {
   background: color-mix(in srgb, var(--critical) 12%, transparent);
   color: var(--critical);
   cursor: pointer;
+  min-height: 34px;
   transition: transform 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;
   white-space: nowrap;
 }
@@ -315,7 +322,10 @@ body {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   padding: 9px 12px;
-  font-size: 14px;
+  /* 16px, not 14px: iOS Safari auto-zooms the whole page on focus for any
+     input with a computed font-size below 16px - a real, well-known
+     mobile annoyance, not a cosmetic choice. */
+  font-size: 16px;
   color: var(--text-primary);
   font-family: inherit;
   transition: border-color 0.15s ease;
@@ -384,7 +394,15 @@ body {
 /* ---------- stat tiles ---------- */
 .tiles {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  /* 200px, not 180px: measured directly (a temporary Playwright page with
+     the real font/weight/letter-spacing) - "$5021.80" at the regular 28px
+     value size needs ~144.5px, and a 180px column (140px content once the
+     18px/20px padding comes off) lost that by under a pixel, silently
+     wrapping "Balance"/"Margen libre" mid-number on any viewport width
+     where auto-fit's natural column landed near that minimum (~400-640px,
+     i.e. plenty of real phones/small tablets). 200px leaves a real
+     margin (160px content vs ~144.5px needed) instead of a coin flip. */
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
   gap: 16px;
   margin-bottom: 24px;
 }
@@ -396,6 +414,27 @@ body {
   padding: 18px 20px;
   position: relative;
   overflow: hidden;
+  /* Grid items default to min-width: auto (sized to fit content without
+     wrapping), which lets an unbreakable string like "$5021.80" force this
+     tile wider than its actual 1fr track instead of respecting it - the
+     box then clips at the intended width anyway (overflow: hidden above),
+     silently cutting off trailing digits. min-width: 0 makes the tile
+     actually shrink to the track's real width so wrapping/clipping happens
+     where it's supposed to. Found on desktop: the hero tile's 42px value
+     rendered "$5021.8", not "$5021.80". */
+  min-width: 0;
+  /* Lets .tile .value below query THIS box's actual rendered width rather
+     than the viewport's - the same numeric value can land in a 180px
+     column (auto-fit, single column on mobile), a ~184px column (two
+     natural columns around 400-640px wide), or a ~380px spanned column
+     (hero, >=640px, see below) depending on how many tiles fit per row -
+     a viewport-width media query would need a different breakpoint for
+     every one of those cases and is easy to get subtly wrong at the
+     boundaries (found exactly that: forcing the hero to span 2 columns
+     below 640px made auto-fit shrink the SECOND column under its own
+     180px minimum instead of just stacking to 1 column). Querying the
+     tile's own width sidesteps all of that. */
+  container-type: inline-size;
   transition: transform 0.25s ease, box-shadow 0.25s ease, border-color 0.25s ease;
 }
 .tile:hover { transform: translateY(-2px); box-shadow: var(--shadow-md); border-color: var(--border); }
@@ -406,11 +445,42 @@ body {
   font-variant-numeric: proportional-nums;
   letter-spacing: -0.02em;
   line-height: 1.15;
+  /* Defense in depth alongside min-width: 0 above and the hero's extra
+     grid-column span below - if a value is ever still too wide for its
+     tile (a very large account balance, a narrow viewport), wrap onto a
+     second line instead of silently clipping a digit off the end. */
+  overflow-wrap: anywhere;
 }
 .tile .delta { font-size: 12px; margin-top: 7px; font-weight: 600; min-height: 15px; }
 .tile .delta.up { color: var(--delta-good); }
 .tile .delta.down { color: var(--delta-critical); }
+/* Give the hero tile roughly double a normal tile's width so its bigger
+   (42px) font has room to actually fit on one line instead of relying
+   only on wrapping - also reads as the emphasized "hero" stat it's meant
+   to be. Gated behind a min-width, NOT applied unconditionally: with
+   auto-fit, an item that spans 2 columns forces the grid to allocate 2
+   columns even when the container is only wide enough for ~1.5x the
+   minimum - auto-fit then had to shrink the second column below its own
+   200px minimum instead of just stacking to 1 column like every other
+   tile does, which made "Balance"/"Margen libre" wrap mid-number instead
+   of just sitting on their own row like before. 640px comfortably clears
+   the point where 2 real (>=200px) columns fit on their own anyway, so
+   the span never has to force anything. */
+@media (min-width: 640px) {
+  .tile.hero { grid-column: span 2; }
+}
 .tile.hero .value { font-size: 42px; text-shadow: var(--glow-blue); }
+/* Below 640px the hero doesn't get the extra column span above, so its
+   own rendered width is whatever auto-fit gave it - anywhere from ~200px
+   (single column) up to ~420px (two natural columns on a wider phone/
+   small tablet). 42px needs ~218px for "$5021.80" alone (measured
+   directly, before padding) - too tight for the narrow end of that
+   range. Querying the tile's OWN rendered width (not the viewport)
+   catches every one of those in-between cases without hand-picking a
+   breakpoint for each. */
+@container (max-width: 380px) {
+  .tile.hero .value { font-size: 28px; }
+}
 
 /* ---------- panels / charts ---------- */
 .grid {
@@ -479,6 +549,19 @@ svg text { fill: var(--text-muted); font-size: 11px; font-family: inherit; }
 .tooltip .tt-time { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
 
 /* ---------- table ---------- */
+/* The trades table has 7 columns including a full datetime - on a phone-
+   width viewport that doesn't fit no matter how tight the columns get.
+   Scrolling horizontally INSIDE this box (not the whole page, which stays
+   non-scrolling-x via body's overflow-x: hidden) keeps every column
+   reachable instead of silently clipping the ones that don't fit -
+   confirmed missing before this on a 360px-wide viewport, where only
+   "Apertura/Lado/Lote" and half of "Entrada" were ever visible. */
+#trades-table {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+#trades-table table { min-width: 620px; }
+
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 thead th {
   text-align: left;
@@ -564,3 +647,17 @@ tbody tr:hover { background: var(--surface-2); }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 999px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* ---------- touch targets ---------- */
+/* (pointer: coarse) targets actual touch input (finger, not mouse/
+   trackpad) regardless of screen size - a touch laptop stays untouched,
+   a narrow-but-mouse-driven window gets bumped anyway if it happens to
+   also match, which is harmless. ~44px is the commonly cited comfortable
+   minimum tap target (Apple HIG / Material Design) - btn-control-primary
+   controls the actual trading engine, worth being comfortably tappable
+   rather than a near-miss. */
+@media (pointer: coarse) {
+  .btn-control { min-height: 44px; padding: 10px 18px; font-size: 13px; }
+  .tab-btn { padding: 13px 18px; font-size: 14px; }
+  .theme-toggle { width: 44px; height: 44px; }
+}
