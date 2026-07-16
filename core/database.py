@@ -29,6 +29,10 @@ CREATE TABLE IF NOT EXISTS trades (
 );
 CREATE INDEX IF NOT EXISTS idx_trades_opened_at ON trades(opened_at);
 CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
+-- pnl_daily/pnl_monthly aggregate WHERE closed_at IS NOT NULL, GROUP BY a
+-- substring of closed_at - this index is what keeps that from becoming a
+-- full table scan as trade history grows over months of live operation.
+CREATE INDEX IF NOT EXISTS idx_trades_closed_at ON trades(closed_at);
 
 CREATE TABLE IF NOT EXISTS account_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -37,6 +41,13 @@ CREATE TABLE IF NOT EXISTS account_snapshots (
     equity REAL NOT NULL,
     free_margin REAL NOT NULL
 );
+-- account_snapshots gets a row every engine poll (every poll_seconds, so a
+-- few tens of thousands of rows/day) with no natural cap - unlike trades,
+-- which only grow with real activity. Without this index, equity_curve(),
+-- the latest-snapshot lookup, AND the hourly retention prune (see
+-- prune_old_snapshots) all degrade to a full table scan as this table
+-- grows, right when a live deployment has been running longest.
+CREATE INDEX IF NOT EXISTS idx_account_snapshots_ts ON account_snapshots(ts);
 
 CREATE TABLE IF NOT EXISTS engine_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -94,6 +105,13 @@ class Database:
         conn = sqlite3.connect(self.db_path, timeout=5.0)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=5000")
+        # WAL's own documentation recommends NORMAL over the default FULL:
+        # under WAL, NORMAL still guarantees no corruption on a crash/power
+        # loss, it only risks losing the most recent commit(s) that hadn't
+        # been checkpointed yet - an acceptable trade for account_snapshots
+        # writing every poll_seconds, where fsync-per-commit is otherwise
+        # the dominant cost of every engine step.
+        conn.execute("PRAGMA synchronous=NORMAL")
         conn.row_factory = sqlite3.Row
         try:
             yield conn
