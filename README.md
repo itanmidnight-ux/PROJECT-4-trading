@@ -30,6 +30,20 @@ y un dashboard nativo para ver resultados.
   primero para ver los numeros reales de tu cuenta - esto es evidencia de
   documentacion publica de FBS, no una garantia de como esta configurada
   tu cuenta especifica.
+- **El bot no asume NINGUN apalancamiento fijo, funciona con el que tenga
+  la cuenta.** No hay ningun "1:1" ni "1:500" hardcodeado en el codigo que
+  realmente opera: el margen sale de `order_calc_margin()` (el mismo
+  calculo que usa el broker) y el sizing por riesgo sale de
+  `RISK_PER_TRADE_USD` en dolares, no de un numero de lotes fijo - ninguno
+  de los dos depende de que apalancamiento tenga la cuenta. Con poco
+  apalancamiento (ej. 1:1) el margen requerido para el lote minimo puede
+  superar lo disponible en una cuenta chica; en ese caso el bot **rechaza
+  la señal con un mensaje claro** (`core/risk_manager.py`) en vez de
+  fallar o forzar una orden invalida - eso no es un bug, es matematica de
+  margen real: ningun cambio de codigo hace que $50 alcancen para un
+  contrato que necesita $4000 de margen. Si las señales se rechazan
+  siempre por margen insuficiente, el diagnostico es el apalancamiento/
+  balance de la cuenta, no el bot.
 - **"1000 trades/dia" es un techo, no una meta.** `MAX_TRADES_PER_DAY`
   limita cuantos trades como maximo puede abrir el bot en un dia; cuantos
   realmente abre depende de que aparezcan señales validas y de que haya
@@ -42,6 +56,15 @@ y un dashboard nativo para ver resultados.
   pasa del limite de drawdown diario, **cierra de inmediato cualquier
   posicion abierta** en vez de esperar a que el SL la alcance por su
   cuenta.
+- **Los niveles de take-profit se pueden configurar directamente en
+  dolares de ganancia, no en pips.** Por defecto solo el primer escalon
+  tiene un objetivo explicito en USD (`MIN_TP_USD`) y el resto son
+  multiplos de esa distancia de precio - el comportamiento original, ya
+  validado en el backtest de abajo. Si preferis que CADA escalon reserve
+  su propio monto en dolares (mas facil de razonar: "este nivel cierra
+  cuando llevo $0.60"), configura `TP_TARGETS_USD=0.28,0.60,1.20` en
+  `.env` (uno por cada `TP_LEVELS`, separados por coma). Vacio = sin
+  cambios respecto a antes. Ver `core/strategy.py::build_tp_ladder`.
 
 ## Arquitectura
 
