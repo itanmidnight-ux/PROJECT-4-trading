@@ -72,7 +72,7 @@ y un dashboard nativo para ver resultados.
 run.sh              -> arranca Xvfb (si hace falta), el bridge MT5 (Wine) y el motor
 install.sh           -> instala todo: deps de sistema, venv, Wine, terminal MT5, python de Windows
 main.py              -> entrypoint del motor (usa core/engine.py)
-dashboard.py          -> app nativa (pywebview) con el dashboard
+dashboard.py          -> dashboard: ventana nativa (pywebview) o pagina web (--web, puerto 9000)
 
 core/
   config.py           -> carga .env
@@ -129,7 +129,9 @@ manualmente y ajusta las rutas al inicio del script.
 ./stop.sh                   # detiene una instancia arrancada con --daemon
 ./emergency_stop.sh         # PARADA DE EMERGENCIA: cierra posiciones abiertas y detiene el motor ya
 
-.venv/bin/python dashboard.py     # abre el dashboard nativo (independiente del motor)
+.venv/bin/python dashboard.py       # pregunta: ventana nativa o web (independiente del motor)
+.venv/bin/python dashboard.py --web # directo como pagina web en http://127.0.0.1:9000
+.venv/bin/python dashboard.py --web --host 0.0.0.0 --port 9000  # accesible desde otro dispositivo en tu red
 
 .venv/bin/python scripts/fetch_market_data.py --interval 1m --range 5d   # historial real (proxy) para backtestear
 .venv/bin/python scripts/run_backtest.py --csv data/gold_history_1m.csv    # backtest con ese historial
@@ -228,6 +230,34 @@ Tambien alcanza con `touch data/EMERGENCY_STOP` desde cualquier cosa que
 pueda escribir al filesystem (no hace falta el script ni una sesion de
 shell interactiva). `scripts/doctor.sh` reporta si el interruptor esta
 activo.
+
+### Dashboard: ventana nativa o pagina web
+
+```bash
+.venv/bin/python dashboard.py       # terminal interactiva: pregunta que modo usar
+.venv/bin/python dashboard.py --native  # fuerza ventana nativa (salta la pregunta)
+.venv/bin/python dashboard.py --web     # dashboard web en http://127.0.0.1:9000
+.venv/bin/python dashboard.py --web --host 0.0.0.0 --port 9000  # accesible desde otro dispositivo de tu red
+```
+
+Sin flags y desde una terminal interactiva, pregunta que modo usar. Sin
+flags y sin terminal interactiva (ej. lanzado desde otro script), usa
+ventana nativa - el comportamiento original, sin cambios. `--web` corre
+exactamente el mismo Flask que ya servia la ventana nativa, pero
+escuchando directamente en el puerto indicado (9000 por defecto) en vez
+de solo internamente para pywebview - se puede abrir desde cualquier
+navegador.
+
+Todas las rutas son de solo lectura (balance, curva de equity, historial
+de trades, eventos) - no existe ninguna ruta que abra o cierre una
+operacion desde el dashboard, en ningun modo. Aun asi, `--host 0.0.0.0`
+expone esos datos reales de la cuenta a cualquiera en tu red local; el
+programa avisa esto por consola al arrancar. Para acceso solo desde esta
+maquina (el default, mas seguro), dejá `--host 127.0.0.1` sin tocar.
+
+pywebview (la libreria de la ventana nativa) ahora se importa solo cuando
+se usa ese modo, no al cargar el archivo - `--web` funciona incluso en
+una maquina sin ningun toolkit grafico instalado (un servidor headless).
 
 ### Dashboard: hardening y un par de bugs reales
 
