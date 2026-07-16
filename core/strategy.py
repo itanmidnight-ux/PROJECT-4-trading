@@ -116,9 +116,18 @@ class ScalpStrategy:
         atr_period: int = 14,
         adx_period: int = 14,
         trend_filter_adx_threshold: float = 35.0,
+        tp_targets_usd: list[float] | None = None,
     ) -> None:
         self.min_tp_usd = min_tp_usd
         self.tp_levels = max(1, tp_levels)
+        # Optional explicit per-level profit targets in USD (e.g. [0.28,
+        # 0.60, 1.20]) - see build_tp_ladder for why this exists. Empty
+        # means "not configured": falls back to the original behavior
+        # (only the first level is dollar-anchored via min_tp_usd, later
+        # levels are geometric multiples of its price distance) so existing
+        # deployments and the backtest history in the README are unaffected
+        # unless this is set explicitly.
+        self.tp_targets_usd = list(tp_targets_usd) if tp_targets_usd else []
         self.value_per_point_per_lot = value_per_point_per_lot
         self.rsi_oversold = rsi_oversold
         self.rsi_overbought = rsi_overbought
@@ -155,19 +164,54 @@ class ScalpStrategy:
         Multi-scale TP: first level locks in >= min_tp_usd as soon as
         possible (plus spread buffer), later levels scale out further out
         for the rest of the move. Fractions sum to 1.0.
+
+        Every level's price distance is ultimately anchored to a USD
+        amount, never a bare pip/point count - that's what makes the
+        levels leverage- and lot-size-independent (a fixed pip distance
+        would net wildly different real money depending on lot size; a
+        fixed dollar target doesn't). Two modes:
+          - tp_targets_usd unset (default): only the first level is
+            explicitly dollar-anchored (min_tp_usd); later levels are
+            geometric multiples of that price distance. This is the
+            original, backtested behavior (see README) - unchanged unless
+            tp_targets_usd is set.
+          - tp_targets_usd set: EVERY level gets its own explicit dollar
+            target for its slice, e.g. TP_TARGETS_USD=0.28,0.60,1.20 -
+            more directly configurable ("this level books $X") instead of
+            only the first level being meaningful in dollar terms.
         """
-        base_distance = self.min_tp_distance_for_lot(lot) + spread_price
         n = self.tp_levels
-        levels: list[TpLevel] = []
-        # geometric spacing: 1x, 1.8x, 3x, ... of the base distance
-        multipliers = [1.0 + 0.8 * i for i in range(n)]
         # front-load the fraction closed on the first (safest) level
         raw_fractions = [1.0 / (i + 1) for i in range(n)]
         total = sum(raw_fractions)
         fractions = [f / total for f in raw_fractions]
-        for mult, frac in zip(multipliers, fractions, strict=True):
-            levels.append(TpLevel(distance_price=base_distance * mult, close_fraction=frac))
-        return levels
+
+        if self.tp_targets_usd:
+            targets = list(self.tp_targets_usd)
+            if len(targets) < n:
+                targets += [targets[-1]] * (n - len(targets))  # repeat the last configured target, don't crash
+            levels: list[TpLevel] = []
+            prev_distance = 0.0
+            for target_usd, frac in zip(targets[:n], fractions, strict=True):
+                value_per_point_for_slice = self.value_per_point_per_lot * lot * frac
+                distance = (target_usd / value_per_point_for_slice if value_per_point_for_slice > 0
+                            else float("inf")) + spread_price
+                if distance <= prev_distance:
+                    # A ladder must scale OUTWARD - a misconfigured target
+                    # list (e.g. decreasing) can't produce a level closer
+                    # than the one before it, or price could never reach it
+                    # in order. Nudge it out instead of silently building a
+                    # broken ladder.
+                    distance = prev_distance * 1.001
+                levels.append(TpLevel(distance_price=distance, close_fraction=frac))
+                prev_distance = distance
+            return levels
+
+        base_distance = self.min_tp_distance_for_lot(lot) + spread_price
+        # geometric spacing: 1x, 1.8x, 3x, ... of the base distance
+        multipliers = [1.0 + 0.8 * i for i in range(n)]
+        return [TpLevel(distance_price=base_distance * mult, close_fraction=frac)
+                for mult, frac in zip(multipliers, fractions, strict=True)]
 
     def generate_signal(self, df: pd.DataFrame, spread_price: float, lot_hint: float) -> Signal:
         if self._bars_since_last_trade < self.cooldown_bars:

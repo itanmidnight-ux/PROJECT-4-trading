@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -34,6 +34,17 @@ def _int(name: str, default: int) -> int:
         return int(val) if val else default
     except ValueError:
         return default
+
+
+def _float_list(name: str, default: list[float]) -> list[float]:
+    val = os.getenv(name)
+    if not val or not val.strip():
+        return default
+    try:
+        parsed = [float(x.strip()) for x in val.split(",") if x.strip()]
+    except ValueError:
+        return default
+    return parsed if parsed else default
 
 
 @dataclass(frozen=True)
@@ -103,6 +114,14 @@ class Settings:
     strat_adx_period: int = 14
     strat_trend_filter_adx_threshold: float = 35.0
 
+    # Optional explicit per-level TP profit targets in USD, e.g.
+    # "0.28,0.60,1.20" - each level books its own configured dollar amount
+    # for its slice instead of only the first level being dollar-anchored
+    # (min_tp_usd) and later levels being geometric multiples of its price
+    # distance. Empty (default) preserves the original, already-backtested
+    # behavior - see core/strategy.py's build_tp_ladder.
+    tp_targets_usd: list[float] = field(default_factory=list)
+
 
 def load_settings() -> Settings:
     return Settings(
@@ -138,4 +157,5 @@ def load_settings() -> Settings:
         poll_seconds=max(_float("POLL_SECONDS", 2.0), 0.25),
         bridge_auth_token=os.getenv("BRIDGE_AUTH_TOKEN", ""),
         kill_switch_path=os.getenv("KILL_SWITCH_PATH", "data/EMERGENCY_STOP"),
+        tp_targets_usd=_float_list("TP_TARGETS_USD", []),
     )

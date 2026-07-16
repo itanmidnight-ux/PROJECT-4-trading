@@ -68,3 +68,19 @@ def test_snapshot_retention_days_defaults_and_reads_from_env(monkeypatch):
 
     monkeypatch.setenv("SNAPSHOT_RETENTION_DAYS", "7")
     assert load_settings().snapshot_retention_days == 7
+
+
+def test_tp_targets_usd_defaults_empty_and_parses_comma_list(monkeypatch):
+    monkeypatch.delenv("TP_TARGETS_USD", raising=False)
+    assert load_settings().tp_targets_usd == []
+
+    monkeypatch.setenv("TP_TARGETS_USD", "0.28,0.60,1.20")
+    assert load_settings().tp_targets_usd == [0.28, 0.60, 1.20]
+
+    monkeypatch.setenv("TP_TARGETS_USD", " 0.5 , 1.0 ")  # tolerates stray whitespace
+    assert load_settings().tp_targets_usd == [0.5, 1.0]
+
+
+def test_tp_targets_usd_malformed_falls_back_to_empty(monkeypatch):
+    monkeypatch.setenv("TP_TARGETS_USD", "not-a-number,0.5")
+    assert load_settings().tp_targets_usd == []

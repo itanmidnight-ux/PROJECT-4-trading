@@ -172,3 +172,53 @@ def test_tp1_nets_at_least_min_tp_usd_for_its_slice():
     tp1 = ladder[0]
     realized_usd = tp1.distance_price * s.value_per_point_per_lot * (lot * tp1.close_fraction)
     assert realized_usd >= s.min_tp_usd
+
+
+def test_tp_targets_usd_unset_preserves_original_ladder_behavior():
+    """Backward compatibility: leaving TP_TARGETS_USD unset must produce
+    byte-for-byte the same ladder as before this feature existed - the
+    README's backtest history is tied to this exact default behavior."""
+    with_targets_unset = ScalpStrategy(min_tp_usd=0.28, tp_levels=3, value_per_point_per_lot=100.0)
+    without_targets_param = strategy()
+    lot, spread = 0.02, 0.2
+    assert with_targets_unset.build_tp_ladder(lot, spread) == without_targets_param.build_tp_ladder(lot, spread)
+
+
+def test_tp_targets_usd_each_level_nets_its_own_configured_target():
+    """The actual feature: each level books ITS OWN dollar amount, not
+    just a price-distance multiple of the first level."""
+    targets = [0.28, 0.60, 1.20]
+    s = ScalpStrategy(min_tp_usd=0.28, tp_levels=3, value_per_point_per_lot=100.0,
+                       tp_targets_usd=targets)
+    lot = 0.02
+    ladder = s.build_tp_ladder(lot=lot, spread_price=0.2)
+    assert len(ladder) == 3
+    for level, target in zip(ladder, targets, strict=True):
+        # distance includes a spread buffer, so realized profit is
+        # slightly ABOVE the raw target, never below it.
+        realized_usd = level.distance_price * s.value_per_point_per_lot * (lot * level.close_fraction)
+        assert realized_usd >= target
+        assert realized_usd < target + 5.0  # sanity: buffer shouldn't balloon it
+
+
+def test_tp_targets_usd_shorter_than_tp_levels_repeats_the_last_value():
+    s = ScalpStrategy(min_tp_usd=0.28, tp_levels=3, value_per_point_per_lot=100.0,
+                       tp_targets_usd=[0.28])  # only one target for 3 levels
+    ladder = s.build_tp_ladder(lot=0.02, spread_price=0.2)
+    assert len(ladder) == 3
+    distances = [l.distance_price for l in ladder]
+    assert distances == sorted(distances)
+    assert all(d > 0 for d in distances)
+
+
+def test_tp_targets_usd_misconfigured_as_decreasing_still_produces_a_valid_ladder():
+    """A ladder must scale outward - if someone configures decreasing
+    targets by mistake, the levels must still increase in price distance
+    (price can't reach a 'further' TP before a 'closer' one), not silently
+    build a broken ladder."""
+    s = ScalpStrategy(min_tp_usd=0.28, tp_levels=3, value_per_point_per_lot=100.0,
+                       tp_targets_usd=[1.20, 0.60, 0.28])  # deliberately decreasing
+    ladder = s.build_tp_ladder(lot=0.02, spread_price=0.2)
+    distances = [l.distance_price for l in ladder]
+    assert distances == sorted(distances)
+    assert len(set(distances)) == 3  # strictly increasing, not just non-decreasing
