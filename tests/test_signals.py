@@ -170,8 +170,8 @@ def test_directional_candle_ignores_small_indecisive_candle():
 
 # ----------------------------------------------------------- SessionOpen
 def session_strategy(**kwargs) -> SessionOpenStrategy:
-    defaults = dict(cooldown_bars=2, max_spread_price=0.5, min_atr_price=0.1, sl_atr_multiple=2.0,
-                     london_start_hour=7, london_end_hour=10, ny_start_hour=12, ny_end_hour=16)
+    defaults = {"cooldown_bars": 2, "max_spread_price": 0.5, "min_atr_price": 0.1, "sl_atr_multiple": 2.0,
+                "london_start_hour": 7, "london_end_hour": 10, "ny_start_hour": 12, "ny_end_hour": 16}
     defaults.update(kwargs)
     return SessionOpenStrategy(**defaults)
 
@@ -274,9 +274,9 @@ def test_momentum_cross_silent_with_no_history():
 
 # ------------------------------------------------------- AsianRangeBreakout
 def asian_strategy(**kwargs) -> AsianRangeBreakoutStrategy:
-    defaults = dict(cooldown_bars=2, max_spread_price=0.5, min_atr_price=0.05, sl_atr_multiple=2.0,
-                     range_start_hour=0, range_end_hour=7, breakout_start_hour=7, breakout_end_hour=10,
-                     buffer_pct=0.05)
+    defaults = {"cooldown_bars": 2, "max_spread_price": 0.5, "min_atr_price": 0.05, "sl_atr_multiple": 2.0,
+                "range_start_hour": 0, "range_end_hour": 7, "breakout_start_hour": 7, "breakout_end_hour": 10,
+                "buffer_pct": 0.05}
     defaults.update(kwargs)
     return AsianRangeBreakoutStrategy(**defaults)
 
