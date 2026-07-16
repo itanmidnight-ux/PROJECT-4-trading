@@ -1,4 +1,5 @@
 const POLL_MS = 3000;
+const THEME_KEY = 'xauusd-dashboard-theme';
 const tooltip = document.getElementById('tooltip');
 
 // Defense in depth: most fields rendered below come from fixed server-side
@@ -20,6 +21,29 @@ const fmtSigned = (v) => {
   const n = Number(v || 0);
   return `${n >= 0 ? '+' : ''}${n.toFixed(2)}`;
 };
+
+const EMPTY_ICON = `<svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 5-7"/></svg>`;
+
+// ------------------------------------------------------------------- theme
+function effectiveTheme() {
+  const saved = localStorage.getItem(THEME_KEY);
+  if (saved) return saved;
+  return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+}
+function applyTheme(saved) {
+  if (saved) document.documentElement.setAttribute('data-theme', saved);
+  else document.documentElement.removeAttribute('data-theme');
+  const btn = document.getElementById('theme-toggle');
+  if (btn) btn.classList.toggle('is-light', effectiveTheme() === 'light');
+}
+function initTheme() {
+  applyTheme(localStorage.getItem(THEME_KEY));
+  document.getElementById('theme-toggle')?.addEventListener('click', () => {
+    const next = effectiveTheme() === 'light' ? 'dark' : 'light';
+    localStorage.setItem(THEME_KEY, next);
+    applyTheme(next);
+  });
+}
 
 function animateValue(el, to, formatter) {
   const from = parseFloat(el.dataset.raw || '0');
@@ -44,31 +68,39 @@ function showTooltip(x, y, html) {
 }
 function hideTooltip() { tooltip.style.opacity = 0; }
 
+// A rounded rect that only rounds the corners AT the data end (the end far
+// from the baseline) and stays square where it meets the baseline - a bar
+// visually "grows from" the baseline, so rounding that edge would make it
+// look like it's floating instead of anchored to zero.
+function roundedBarPath(x, y, w, h, r, roundTop) {
+  r = Math.max(0, Math.min(r, w / 2, h));
+  if (roundTop) {
+    return `M ${x} ${y + h} L ${x} ${y + r} Q ${x} ${y} ${x + r} ${y} `
+         + `L ${x + w - r} ${y} Q ${x + w} ${y} ${x + w} ${y + r} L ${x + w} ${y + h} Z`;
+  }
+  return `M ${x} ${y} L ${x} ${y + h - r} Q ${x} ${y + h} ${x + r} ${y + h} `
+       + `L ${x + w - r} ${y + h} Q ${x + w} ${y + h} ${x + w} ${y + h - r} L ${x + w} ${y} Z`;
+}
+
 // ---------------------------------------------------------------- line chart
 function renderLineChart(containerId, points, { valueKey = 'equity', label = 'Equity' } = {}) {
   const container = document.getElementById(containerId);
   if (!points || points.length < 2) {
-    container.innerHTML = '<div class="empty">Aun no hay suficientes datos</div>';
+    container.innerHTML = `<div class="empty">${EMPTY_ICON}Aun no hay suficientes datos</div>`;
     return;
   }
-  const W = container.clientWidth || 560, H = 220, PAD = 34;
+  const W = container.clientWidth || 560, H = 220, PAD = 34, plotRight = W - 8;
   const vals = points.map(p => p[valueKey]);
   const min = Math.min(...vals), max = Math.max(...vals);
   const range = (max - min) || 1;
-  const x = (i) => PAD + (i / (points.length - 1)) * (W - PAD * 1.5);
+  const x = (i) => PAD + (i / (points.length - 1)) * (plotRight - PAD);
   const y = (v) => H - PAD + 4 - ((v - min) / range) * (H - PAD * 1.5);
-  // Must match x(i)'s actual spacing - this used to be W / points.length,
-  // an unrelated quantity that only coincidentally lined up when PAD was
-  // negligible relative to W, leaving the invisible tooltip hit-boxes
-  // increasingly misaligned from the real point positions as PAD's share
-  // of W grew (small containers, few points).
-  const hitStep = (W - PAD * 1.5) / (points.length - 1);
 
   let gridSvg = '';
   for (let i = 0; i <= 3; i++) {
     const gy = PAD - 4 + i * ((H - PAD * 1.5) / 3);
     const val = max - (i / 3) * range;
-    gridSvg += `<line class="grid-line" x1="${PAD}" x2="${W - 8}" y1="${gy}" y2="${gy}" />`;
+    gridSvg += `<line class="grid-line" x1="${PAD}" x2="${plotRight}" y1="${gy}" y2="${gy}" />`;
     gridSvg += `<text x="4" y="${gy + 3}">${val.toFixed(1)}</text>`;
   }
 
@@ -79,22 +111,51 @@ function renderLineChart(containerId, points, { valueKey = 'equity', label = 'Eq
   const svg = `
     <svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
       ${gridSvg}
-      <line class="baseline" x1="${PAD}" x2="${W - 8}" y1="${H - PAD + 4}" y2="${H - PAD + 4}" />
+      <line class="baseline" x1="${PAD}" x2="${plotRight}" y1="${H - PAD + 4}" y2="${H - PAD + 4}" />
       <path d="${areaPath}" fill="var(--series-1-wash)" stroke="none" />
       <path d="${path}" fill="none" stroke="var(--series-1)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />
       <circle cx="${x(points.length - 1)}" cy="${y(last[valueKey])}" r="4" fill="var(--series-1)" stroke="var(--surface-1)" stroke-width="2" />
-      ${points.map((p, i) => `<rect x="${(x(i) - hitStep / 2).toFixed(1)}" y="0" width="${hitStep.toFixed(1)}" height="${H}" fill="transparent" data-i="${i}" class="hit" />`).join('')}
+      <line class="crosshair" x1="0" x2="0" y1="0" y2="${H}" />
+      <circle class="crosshair-dot" r="5" fill="var(--series-1)" stroke="var(--surface-1)" stroke-width="2" />
+      <rect class="hit-area" x="${PAD}" y="0" width="${Math.max(plotRight - PAD, 1)}" height="${H}" fill="transparent" />
     </svg>`;
   container.innerHTML = svg;
 
-  container.querySelectorAll('.hit').forEach((el) => {
-    el.addEventListener('mousemove', (e) => {
-      const i = Number(el.dataset.i);
-      const p = points[i];
-      const t = new Date(p.ts).toLocaleTimeString();
-      showTooltip(e.clientX, e.clientY, `<b>${label}</b><br>${fmtUsd(p[valueKey])}<br><span style="color:var(--text-muted)">${t}</span>`);
-    });
-    el.addEventListener('mouseleave', hideTooltip);
+  // A single full-width hit area with one mousemove handler that snaps to
+  // the nearest data index, instead of one tiny hit-rect per point - with
+  // up to 300 equity snapshots in a ~600px chart, per-point boxes would be
+  // only a couple of px wide each, well under any reasonable hit target.
+  const svgEl = container.querySelector('svg');
+  const crosshair = container.querySelector('.crosshair');
+  const crosshairDot = container.querySelector('.crosshair-dot');
+  const hitArea = container.querySelector('.hit-area');
+
+  hitArea.addEventListener('mousemove', (e) => {
+    const rect = svgEl.getBoundingClientRect();
+    const scaleX = W / rect.width;
+    const px = (e.clientX - rect.left) * scaleX;
+    const frac = (px - PAD) / (plotRight - PAD);
+    const i = Math.max(0, Math.min(points.length - 1, Math.round(frac * (points.length - 1))));
+    const p = points[i];
+    const cx = x(i), cy = y(p[valueKey]);
+
+    crosshair.setAttribute('x1', cx.toFixed(1));
+    crosshair.setAttribute('x2', cx.toFixed(1));
+    crosshair.style.opacity = 1;
+    crosshairDot.setAttribute('cx', cx.toFixed(1));
+    crosshairDot.setAttribute('cy', cy.toFixed(1));
+    crosshairDot.style.opacity = 1;
+
+    const t = new Date(p.ts).toLocaleTimeString();
+    showTooltip(e.clientX, e.clientY,
+      `<div class="tt-value">${escapeHtml(fmtUsd(p[valueKey]))}</div>`
+      + `<div class="tt-label">${escapeHtml(label)}</div>`
+      + `<div class="tt-time">${escapeHtml(t)}</div>`);
+  });
+  hitArea.addEventListener('mouseleave', () => {
+    crosshair.style.opacity = 0;
+    crosshairDot.style.opacity = 0;
+    hideTooltip();
   });
 }
 
@@ -103,7 +164,7 @@ function renderDonut(containerId, wins, losses) {
   const container = document.getElementById(containerId);
   const total = wins + losses;
   if (total === 0) {
-    container.innerHTML = '<div class="empty">Aun no hay trades cerrados</div>';
+    container.innerHTML = `<div class="empty">${EMPTY_ICON}Aun no hay trades cerrados</div>`;
     return;
   }
   const R = 70, CX = 100, CY = 100, STROKE = 22;
@@ -136,7 +197,7 @@ function renderDonut(containerId, wins, losses) {
 function renderBarChart(containerId, rows, { xKey, valueKey = 'pnl' } = {}) {
   const container = document.getElementById(containerId);
   if (!rows || rows.length === 0) {
-    container.innerHTML = '<div class="empty">Aun no hay datos</div>';
+    container.innerHTML = `<div class="empty">${EMPTY_ICON}Aun no hay datos</div>`;
     return;
   }
   const W = container.clientWidth || 560, H = 220, PAD = 34;
@@ -149,12 +210,13 @@ function renderBarChart(containerId, rows, { xKey, valueKey = 'pnl' } = {}) {
   let bars = '';
   rows.forEach((r, i) => {
     const v = Number(r[valueKey] || 0);
-    const h = (Math.abs(v) / maxAbs) * (H / 2 - 16);
-    const x = PAD + i * step + (step - barW) / 2;
-    const color = v >= 0 ? 'var(--good)' : 'var(--critical)';
-    const y = v >= 0 ? zeroY - h : zeroY;
-    bars += `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${Math.max(h, 1).toFixed(1)}"
-      rx="4" fill="${color}" data-i="${i}" class="bar" />`;
+    const isPositive = v >= 0;
+    const h = Math.max((Math.abs(v) / maxAbs) * (H / 2 - 16), 1);
+    const barX = PAD + i * step + (step - barW) / 2;
+    const barY = isPositive ? zeroY - h : zeroY;
+    const color = isPositive ? 'var(--good)' : 'var(--critical)';
+    const d = roundedBarPath(barX, barY, Math.max(barW, 1), h, 4, isPositive);
+    bars += `<path d="${d}" fill="${color}" data-i="${i}" class="bar" />`;
   });
 
   const svg = `
@@ -168,8 +230,12 @@ function renderBarChart(containerId, rows, { xKey, valueKey = 'pnl' } = {}) {
     el.addEventListener('mousemove', (e) => {
       const i = Number(el.dataset.i);
       const r = rows[i];
+      const v = Number(r[valueKey] || 0);
+      const valueColor = v >= 0 ? 'var(--delta-good)' : 'var(--delta-critical)';
       showTooltip(e.clientX, e.clientY,
-        `<b>${r[xKey]}</b><br>P&amp;L: ${fmtSigned(r[valueKey])}<br>Trades: ${r.trades} (${r.wins} ganadas)`);
+        `<div class="tt-value" style="color:${valueColor}">${escapeHtml(fmtSigned(v))}</div>`
+        + `<div class="tt-label">${escapeHtml(String(r[xKey]))}</div>`
+        + `<div class="tt-time">${escapeHtml(String(r.trades))} trades · ${escapeHtml(String(r.wins))} ganadas</div>`);
     });
     el.addEventListener('mouseleave', hideTooltip);
   });
@@ -179,7 +245,7 @@ function renderBarChart(containerId, rows, { xKey, valueKey = 'pnl' } = {}) {
 function renderTrades(containerId, trades) {
   const container = document.getElementById(containerId);
   if (!trades || trades.length === 0) {
-    container.innerHTML = '<div class="empty">Aun no hay operaciones registradas</div>';
+    container.innerHTML = `<div class="empty">${EMPTY_ICON}Aun no hay operaciones registradas</div>`;
     return;
   }
   const rows = trades.map(t => {
@@ -206,7 +272,7 @@ function renderTrades(containerId, trades) {
 function renderEvents(containerId, events) {
   const container = document.getElementById(containerId);
   if (!events || events.length === 0) {
-    container.innerHTML = '<div class="empty">Sin eventos todavia</div>';
+    container.innerHTML = `<div class="empty">${EMPTY_ICON}Sin eventos todavia</div>`;
     return;
   }
   const levelClass = (lvl) => {
@@ -273,8 +339,7 @@ async function refresh() {
 
   // Each section below only updates if ITS OWN fetch succeeded - a single
   // failing endpoint leaves that one panel showing its last good state
-  // instead of blanking the entire dashboard (the old Promise.all-based
-  // version failed everything together on any single rejection).
+  // instead of blanking the entire dashboard.
   if (summary) {
     const eqEl = document.getElementById('tile-equity');
     animateValue(eqEl, summary.equity || 0, fmtUsd);
@@ -283,7 +348,7 @@ async function refresh() {
 
     const pnlEl = document.getElementById('tile-pnl');
     pnlEl.textContent = fmtSigned(summary.total_pnl);
-    pnlEl.style.color = summary.total_pnl >= 0 ? 'var(--good)' : 'var(--critical)';
+    pnlEl.style.color = summary.total_pnl >= 0 ? 'var(--delta-good)' : 'var(--delta-critical)';
 
     document.getElementById('tile-trades').textContent = summary.total_trades ?? 0;
     const wr = summary.total_trades ? Math.round((summary.wins / summary.total_trades) * 100) : 0;
@@ -292,13 +357,25 @@ async function refresh() {
     renderDonut('chart-donut', summary.wins || 0, summary.losses || 0);
   }
 
-  if (equity) renderLineChart('chart-equity', equity, { valueKey: 'equity', label: 'Equity' });
+  if (equity) {
+    renderLineChart('chart-equity', equity, { valueKey: 'equity', label: 'Equity' });
+    const deltaEl = document.getElementById('tile-equity-delta');
+    if (deltaEl && equity.length >= 2) {
+      const delta = equity[equity.length - 1].equity - equity[0].equity;
+      deltaEl.textContent = `${delta >= 0 ? '▲' : '▼'} ${fmtSigned(delta)} vs. inicio del grafico`;
+      deltaEl.className = 'delta ' + (delta >= 0 ? 'up' : 'down');
+    } else if (deltaEl) {
+      deltaEl.textContent = '';
+      deltaEl.className = 'delta';
+    }
+  }
   if (daily) renderBarChart('chart-daily', [...daily].reverse(), { xKey: 'day', valueKey: 'pnl' });
   if (monthly) renderBarChart('chart-monthly', [...monthly].reverse(), { xKey: 'month', valueKey: 'pnl' });
   if (trades) renderTrades('trades-table', trades);
   if (events) renderEvents('events-list', events);
 }
 
+initTheme();
 refresh();
 setInterval(refresh, POLL_MS);
 window.addEventListener('resize', refresh);
