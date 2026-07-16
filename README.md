@@ -259,6 +259,47 @@ pywebview (la libreria de la ventana nativa) ahora se importa solo cuando
 se usa ese modo, no al cargar el archivo - `--web` funciona incluso en
 una maquina sin ningun toolkit grafico instalado (un servidor headless).
 
+### Dashboard: rediseño visual
+
+Ventana nativa y dashboard web sirven exactamente el mismo
+`dashboard/index.html` + `app.js` + `style.css` desde el mismo Flask -
+cualquier mejora visual aplica a los dos por igual, no hay nada que portar
+entre uno y otro. Cambios (siguiendo una metodologia de diseño de datos con
+validacion de paleta por contraste/daltonismo, no elegida a ojo):
+
+- **Selector de tema claro/oscuro manual**, con boton en el header (antes
+  solo seguia la preferencia del sistema operativo). Se guarda en
+  `localStorage` y persiste entre sesiones.
+- **Colores de estado separados de los colores de texto.** Los badges de
+  estado (conectado/dry-run/desconectado, nivel de evento) usan una paleta
+  fija que no cambia entre tema claro/oscuro - la severidad significa lo
+  mismo en los dos temas. El texto de P&L/deltas usa una paleta aparte que
+  si se ajusta por tema (mismo criterio que usan sistemas de diseño
+  validados: colores de "identidad/severidad" fijos, colores de "texto"
+  adaptados al fondo). Paleta verificada con un validador automatico de
+  contraste y separacion por daltonismo, no a ojo.
+- **Grafico de equity: crosshair real en vez de cajas de hover diminutas.**
+  Antes cada punto tenia su propia caja invisible de hover - con la curva
+  mostrando hasta 300 lecturas en un grafico de ~600px, cada caja terminaba
+  siendo de un par de pixeles de ancho, virtualmente imposible de acertar
+  con el mouse. Ahora hay una sola zona de hover que calcula el punto mas
+  cercano al cursor y muestra una linea vertical + tooltip, sin importar
+  cuantos puntos tenga la curva.
+- **Barras de P&L con esquinas redondeadas solo en el extremo del dato**,
+  no en el extremo que toca la linea base (una barra "crece" desde cero;
+  redondear ese extremo la hacia parecer flotando en vez de anclada).
+- **Tooltips con el valor primero, la etiqueta despues** (el dato es lo que
+  se busca al pasar el mouse, no el nombre de la serie).
+- El tile de equity ahora muestra el cambio real (▲/▼ en USD) desde el
+  inicio del grafico visible - antes ese elemento existia en el HTML pero
+  nunca se llenaba con datos.
+- Favicon propio, scrollbar con estilo consistente, estados vacios con
+  icono en vez de solo texto.
+
+Verificado con capturas de pantalla reales (Chromium headless via
+Playwright) en modo claro, oscuro, con datos, vacio, y con el mouse sobre
+los graficos - no solo lectura de codigo.
+
 ### Dashboard: hardening y un par de bugs reales
 
 Revision del frontend (`dashboard/app.js`), verificada con Chromium real
