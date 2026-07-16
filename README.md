@@ -229,6 +229,32 @@ pueda escribir al filesystem (no hace falta el script ni una sesion de
 shell interactiva). `scripts/doctor.sh` reporta si el interruptor esta
 activo.
 
+### Dashboard: hardening y un par de bugs reales
+
+Revision del frontend (`dashboard/app.js`), verificada con Chromium real
+via Playwright (no solo lectura de codigo):
+
+- **Los mensajes de eventos ahora se escapan antes de insertarse en el
+  DOM.** El manejador generico de errores del motor guarda texto crudo de
+  excepciones en la tabla de eventos (`f"{type(exc).__name__}: {exc}"`),
+  que el dashboard mostraba con `innerHTML` sin escapar - un mensaje de
+  error con caracteres como `<` o `"` se habria interpretado como HTML en
+  vez de mostrarse como texto. Probado inyectando un mensaje con
+  `<img src=x onerror=...>`: ahora se ve como texto literal, no se
+  ejecuta.
+- **Los "hitbox" invisibles del grafico de equity (para el tooltip al
+  pasar el mouse) usaban un ancho de columna que no coincidia con el
+  espaciado real de los puntos**, asi que el tooltip podia no aparecer o
+  corresponder al punto equivocado, mas notorio con pocos puntos o un
+  grafico angosto. Corregido para usar el mismo espaciado que el trazado
+  real.
+- **Un solo endpoint del dashboard que fallara tumbaba TODO el refresco**
+  (`Promise.all` fallaba entero si cualquiera de las 7 llamadas fallaba).
+  Ahora cada seccion (tiles, curva de equity, grafico diario/mensual,
+  tabla de trades, eventos) se actualiza de forma independiente - si una
+  falla, las demas se siguen actualizando con normalidad en vez de dejar
+  todo el dashboard en blanco.
+
 ### Antes de operar en real
 
 `DRY_RUN=true` en `.env` (valor por defecto) hace que el motor lea
