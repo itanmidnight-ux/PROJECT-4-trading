@@ -81,20 +81,70 @@ install_termux() {
 
     log "Paso 1/3: paquetes de Termux"
     pkg update -y
-    pkg install -y python
+    pkg install -y python coreutils
 
     log "Paso 2/3: venv de Python + dependencias"
+    # numpy y pandas NO tienen wheels precompilados para Termux/Android en
+    # PyPI (libc bionic, ABI distinto de manylinux) - si pip tiene que
+    # compilarlos desde el codigo fuente puede tardar mucho (30-90+
+    # minutos en un telefono real) o fallar sin las herramientas de
+    # compilacion adecuadas, y como esto antes corria en modo silencioso
+    # (-q, sin progreso visible) se veia exactamente igual a que el
+    # instalador se hubiera colgado. Termux SI tiene sus propios paquetes
+    # binarios para estos (compilados una vez por el equipo de Termux, no
+    # por vos) - los probamos primero via pkg para evitar la compilacion
+    # por completo; el venv se crea con --system-site-packages para poder
+    # verlos desde adentro.
+    local got_numpy_via_pkg=0 got_pandas_via_pkg=0
+    if pkg install -y python-numpy 2>/dev/null; then
+        got_numpy_via_pkg=1
+        log "numpy instalado via pkg (binario, sin compilar)."
+    else
+        warn "python-numpy no esta disponible via pkg en este Termux - pip va a intentar compilarlo (puede tardar bastante)."
+    fi
+    if pkg install -y python-pandas 2>/dev/null; then
+        got_pandas_via_pkg=1
+        log "pandas instalado via pkg (binario, sin compilar)."
+    else
+        warn "python-pandas no esta disponible via pkg en este Termux - pip va a intentar compilarlo (puede tardar bastante, a veces 30+ minutos)."
+    fi
+
+    # A venv from a previous run of an older install.sh (or one that got
+    # interrupted before this fix) may exist without --system-site-packages -
+    # it would never see the numpy/pandas pkg installed above, so pip would
+    # go straight back to compiling them from source on every re-run.
+    # Recreate it rather than leave that stuck state around.
+    if [ -d "$VENV_DIR" ] && ! grep -q 'include-system-site-packages = true' "$VENV_DIR/pyvenv.cfg" 2>/dev/null; then
+        warn "El venv existente no tiene --system-site-packages - recreandolo para que vea numpy/pandas de pkg."
+        rm -rf "$VENV_DIR"
+    fi
     if [ ! -d "$VENV_DIR" ]; then
-        python3 -m venv "$VENV_DIR"
+        python3 -m venv --system-site-packages "$VENV_DIR"
     fi
     # shellcheck disable=SC1091
     source "$VENV_DIR/bin/activate"
     pip install --upgrade pip -q
+
     # pywebview (ventana nativa) necesita un backend GTK/Qt real que Termux
-    # no tiene - se instala todo LO DEMAS de requirements.txt y se omite esa
-    # linea a proposito. dashboard.py ya hace el import de webview de forma
-    # perezosa (solo si elegis modo nativo), asi que --web funciona igual.
-    grep -v '^pywebview' requirements.txt | pip install -r /dev/stdin -q
+    # no tiene - se omite a proposito (dashboard.py ya hace el import de
+    # forma perezosa, --web funciona igual). numpy/pandas se omiten SOLO
+    # si pkg ya los proveyo arriba, para que pip no los recompile encima
+    # del binario que ya esta instalado.
+    local skip_pattern='^pywebview'
+    [ "$got_numpy_via_pkg" -eq 1 ] && skip_pattern="${skip_pattern}|^numpy"
+    [ "$got_pandas_via_pkg" -eq 1 ] && skip_pattern="${skip_pattern}|^pandas"
+
+    log "Instalando el resto de las dependencias con pip (con progreso visible)..."
+    log "Si numpy o pandas terminan compilando desde el codigo fuente esto puede tardar bastante - no se colgo, mostrando progreso real."
+    if ! grep -vE "$skip_pattern" requirements.txt | timeout 2400 pip install -r /dev/stdin --progress-bar on; then
+        deactivate
+        err "La instalacion de dependencias de Python fallo, o paso los 40 minutos de limite."
+        err "Si fue numpy/pandas compilando desde el codigo fuente, instala las herramientas de compilacion primero:"
+        err "  pkg install -y clang make pkg-config"
+        err "y volve a correr ./install.sh. Tambien podes revisar 'pkg search python-pandas' para confirmar si tu"
+        err "repo de Termux lo tiene como paquete binario (evita la compilacion por completo)."
+        return 1
+    fi
     deactivate
     log "venv listo en $VENV_DIR (sin pywebview - usa dashboard.py --web en Termux)"
 
