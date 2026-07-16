@@ -61,6 +61,17 @@ if [ -f ".env" ]; then
     else
         ok "Interruptor de emergencia inactivo ($kill_switch no existe)"
     fi
+    pause_flag="${PAUSE_FLAG_PATH:-data/PAUSED}"
+    if [ -f "$PROJECT_ROOT/$pause_flag" ]; then
+        warn "El bot esta PAUSADO manualmente ($pause_flag existe) - no abrira operaciones nuevas hasta que le des \"Reanudar bot\" en el dashboard (si hay posiciones abiertas se siguen gestionando normalmente)."
+    else
+        ok "Bot no pausado ($pause_flag no existe)"
+    fi
+    if [ -n "${DASHBOARD_AUTH_TOKEN:-}" ]; then
+        ok "DASHBOARD_AUTH_TOKEN configurado (Settings y pausar/reanudar exigen autenticacion)"
+    else
+        warn "DASHBOARD_AUTH_TOKEN vacio - las rutas de Settings y pausar/reanudar del dashboard no piden credencial. Sin importancia en uso local (ventana nativa o --web en 127.0.0.1); configuralo si vas a usar --web --host 0.0.0.0."
+    fi
 else
     bad "no existe .env - corre ./install.sh"
 fi

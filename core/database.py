@@ -44,6 +44,19 @@ CREATE TABLE IF NOT EXISTS engine_events (
     level TEXT NOT NULL,
     message TEXT NOT NULL
 );
+
+-- Simple key/value store for settings edited from the dashboard's Settings
+-- tab (broker login/password/server, risk parameters). Read at engine
+-- startup as an override layer on top of .env (see
+-- core/config.py::apply_db_overrides) - deliberately NOT hot-reloaded by a
+-- running engine process, since swapping broker credentials mid-session
+-- while a position might be open is a correctness/safety risk, not just an
+-- engineering convenience. A value here only takes effect the next time the
+-- engine starts.
+CREATE TABLE IF NOT EXISTS bot_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 
@@ -126,6 +139,22 @@ class Database:
                 "INSERT INTO engine_events (ts, level, message) VALUES (?, ?, ?)",
                 (ts, level, message),
             )
+
+    def set_settings(self, values: dict[str, str]) -> None:
+        """Upserts multiple key/value pairs in one transaction - used by the
+        dashboard's Settings tab save button so a partial write (e.g. a crash
+        mid-save) can't leave some keys updated and others stale."""
+        with self._connect() as conn:
+            conn.executemany(
+                "INSERT INTO bot_settings (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                list(values.items()),
+            )
+
+    def get_all_settings(self) -> dict[str, str]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT key, value FROM bot_settings").fetchall()
+            return {r["key"]: r["value"] for r in rows}
 
     def prune_old_snapshots(self, keep_days: int = 30) -> int:
         """account_snapshots gets a row every engine poll (as often as every

@@ -259,6 +259,61 @@ pywebview (la libreria de la ventana nativa) ahora se importa solo cuando
 se usa ese modo, no al cargar el archivo - `--web` funciona incluso en
 una maquina sin ningun toolkit grafico instalado (un servidor headless).
 
+### Dashboard: pestaña Settings, y parar/reanudar el bot desde ahi
+
+Dos controles nuevos, disponibles en los dos modos (nativo y web, mismo
+frontend):
+
+**Boton "Detener bot" / "Reanudar bot"** (arriba a la derecha, cambia de
+uno a otro segun el estado real). Pausa - no es el interruptor de
+emergencia: deja de abrir operaciones NUEVAS pero sigue gestionando y
+protegiendo cualquier posicion ya abierta (SL/TP siguen activos), y el
+motor sigue corriendo - no hace falta reiniciar nada, reanudar es
+instantaneo. Internamente toca/borra un archivo (`PAUSE_FLAG_PATH` en
+`.env`, `data/PAUSED` por defecto) que el motor ya revisa en cada paso. Si
+necesitas cerrar posiciones abiertas YA en vez de solo pausar, eso sigue
+siendo `./emergency_stop.sh` (ver mas arriba) - son dos controles
+distintos a proposito.
+
+**Pestaña Settings**: cuenta MT5 (login, password, servidor), si es demo,
+DRY_RUN, y los limites de riesgo (`RISK_PER_TRADE_USD`,
+`MAX_DAILY_LOSS_USD`, `MAX_DAILY_DRAWDOWN_PCT`, `MAX_TRADES_PER_DAY`) -
+editables sin tocar `.env` a mano. **Funciona con cualquier broker
+compatible con MetaTrader 5, no solo FBS** - el campo "Servidor" es texto
+libre (ej. `FBS-Demo`, `ICMarkets-Live07`, `Pepperstone-Demo01`...), y
+`bridge/mt5_bridge_server.py` ya aceptaba cualquier servidor desde antes
+de que existiera esta pestaña (`mt5.login()` no esta atado a FBS en
+ningun lado del codigo).
+
+Detalles importantes:
+- **Los cambios se guardan en la base de datos local** (tabla
+  `bot_settings`, sobrevive reinicios) y **se aplican la proxima vez que
+  arranca el motor** (`./run.sh`) - a proposito NO son en caliente. Cambiar
+  de cuenta/servidor mientras el motor ya esta corriendo (y quizas con una
+  posicion abierta) es un riesgo real de confundir en que cuenta esta
+  parada esa posicion, asi que esto pide un reinicio en vez de intentar un
+  hot-reload. `/api/status` (los pills de arriba) siempre muestra la
+  cuenta con la que el motor YA esta conectado, nunca un cambio pendiente
+  sin aplicar - para eso esta la pestaña Settings.
+- **El password nunca se muestra ni se re-envia en texto plano.** El campo
+  siempre carga vacio; dejarlo vacio al guardar significa "no lo toques",
+  no "borralo". La API solo informa si hay uno guardado (`has_password`),
+  jamas su valor.
+- **Autenticacion en las rutas que modifican algo.** Igual que el bridge,
+  `DASHBOARD_AUTH_TOKEN` (vacio por defecto, `install.sh` NO lo genera
+  solo a diferencia de `BRIDGE_AUTH_TOKEN` - ver por que abajo) protege
+  `POST /api/settings` y `POST /api/bot/pause|resume` con el header
+  `X-Dashboard-Token`; las rutas de solo lectura no lo piden. Si el
+  dashboard pide el token (ventana emergente del navegador) y no lo
+  configuraste, la accion que intentabas hacer simplemente no se aplica.
+  Por que no se genera automaticamente como el del bridge: el bridge
+  siempre esta
+  expuesto al mismo riesgo (ejecuta ordenes reales) sin importar el modo;
+  el dashboard solo necesita el token cuando elegis exponerlo con
+  `--web --host 0.0.0.0` - forzarlo siempre agregaria una pregunta de
+  token hasta para el uso 100% local (ventana nativa), que no gana nada
+  de seguridad real ahi. `scripts/doctor.sh` reporta si esta configurado.
+
 ### Dashboard: rediseño visual
 
 Ventana nativa y dashboard web sirven exactamente el mismo

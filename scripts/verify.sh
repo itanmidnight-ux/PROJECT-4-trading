@@ -60,7 +60,7 @@ import dashboard as dmod
 client = dmod.app.test_client()
 for path in ("/", "/app.js", "/style.css", "/api/status", "/api/summary",
              "/api/equity_curve", "/api/pnl_daily", "/api/pnl_monthly",
-             "/api/trades", "/api/events"):
+             "/api/trades", "/api/events", "/api/settings"):
     r = client.get(path)
     assert r.status_code == 200, f"{path} -> {r.status_code}"
 print("     OK (todas las rutas del dashboard responden 200)")
