@@ -129,6 +129,7 @@ class TradingEngine:
             atr_period=self.settings.strat_atr_period,
             adx_period=self.settings.strat_adx_period,
             trend_filter_adx_threshold=self.settings.strat_trend_filter_adx_threshold,
+            tp_targets_usd=self.settings.tp_targets_usd,
         )
         self._spec = spec  # assign last: an exception above must leave state uninitialized
 
