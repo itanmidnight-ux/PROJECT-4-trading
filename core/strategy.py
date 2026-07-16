@@ -61,6 +61,14 @@ def compute_indicators(df: pd.DataFrame, bb_period: int = 20, bb_std: float = 2.
     out["bb_upper"] = mid + bb_std * std
     out["bb_lower"] = mid - bb_std * std
 
+    # EMAs used by the momentum/breakout signals in core/signals.py, not by
+    # the mean-reversion signal below - computed here too so every
+    # consumer (backtest, engine, live) shares one indicator pass instead
+    # of each strategy recomputing its own.
+    out["ema9"] = out["close"].ewm(span=9, adjust=False).mean()
+    out["ema21"] = out["close"].ewm(span=21, adjust=False).mean()
+    out["ema50"] = out["close"].ewm(span=50, adjust=False).mean()
+
     delta = out["close"].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
