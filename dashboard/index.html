@@ -21,11 +21,13 @@
     <div class="topbar-right">
       <div class="status-pills">
         <span class="pill" id="pill-mode"><span class="dot"></span><span id="pill-mode-text">—</span></span>
+        <span class="pill" id="pill-engine"><span class="dot"></span><span id="pill-engine-text">Motor detenido</span></span>
         <span class="pill" id="pill-conn"><span class="dot"></span><span id="pill-conn-text">Conectando…</span></span>
         <span class="pill" id="pill-paused" hidden><span class="dot"></span>Pausado</span>
         <span class="pill"><span class="dot" style="background:var(--series-1)"></span>Actualizado <span id="pill-updated">—</span></span>
       </div>
-      <button class="btn-control" id="btn-pause-resume" type="button" data-paused="0">Detener bot</button>
+      <button class="btn-control btn-control-primary" id="btn-engine-start-stop" type="button" data-running="0">Iniciar motor</button>
+      <button class="btn-control" id="btn-pause-resume" type="button" data-paused="0" disabled>Pausar entradas</button>
       <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Cambiar tema claro/oscuro" title="Cambiar tema claro/oscuro">
         <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
         <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z"/></svg>
@@ -172,7 +174,7 @@
 
       <div class="settings-note">
         Los datos se guardan en la base de datos local (persisten reinicios) y se aplican
-        <strong>la proxima vez que arranque el motor</strong> (<code>./run.sh</code>) - no afectan
+        <strong>la proxima vez que arranque el motor</strong> (boton "Iniciar motor" arriba) - no afectan
         una sesion que ya esta corriendo, para no cambiar de cuenta/servidor mientras hay una
         posicion abierta. El campo de password siempre se muestra vacio al cargar esta pestaña:
         escribi uno nuevo solo si queres cambiarlo, dejalo vacio para conservar el guardado.

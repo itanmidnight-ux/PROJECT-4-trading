@@ -251,6 +251,23 @@ body {
   color: var(--good);
 }
 
+/* ---------- engine start/stop control (the primary one) ---------- */
+/* Solid fill instead of the pause button's tinted-outline style, so the
+   control that actually turns trading on/off reads as more consequential
+   than the secondary pause/resume toggle next to it. */
+.btn-control-primary {
+  border-color: var(--good);
+  background: var(--good);
+  color: #0b0c0f;
+}
+.btn-control-primary.is-running {
+  border-color: var(--critical);
+  background: var(--critical);
+  color: #fff;
+}
+#pill-engine.live .dot { background: var(--good); box-shadow: 0 0 8px var(--good); animation: pulse 1.6s infinite; }
+#pill-engine.off .dot { background: var(--text-muted); box-shadow: none; animation: none; }
+
 @keyframes pulse {
   0%, 100% { opacity: 1; transform: scale(1); }
   50% { opacity: 0.55; transform: scale(0.8); }
