@@ -326,6 +326,12 @@ function initTabs() {
 }
 
 // ---------------------------------------------------------- pause / resume
+// Distinct from the engine start/stop control below: this only matters
+// while the engine PROCESS is already running (it flips a flag file an
+// already-running engine polls for) - it does nothing if the process
+// isn't up at all, so the button stays disabled until it is.
+let engineIsRunning = false;
+
 function updatePauseButton(paused) {
   // Single source of truth for both the button AND the "Pausado" pill, so
   // a manual click updates them together immediately instead of the pill
@@ -335,9 +341,10 @@ function updatePauseButton(paused) {
 
   const btn = document.getElementById('btn-pause-resume');
   if (!btn) return;
-  btn.textContent = paused ? 'Reanudar bot' : 'Detener bot';
+  btn.textContent = paused ? 'Reanudar entradas' : 'Pausar entradas';
   btn.classList.toggle('is-paused', paused);
   btn.dataset.paused = paused ? '1' : '0';
+  btn.disabled = !engineIsRunning;
 }
 
 function initPauseButton() {
@@ -355,6 +362,60 @@ function initPauseButton() {
       }
     } catch (e) {
       console.error('No se pudo cambiar el estado del bot:', e);
+    } finally {
+      btn.disabled = !engineIsRunning;
+    }
+  });
+}
+
+// ------------------------------------------------------- engine start/stop
+// The primary control: whether the engine PROCESS exists at all. Separate
+// from pause/resume above on purpose - run.sh --start only brings up the
+// bridge and this dashboard, never the engine itself (see
+// core/engine_supervisor.py), so this is how trading actually turns on.
+function updateEngineButton(running, stopping = false) {
+  engineIsRunning = running;
+
+  const pill = document.getElementById('pill-engine');
+  const pillText = document.getElementById('pill-engine-text');
+  if (pill && pillText) {
+    pill.className = 'pill ' + (running ? 'live' : 'off');
+    pillText.textContent = stopping ? 'Deteniendo motor…' : (running ? 'Motor corriendo' : 'Motor detenido');
+  }
+
+  const btn = document.getElementById('btn-engine-start-stop');
+  if (btn) {
+    btn.textContent = stopping ? 'Deteniendo…' : (running ? 'Detener motor' : 'Iniciar motor');
+    btn.classList.toggle('is-running', running);
+    btn.dataset.running = running ? '1' : '0';
+  }
+
+  // Pausing only makes sense while the engine is actually up.
+  const pauseBtn = document.getElementById('btn-pause-resume');
+  if (pauseBtn) pauseBtn.disabled = !running;
+}
+
+function initEngineButton() {
+  const btn = document.getElementById('btn-engine-start-stop');
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    const isRunning = btn.dataset.running === '1';
+    const endpoint = isRunning ? '/api/engine/stop' : '/api/engine/start';
+    btn.disabled = true;
+    if (isRunning) updateEngineButton(true, true);  // "Deteniendo..." right away, confirmed by the next poll
+    try {
+      const resp = await authFetch(endpoint, { method: 'POST' });
+      const result = await resp.json().catch(() => ({}));
+      if (resp.ok && result.ok) {
+        if (!isRunning) updateEngineButton(true);  // start responds with the real state immediately
+        // stop: leave the "Deteniendo..." state as-is, refresh() confirms it
+      } else {
+        updateEngineButton(isRunning);  // request rejected (409/etc) - revert to what we knew before
+        console.error('No se pudo cambiar el estado del motor:', result.error);
+      }
+    } catch (e) {
+      updateEngineButton(isRunning);
+      console.error('No se pudo cambiar el estado del motor:', e);
     } finally {
       btn.disabled = false;
     }
@@ -471,6 +532,7 @@ async function refresh() {
 
   document.getElementById('pill-updated').textContent = new Date().toLocaleTimeString();
 
+  updateEngineButton(!!status.engine_running);
   updatePauseButton(!!status.paused);
 
   // Each section below only updates if ITS OWN fetch succeeded - a single
@@ -513,6 +575,7 @@ async function refresh() {
 
 initTheme();
 initTabs();
+initEngineButton();
 initPauseButton();
 initSettingsForm();
 refresh();

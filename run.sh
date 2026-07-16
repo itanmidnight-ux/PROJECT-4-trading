@@ -7,26 +7,34 @@
 # (Termux, or any install that skipped Wine) it talks to whatever
 # MT5_BRIDGE_URL points at instead of assuming a local bridge exists.
 #
-# Subcommands (this file replaces stop.sh, emergency_stop.sh,
-# scripts/verify.sh and scripts/doctor.sh - install.sh and this are the
-# only two .sh files in the project):
+# Usage:
+#   ./run.sh --start     start the server (bridge + dashboard) in the
+#                         background - NOT the trading engine itself, see
+#                         below for why
+#   ./run.sh --stop      stop EVERYTHING (engine, dashboard, bridge, Xvfb)
+#                         - nothing is left running
+#   ./run.sh --status    nicely formatted report of what's up right now
 #
-#   ./run.sh                 start in the foreground
-#   ./run.sh --synthetic     no broker connection, simulated prices (testing)
-#   ./run.sh --daemon        start detached in the background
-#   ./run.sh stop            stop a --daemon instance cleanly
 #   ./run.sh emergency-stop [--clear]   manual kill switch (see below)
 #   ./run.sh verify          compile + tests + synthetic smoke test + dashboard API check
 #   ./run.sh doctor          read-only diagnostic of the current install
 #
-# Both the bridge and the engine (when started normally) are supervised:
-# if either process dies unexpectedly it is restarted automatically with
-# exponential backoff, instead of taking the whole system down. Ctrl+C
-# (or `./run.sh stop` in --daemon mode) stops everything cleanly.
+# Why the engine isn't started by --start: it's the thing that actually
+# places orders, and it's meant to be turned on deliberately, from the
+# dashboard (web or native), not automatically the moment a server starts
+# (e.g. after a reboot with a systemd unit - see
+# scripts/xauusd-scalper.service.template). `./run.sh --start` brings up
+# everything ELSE (the bridge, the dashboard at
+# http://127.0.0.1:9000) so the dashboard is there to start/stop the
+# engine from (POST /api/engine/start|stop) - see core/engine_supervisor.py
+# for the crash-resilient (restart-with-backoff) process that spawns and
+# controls, mirroring the exact policy this file used to apply to the
+# engine directly before that control moved to the dashboard.
 #
-# The dashboard is separate on purpose (run `python dashboard.py` in
-# another terminal) so you can watch stats without it dying if you
-# restart the engine, and vice versa.
+# Every component here (bridge, dashboard, and - separately - the engine
+# once started from the dashboard) is supervised: if one dies unexpectedly
+# it's restarted automatically with exponential backoff, instead of taking
+# the whole system down.
 # =====================================================================
 set -uo pipefail
 
@@ -38,6 +46,8 @@ WINEPREFIX_DIR="$PROJECT_ROOT/.wine"
 LOG_DIR="$PROJECT_ROOT/data/logs"
 RUN_DIR="$PROJECT_ROOT/data/run"
 STOP_FLAG="$RUN_DIR/stop.flag"
+DASHBOARD_HOST="127.0.0.1"
+DASHBOARD_PORT="9000"
 
 log()  { printf '\033[1;36m[run]\033[0m %s\n' "$*"; }
 err()  { printf '\033[1;31m[run][error]\033[0m %s\n' "$*" >&2; }
@@ -65,28 +75,27 @@ detect_platform() {
     echo "unknown"
 }
 
-# ============================================================ cmd: stop
-cmd_stop() {
-    local pidfile="$RUN_DIR/supervisor.pid"
-    if [ ! -f "$pidfile" ]; then
-        err "No hay una instancia registrada en $pidfile (no esta corriendo, o no se inicio con --daemon)."
-        return 1
-    fi
+# Stops whatever PID is in a pidfile, from OUTSIDE the process that
+# started it (used by --stop, which runs as a fresh invocation of this
+# script, not inside the backgrounded --start process - that one uses its
+# own local kill_pidfile/cleanup/trap, see cmd_start_foreground).
+kill_pidfile_external() {
+    local pidfile="$1" label="$2"
+    [ -f "$pidfile" ] || return 0
     local pid
-    pid=$(cat "$pidfile")
-    if ! kill -0 "$pid" 2>/dev/null; then
-        err "El proceso $pid ya no existe. Limpiando pidfile."
-        rm -f "$pidfile"
-        return 0
+    pid=$(cat "$pidfile" 2>/dev/null || true)
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        log "Deteniendo $label (PID $pid)..."
+        kill "$pid" 2>/dev/null || true
+        for _ in $(seq 1 20); do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 1
+        done
+        if kill -0 "$pid" 2>/dev/null; then
+            log "$label no respondio a tiempo, forzando con SIGKILL."
+            kill -9 "$pid" 2>/dev/null || true
+        fi
     fi
-    log "Enviando señal de parada al supervisor (PID $pid)..."
-    kill "$pid" 2>/dev/null || true
-    for _ in $(seq 1 20); do
-        kill -0 "$pid" 2>/dev/null || { log "Detenido."; return 0; }
-        sleep 1
-    done
-    err "No se detuvo a tiempo, forzando con SIGKILL."
-    kill -9 "$pid" 2>/dev/null || true
     rm -f "$pidfile"
 }
 
@@ -94,9 +103,16 @@ cmd_stop() {
 # Manual kill switch: touches the file the engine checks every poll cycle
 # (see core/engine.py, KILL_SWITCH_PATH in .env). The engine force-closes
 # any open position at market on its next step and halts - it does NOT
-# rely on the engine process being reachable via `run.sh stop`/kill, only
-# on the filesystem being writable, so this also works if something (Wine
-# hang, bridge stuck) is preventing a clean process shutdown.
+# rely on the engine process being reachable via `run.sh --stop`/kill,
+# only on the filesystem being writable, so this also works if something
+# (Wine hang, bridge stuck) is preventing a clean process shutdown. When
+# the engine halts this way, main.py tells core/engine_supervisor.py
+# directly (SIGTERM to ENGINE_SUPERVISOR_PID) not to restart it - this
+# used to instead touch data/run/stop.flag, which is this file's OWN
+# stop flag for the bridge/dashboard supervise() loop below, not
+# anything engine-specific, so that would have wrongly stopped the
+# server too. run_stop_flag here is now purely defensive cleanup for a
+# stale leftover from that old behavior.
 cmd_emergency_stop() {
     local kill_switch_path flag run_stop_flag
     kill_switch_path="$(grep -E '^KILL_SWITCH_PATH=' "$PROJECT_ROOT/.env" 2>/dev/null | head -1 | cut -d= -f2-)"
@@ -107,7 +123,7 @@ cmd_emergency_stop() {
     if [ "${1:-}" = "--clear" ]; then
         rm -f "$flag" "$run_stop_flag"
         log "Interruptor de emergencia desactivado ($flag eliminado)."
-        log "Corre ./run.sh de nuevo para reanudar el trading."
+        log "Iniciá el motor de nuevo desde el dashboard para reanudar el trading."
         return 0
     fi
 
@@ -115,7 +131,7 @@ cmd_emergency_stop() {
     touch "$flag"
     log "ACTIVADO: $flag creado."
     log "El motor cerrara cualquier posicion abierta a mercado y se detendra en su proximo ciclo de sondeo."
-    log "Para reanudar despues: ./run.sh emergency-stop --clear && ./run.sh"
+    log "Para reanudar despues: ./run.sh emergency-stop --clear, despues iniciar el motor desde el dashboard."
 }
 
 # ============================================================ cmd: verify
@@ -199,7 +215,7 @@ PYEOF
  Esto NO prueba que la estrategia sea rentable, ni que la conexion
  real a MT5/FBS funcione (eso necesita Wine + el bridge corriendo en
  una maquina Kali/Ubuntu, o un bridge remoto alcanzable desde aca).
- Para eso: ./install.sh, luego ./run.sh y revisa data/logs/bridge.log.
+ Para eso: ./install.sh, luego ./run.sh --start y abrí el dashboard.
 =====================================================================
 EOF
 }
@@ -249,7 +265,7 @@ cmd_doctor() {
         if [ -n "${MT5_LOGIN:-}" ] && [ -n "${MT5_PASSWORD:-}" ]; then
             ok "MT5_LOGIN y MT5_PASSWORD estan configurados"
         else
-            bad "MT5_LOGIN o MT5_PASSWORD vacios en .env - editalo o vuelve a correr ./install.sh"
+            bad "MT5_LOGIN o MT5_PASSWORD vacios en .env - editalo, corre ./install.sh, o completalo desde la pestaña Settings del dashboard"
         fi
         if [ "${DRY_RUN:-true}" = "true" ]; then
             ok "DRY_RUN=true (modo seguro: precios reales, sin ordenes reales)"
@@ -274,12 +290,12 @@ cmd_doctor() {
         fi
         local pause_flag="${PAUSE_FLAG_PATH:-data/PAUSED}"
         if [ -f "$PROJECT_ROOT/$pause_flag" ]; then
-            warn_msg "El bot esta PAUSADO manualmente ($pause_flag existe) - no abrira operaciones nuevas hasta \"Reanudar bot\" en el dashboard."
+            warn_msg "El bot esta PAUSADO manualmente ($pause_flag existe) - no abrira operaciones nuevas hasta \"Reanudar entradas\" en el dashboard."
         else
             ok "Bot no pausado ($pause_flag no existe)"
         fi
         if [ -n "${DASHBOARD_AUTH_TOKEN:-}" ]; then
-            ok "DASHBOARD_AUTH_TOKEN configurado (Settings y pausar/reanudar exigen autenticacion)"
+            ok "DASHBOARD_AUTH_TOKEN configurado (Settings, pausar/reanudar, e iniciar/detener el motor exigen autenticacion)"
         else
             warn_msg "DASHBOARD_AUTH_TOKEN vacio - sin importancia en uso local; configuralo si vas a usar --web --host 0.0.0.0."
         fi
@@ -347,26 +363,42 @@ cmd_doctor() {
         fi
     fi
 
-    section "5. Bridge MT5 (proceso en vivo, local)"
+    section "5. Procesos (bridge, dashboard, motor)"
     if curl -fsS "http://127.0.0.1:5001/health" >/dev/null 2>&1; then
         local health_json
         health_json=$(curl -fsS "http://127.0.0.1:5001/health" 2>/dev/null)
         if echo "$health_json" | grep -q '"connected": *true'; then
-            ok "bridge corriendo y con sesion MT5 activa"
+            ok "bridge corriendo (local) y con sesion MT5 activa"
         else
-            warn_msg "bridge corriendo pero SIN sesion MT5 activa (falta /login o credenciales invalidas)"
+            warn_msg "bridge corriendo (local) pero SIN sesion MT5 activa (falta /login o credenciales invalidas)"
         fi
     else
-        warn_msg "bridge no responde en 127.0.0.1:5001 (normal si ./run.sh no esta corriendo ahora mismo, o si el bridge es remoto)"
+        warn_msg "bridge no responde en 127.0.0.1:5001 (normal si ./run.sh --start no esta corriendo, o si el bridge es remoto)"
     fi
 
-    section "6. Procesos y espacio en disco"
-    if [ -f "data/run/supervisor.pid" ] && kill -0 "$(cat data/run/supervisor.pid)" 2>/dev/null; then
-        ok "hay una instancia de run.sh corriendo (PID $(cat data/run/supervisor.pid))"
+    if curl -fsS "http://${DASHBOARD_HOST}:${DASHBOARD_PORT}/api/status" >/dev/null 2>&1; then
+        local status_json
+        status_json=$(curl -fsS "http://${DASHBOARD_HOST}:${DASHBOARD_PORT}/api/status" 2>/dev/null)
+        ok "dashboard corriendo en http://${DASHBOARD_HOST}:${DASHBOARD_PORT}"
+        if echo "$status_json" | grep -q '"engine_running": *true'; then
+            ok "motor de trading CORRIENDO (iniciado desde el dashboard)"
+        else
+            warn_msg "motor de trading detenido - iniciarlo desde el dashboard cuando estes listo"
+        fi
     else
-        warn_msg "no hay ninguna instancia de run.sh corriendo ahora mismo"
+        warn_msg "dashboard no responde en http://${DASHBOARD_HOST}:${DASHBOARD_PORT} (normal si ./run.sh --start no esta corriendo)"
+        if [ -f "$RUN_DIR/engine.pid" ] && kill -0 "$(cat "$RUN_DIR/engine.pid" 2>/dev/null)" 2>/dev/null; then
+            warn_msg "hay un motor de trading corriendo (PID $(cat "$RUN_DIR/engine.pid")) pero el dashboard que lo controla no responde"
+        fi
     fi
 
+    if [ -f "$RUN_DIR/supervisor.pid" ] && kill -0 "$(cat "$RUN_DIR/supervisor.pid" 2>/dev/null)" 2>/dev/null; then
+        ok "el servidor (./run.sh --start) esta corriendo (PID $(cat "$RUN_DIR/supervisor.pid"))"
+    else
+        warn_msg "el servidor no esta corriendo (./run.sh --start para arrancarlo)"
+    fi
+
+    section "6. Espacio en disco"
     local avail_kb avail_mb
     avail_kb=$(df -Pk "$PROJECT_ROOT" | awk 'NR==2 {print $4}')
     avail_mb=$(( avail_kb / 1024 ))
@@ -389,70 +421,173 @@ cmd_doctor() {
     return 0
 }
 
-# ======================================================= subcommand dispatch
-SUBCOMMAND="${1:-}"
-case "$SUBCOMMAND" in
-    stop)
-        cmd_stop; exit $?
-        ;;
-    emergency-stop)
-        shift
-        cmd_emergency_stop "$@"; exit $?
-        ;;
-    verify)
-        cmd_verify; exit $?
-        ;;
-    doctor)
-        cmd_doctor; exit $?
-        ;;
-esac
+# ============================================================= cmd: --stop
+# Stops EVERYTHING: the trading engine (if the dashboard started one), the
+# server supervisor (which in turn stops the bridge, the dashboard, and
+# Xvfb via its own cleanup trap), and - belt and suspenders - any
+# individual component pidfile left over from an unclean shutdown (e.g.
+# the supervisor itself was killed with -9, so its trap never ran).
+cmd_stop_all() {
+    local anything=0
 
-# ============================================================= start (default)
-mkdir -p "$LOG_DIR" "$RUN_DIR"
-rm -f "$STOP_FLAG"
-
-SYNTHETIC_FLAG=""
-DAEMON=0
-for arg in "$@"; do
-    case "$arg" in
-        --synthetic) SYNTHETIC_FLAG="--synthetic" ;;
-        --daemon) DAEMON=1 ;;
-    esac
-done
-
-# ------------------------------------------------------------ daemon mode
-if [ "$DAEMON" -eq 1 ]; then
-    if [ -f "$RUN_DIR/supervisor.pid" ] && kill -0 "$(cat "$RUN_DIR/supervisor.pid")" 2>/dev/null; then
-        err "Ya hay una instancia corriendo (PID $(cat "$RUN_DIR/supervisor.pid")). Usa ./run.sh stop primero."
-        exit 1
+    if [ -f "$RUN_DIR/engine.pid" ]; then
+        kill_pidfile_external "$RUN_DIR/engine.pid" "motor de trading (bot)"
+        anything=1
     fi
-    log "Arrancando en modo daemon. Logs en $LOG_DIR, control con ./run.sh stop"
-    nohup "$0" $SYNTHETIC_FLAG >>"$LOG_DIR/run.log" 2>&1 &
+
+    if [ -f "$RUN_DIR/supervisor.pid" ]; then
+        kill_pidfile_external "$RUN_DIR/supervisor.pid" "supervisor del servidor"
+        anything=1
+    fi
+
+    local pf
+    for pf in bridge.pid dashboard.pid xvfb.pid; do
+        if [ -f "$RUN_DIR/$pf" ]; then
+            kill_pidfile_external "$RUN_DIR/$pf" "$pf"
+            anything=1
+        fi
+    done
+
+    rm -f "$STOP_FLAG"
+
+    if [ "$anything" -eq 0 ]; then
+        log "No habia nada corriendo."
+    else
+        log "Todo detenido - no queda nada corriendo."
+    fi
+}
+
+# =========================================================== cmd: --status
+# A nicely formatted snapshot of what's actually running right now -
+# pulls real account data from the dashboard's own /api/status when it's
+# reachable (the same data the dashboard UI shows), so this is a real
+# status view, not just "is the process alive".
+cmd_status() {
+    local platform
+    platform="$(detect_platform)"
+
+    local GREEN='\033[1;32m' RED='\033[1;31m' YELLOW='\033[1;33m' DIM='\033[2m' BOLD='\033[1m' RESET='\033[0m'
+    row() { printf "  %-16s %b\n" "$1" "$2"; }
+
+    printf "%b" "$BOLD"
+    echo "========================================================"
+    echo "  XAUUSD Scalper -- Estado"
+    echo "========================================================"
+    printf "%b\n" "$RESET"
+
+    row "Plataforma" "$platform"
+    echo
+
+    # ---- bridge ----
+    local bridge_url is_local_bridge="0"
+    if [ -f ".env" ]; then
+        bridge_url="$(grep -E '^MT5_BRIDGE_URL=' .env 2>/dev/null | head -1 | cut -d= -f2-)"
+    fi
+    bridge_url="${bridge_url:-http://127.0.0.1:5001}"
+    case "$bridge_url" in *127.0.0.1*|*localhost*) is_local_bridge="1" ;; esac
+
+    if curl -fsS "${bridge_url}/health" >/dev/null 2>&1; then
+        local health_json connected="false"
+        health_json=$(curl -fsS "${bridge_url}/health" 2>/dev/null)
+        echo "$health_json" | grep -q '"connected": *true' && connected="true"
+        if [ "$connected" = "true" ]; then
+            row "Bridge MT5" "${GREEN}●${RESET} activo $([ "$is_local_bridge" = "1" ] && echo "(local)" || echo "(remoto: $bridge_url)") -- sesion MT5: conectada"
+        else
+            row "Bridge MT5" "${YELLOW}●${RESET} activo $([ "$is_local_bridge" = "1" ] && echo "(local)" || echo "(remoto: $bridge_url)") -- sesion MT5: SIN conectar"
+        fi
+    else
+        row "Bridge MT5" "${RED}●${RESET} detenido/inalcanzable ($bridge_url)"
+    fi
+
+    # ---- dashboard + engine + account (via the dashboard's own API) ----
+    if curl -fsS "http://${DASHBOARD_HOST}:${DASHBOARD_PORT}/api/status" >/dev/null 2>&1; then
+        local status_json
+        status_json=$(curl -fsS "http://${DASHBOARD_HOST}:${DASHBOARD_PORT}/api/status" 2>/dev/null)
+        row "Dashboard" "${GREEN}●${RESET} activo -- http://${DASHBOARD_HOST}:${DASHBOARD_PORT}"
+
+        if echo "$status_json" | grep -q '"engine_running": *true'; then
+            local mode paused
+            mode=$(echo "$status_json" | grep -o '"mode": *"[^"]*"' | cut -d'"' -f4)
+            paused="no"
+            echo "$status_json" | grep -q '"paused": *true' && paused="SI (pausado)"
+            row "Motor / Bot" "${GREEN}●${RESET} corriendo -- modo: ${mode:-?}  pausado: ${paused}"
+        else
+            row "Motor / Bot" "${DIM}●${RESET} detenido -- iniciarlo desde el dashboard cuando estes listo"
+        fi
+
+        echo
+        local login server connected
+        login=$(echo "$status_json" | grep -o '"login": *"[^"]*"' | cut -d'"' -f4)
+        server=$(echo "$status_json" | grep -o '"server": *"[^"]*"' | cut -d'"' -f4)
+        connected="no"
+        echo "$status_json" | grep -q '"connected": *true' && connected="si"
+        row "Cuenta" "${login:-sin configurar} @ ${server:-?}"
+        row "Datos recientes" "$connected"
+    else
+        row "Dashboard" "${RED}●${RESET} detenido/inalcanzable -- corre ./run.sh --start"
+        if [ -f "$RUN_DIR/engine.pid" ] && kill -0 "$(cat "$RUN_DIR/engine.pid" 2>/dev/null)" 2>/dev/null; then
+            row "Motor / Bot" "${YELLOW}●${RESET} corriendo (PID $(cat "$RUN_DIR/engine.pid")) pero el dashboard que lo controla no responde"
+        else
+            row "Motor / Bot" "${DIM}●${RESET} detenido"
+        fi
+    fi
+
+    printf "%b" "$BOLD"
+    echo
+    echo "========================================================"
+    printf "%b" "$RESET"
+    echo "  ./run.sh --stop        detener todo (motor + dashboard + bridge)"
+    echo "  ./run.sh doctor        diagnostico completo"
+    if curl -fsS "http://${DASHBOARD_HOST}:${DASHBOARD_PORT}/api/status" >/dev/null 2>&1; then
+        echo "  Dashboard (control del bot): http://${DASHBOARD_HOST}:${DASHBOARD_PORT}"
+    fi
+    printf "%b" "$BOLD"
+    echo "========================================================"
+    printf "%b" "$RESET"
+}
+
+# ============================================================= cmd: --start
+cmd_start() {
+    if [ -f "$RUN_DIR/supervisor.pid" ] && kill -0 "$(cat "$RUN_DIR/supervisor.pid" 2>/dev/null)" 2>/dev/null; then
+        err "Ya hay una instancia corriendo (PID $(cat "$RUN_DIR/supervisor.pid")). Usa ./run.sh --stop primero."
+        return 1
+    fi
+    if [ ! -d "$VENV_DIR" ]; then
+        err "No se encontro $VENV_DIR. Corre ./install.sh primero."
+        return 1
+    fi
+    if [ ! -f "$PROJECT_ROOT/.env" ]; then
+        err "No se encontro .env. Corre ./install.sh primero (crea .env desde .env.example)."
+        return 1
+    fi
+
+    mkdir -p "$LOG_DIR" "$RUN_DIR"
+    rm -f "$STOP_FLAG"
+
+    log "Arrancando el servidor (bridge + dashboard) en segundo plano..."
+    RUN_SH_FOREGROUND=1 nohup "$0" --start >>"$LOG_DIR/run.log" 2>&1 &
     disown
     echo $! > "$RUN_DIR/supervisor.pid"
-    sleep 1
-    log "PID del supervisor: $(cat "$RUN_DIR/supervisor.pid")"
-    exit 0
-fi
+    sleep 2
 
-echo $$ > "$RUN_DIR/supervisor.pid"
-
-if [ ! -d "$VENV_DIR" ]; then
-    err "No se encontro $VENV_DIR. Corre ./install.sh primero."
-    exit 1
-fi
-if [ ! -f "$PROJECT_ROOT/.env" ]; then
-    err "No se encontro .env. Corre ./install.sh primero (crea .env desde .env.example)."
-    exit 1
-fi
-
-# shellcheck disable=SC1091
-source "$VENV_DIR/bin/activate"
+    if kill -0 "$(cat "$RUN_DIR/supervisor.pid" 2>/dev/null)" 2>/dev/null; then
+        log "Arrancado. PID del supervisor: $(cat "$RUN_DIR/supervisor.pid")"
+        log "Dashboard: http://${DASHBOARD_HOST}:${DASHBOARD_PORT} -- iniciá el motor desde ahí cuando estés listo."
+        log "Corré ./run.sh --status en unos segundos para confirmar que todo esta arriba."
+    else
+        err "El supervisor no siguio corriendo. Revisa $LOG_DIR/run.log"
+        return 1
+    fi
+}
 
 # Kills whatever PID is recorded in a pidfile, if it's still alive. Used
-# both by cleanup (stop everything) and by supervise (stop a superseded
-# child before restarting it), so a dead process never leaves the pidfile
-# pointing at something misleading.
+# by cleanup() below (stop everything) - only ever invoked via
+# `trap cleanup INT TERM EXIT` in cmd_start_foreground, never called
+# directly, which is exactly what makes shellcheck's static reachability
+# analysis flag both of these as SC2317 "unreachable" (it doesn't treat a
+# trap's function-name argument as a call site) - false positive, real
+# runtime behavior is unaffected. See shellcheck.net/wiki/SC2317.
+# shellcheck disable=SC2317
 kill_pidfile() {
     local pidfile="$1"
     [ -f "$pidfile" ] || return 0
@@ -466,31 +601,26 @@ kill_pidfile() {
     rm -f "$pidfile"
 }
 
+# shellcheck disable=SC2317  # only reachable via `trap cleanup ...` - see kill_pidfile's comment above
 cleanup() {
-    log "Deteniendo procesos..."
+    log "Deteniendo procesos del servidor..."
     # STOP_FLAG is intentionally left in place here (only cleared at the
-    # top of the NEXT ./run.sh invocation): if we deleted it now, a
-    # supervise() loop that gets interrupted mid-wait by this same signal
-    # could resume, find the flag already gone, and spawn one more
-    # "restart" right as we're trying to shut down - an orphaned process
-    # `./run.sh stop` would then have no way to reach.
+    # top of the NEXT --start) - a supervise() loop interrupted mid-wait
+    # by this same signal could otherwise resume and spawn one more
+    # "restart" right as we're trying to shut down.
     touch "$STOP_FLAG"
-    kill_pidfile "$RUN_DIR/engine.pid"
     kill_pidfile "$RUN_DIR/bridge.pid"
+    kill_pidfile "$RUN_DIR/dashboard.pid"
     kill_pidfile "$RUN_DIR/xvfb.pid"
     rm -f "$RUN_DIR/supervisor.pid"
-    log "Detenido."
+    log "Servidor detenido. (El motor, si estaba corriendo, se detiene por separado - ./run.sh --stop se encarga de ambos.)"
 }
-trap cleanup INT TERM EXIT
 
 # Restarts a command forever with capped exponential backoff, writing its
-# PID to a pidfile, until $STOP_FLAG exists. A stop signal is a FILE (not
-# a shell variable) because this function's main loop runs in the current
-# process but the command it launches is a separate one - a file is the
-# one thing both the trap (in this process) and a future re-check here
-# can see. A run that survives >60s resets the backoff, so a process
-# that's generally healthy but flaps occasionally isn't punished with an
-# ever-growing wait after one transient failure.
+# PID to a pidfile, until $STOP_FLAG exists. A run that survives >= 60s
+# resets the backoff, so a process that's generally healthy but flaps
+# occasionally isn't punished with an ever-growing wait after one
+# transient failure.
 supervise() {
     local name="$1" pidfile="$2" logfile="$3"
     shift 3
@@ -517,63 +647,119 @@ supervise() {
     done
 }
 
-if [ -z "$SYNTHETIC_FLAG" ] && [ -d "$WINEPREFIX_DIR" ]; then
-    # ---- local bridge: this machine has a Wine prefix (Kali/Ubuntu install) ----
-    if [ -z "${DISPLAY:-}" ] && command -v Xvfb >/dev/null 2>&1; then
-        log "No hay DISPLAY, iniciando Xvfb en :99"
-        Xvfb :99 -screen 0 1024x768x16 >"$LOG_DIR/xvfb.log" 2>&1 &
-        echo $! > "$RUN_DIR/xvfb.pid"
-        export DISPLAY=:99
-        sleep 2
-    fi
+# Runs INSIDE the backgrounded process nohup'd by cmd_start above
+# (RUN_SH_FOREGROUND=1 is the marker) - actually brings up the bridge and
+# the dashboard, and stays alive supervising them until stopped.
+cmd_start_foreground() {
+    # shellcheck disable=SC1091
+    source "$VENV_DIR/bin/activate"
+    trap cleanup INT TERM EXIT
 
-    WIN_PYTHON="$WINEPREFIX_DIR/drive_c/users/$(whoami)/AppData/Local/Programs/Python/Python311/python.exe"
-    if [ ! -f "$WIN_PYTHON" ]; then
-        err "No se encontro python de Windows en $WIN_PYTHON. Corre ./install.sh."
-        exit 1
-    fi
-    export WINEPREFIX="$WINEPREFIX_DIR"
-    export WINEDEBUG=-all
-
-    BRIDGE_AUTH_TOKEN="$(grep -E '^BRIDGE_AUTH_TOKEN=' "$PROJECT_ROOT/.env" 2>/dev/null | head -1 | cut -d= -f2-)"
-    if [ -z "$BRIDGE_AUTH_TOKEN" ]; then
-        err "BRIDGE_AUTH_TOKEN no esta en .env - corre ./install.sh para generarlo (el bridge arrancara sin autenticacion mientras tanto)."
-    fi
-
-    supervise "bridge MT5" "$RUN_DIR/bridge.pid" "$LOG_DIR/bridge.log" \
-        wine "$WIN_PYTHON" "$PROJECT_ROOT/bridge/mt5_bridge_server.py" --port 5001 --token "$BRIDGE_AUTH_TOKEN" &
-    disown
-
-    log "Esperando a que el bridge responda en http://127.0.0.1:5001/health ..."
-    ready=0
-    for _ in $(seq 1 60); do
-        if curl -fsS "http://127.0.0.1:5001/health" >/dev/null 2>&1; then
-            ready=1
-            break
+    if [ -d "$WINEPREFIX_DIR" ]; then
+        # ---- local bridge: this machine has a Wine prefix (Kali/Ubuntu install) ----
+        if [ -z "${DISPLAY:-}" ] && command -v Xvfb >/dev/null 2>&1; then
+            log "No hay DISPLAY, iniciando Xvfb en :99"
+            Xvfb :99 -screen 0 1024x768x16 >"$LOG_DIR/xvfb.log" 2>&1 &
+            echo $! > "$RUN_DIR/xvfb.pid"
+            export DISPLAY=:99
+            sleep 2
         fi
-        sleep 2
-    done
-    if [ "$ready" -ne 1 ]; then
-        err "El bridge no respondio a tiempo. Revisa $LOG_DIR/bridge.log"
-        cleanup
-        exit 1
-    fi
-    log "Bridge listo."
-elif [ -z "$SYNTHETIC_FLAG" ]; then
-    # ---- no local Wine prefix (e.g. Termux): assume a remote bridge ----
-    MT5_BRIDGE_URL="$(grep -E '^MT5_BRIDGE_URL=' "$PROJECT_ROOT/.env" 2>/dev/null | head -1 | cut -d= -f2-)"
-    MT5_BRIDGE_URL="${MT5_BRIDGE_URL:-http://127.0.0.1:5001}"
-    log "No hay un prefijo de Wine local ($WINEPREFIX_DIR) - asumiendo bridge remoto en $MT5_BRIDGE_URL"
-    if curl -fsS "${MT5_BRIDGE_URL}/health" >/dev/null 2>&1; then
-        log "Bridge remoto responde."
-    else
-        err "No se pudo conectar a ${MT5_BRIDGE_URL}/health."
-        err "Si el bridge corre en otra maquina (Kali/Ubuntu con ./install.sh corrido), confirma que este levantado (./run.sh ahi) y que MT5_BRIDGE_URL en .env aca sea correcto."
-        err "Para probar sin broker mientras tanto: ./run.sh --synthetic"
-        cleanup
-        exit 1
-    fi
-fi
 
-supervise "motor de trading" "$RUN_DIR/engine.pid" "$LOG_DIR/engine.stdout.log" \
-    python3 "$PROJECT_ROOT/main.py" $SYNTHETIC_FLAG
+        WIN_PYTHON="$WINEPREFIX_DIR/drive_c/users/$(whoami)/AppData/Local/Programs/Python/Python311/python.exe"
+        if [ ! -f "$WIN_PYTHON" ]; then
+            err "No se encontro python de Windows en $WIN_PYTHON. Corre ./install.sh. Sigo arrancando el dashboard igual."
+        else
+            export WINEPREFIX="$WINEPREFIX_DIR"
+            export WINEDEBUG=-all
+
+            BRIDGE_AUTH_TOKEN="$(grep -E '^BRIDGE_AUTH_TOKEN=' "$PROJECT_ROOT/.env" 2>/dev/null | head -1 | cut -d= -f2-)"
+            if [ -z "$BRIDGE_AUTH_TOKEN" ]; then
+                err "BRIDGE_AUTH_TOKEN no esta en .env - corre ./install.sh para generarlo (el bridge arrancara sin autenticacion mientras tanto)."
+            fi
+
+            supervise "bridge MT5" "$RUN_DIR/bridge.pid" "$LOG_DIR/bridge.log" \
+                wine "$WIN_PYTHON" "$PROJECT_ROOT/bridge/mt5_bridge_server.py" --port 5001 --token "$BRIDGE_AUTH_TOKEN" &
+            disown
+
+            log "Esperando a que el bridge responda en http://127.0.0.1:5001/health ..."
+            ready=0
+            for _ in $(seq 1 60); do
+                if curl -fsS "http://127.0.0.1:5001/health" >/dev/null 2>&1; then
+                    ready=1
+                    break
+                fi
+                sleep 2
+            done
+            if [ "$ready" -ne 1 ]; then
+                # Deliberately NOT fatal: the dashboard still starts below,
+                # so credentials/config can be fixed from its Settings tab
+                # instead of only from a terminal. ./run.sh doctor and
+                # --status both surface this clearly either way.
+                err "El bridge no respondio a tiempo. Revisa $LOG_DIR/bridge.log - arrancando el dashboard igual."
+            else
+                log "Bridge listo."
+            fi
+        fi
+    else
+        # ---- no local Wine prefix (e.g. Termux): assume a remote bridge ----
+        MT5_BRIDGE_URL="$(grep -E '^MT5_BRIDGE_URL=' "$PROJECT_ROOT/.env" 2>/dev/null | head -1 | cut -d= -f2-)"
+        MT5_BRIDGE_URL="${MT5_BRIDGE_URL:-http://127.0.0.1:5001}"
+        log "No hay un prefijo de Wine local ($WINEPREFIX_DIR) - asumiendo bridge remoto en $MT5_BRIDGE_URL"
+        if curl -fsS "${MT5_BRIDGE_URL}/health" >/dev/null 2>&1; then
+            log "Bridge remoto responde."
+        else
+            err "No se pudo conectar a ${MT5_BRIDGE_URL}/health todavia."
+            err "Si el bridge corre en otra maquina (Kali/Ubuntu con ./install.sh corrido), confirma que este levantado (./run.sh --start ahi) y que MT5_BRIDGE_URL en .env aca sea correcto."
+            err "Arrancando el dashboard igual - podes ajustar MT5_BRIDGE_URL desde su pestaña Settings."
+        fi
+    fi
+
+    supervise "dashboard" "$RUN_DIR/dashboard.pid" "$LOG_DIR/dashboard.log" \
+        python3 "$PROJECT_ROOT/dashboard.py" --web --host "$DASHBOARD_HOST" --port "$DASHBOARD_PORT"
+}
+
+# ======================================================= subcommand dispatch
+case "${1:-}" in
+    --start)
+        if [ "${RUN_SH_FOREGROUND:-0}" = "1" ]; then
+            cmd_start_foreground
+        else
+            cmd_start
+        fi
+        exit $?
+        ;;
+    --stop)
+        cmd_stop_all; exit $?
+        ;;
+    --status)
+        cmd_status; exit $?
+        ;;
+    emergency-stop)
+        shift
+        cmd_emergency_stop "$@"; exit $?
+        ;;
+    verify)
+        cmd_verify; exit $?
+        ;;
+    doctor)
+        cmd_doctor; exit $?
+        ;;
+    *)
+        cat <<EOF
+Uso: ./run.sh <comando>
+
+  --start              arranca el servidor (bridge + dashboard) en segundo plano
+  --stop               detiene TODO (motor + dashboard + bridge) - no queda nada corriendo
+  --status             estado actual, bien formateado
+
+  emergency-stop [--clear]   interruptor de emergencia manual
+  verify                     compila + corre tests + prueba de humo + chequeo del dashboard
+  doctor                     diagnostico completo de la instalacion
+
+El motor de trading (el bot en si) se inicia y se detiene DESDE EL DASHBOARD
+(http://127.0.0.1:9000 despues de --start), no con este script - ver el
+encabezado de este archivo para el porque.
+EOF
+        exit 1
+        ;;
+esac

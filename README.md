@@ -69,8 +69,9 @@ y un dashboard nativo para ver resultados.
 ## Arquitectura
 
 ```
-run.sh              -> arranca Xvfb (si hace falta), el bridge MT5 (Wine) y el motor;
-                        tambien: run.sh stop / emergency-stop / verify / doctor
+run.sh              -> --start/--stop/--status del servidor (bridge + dashboard);
+                        el motor (el bot en si) se arranca/para SOLO desde el
+                        dashboard, no con run.sh - ver "Uso" mas abajo
 install.sh           -> instala todo, auto-detectando la plataforma (Kali/Ubuntu/Termux)
 main.py              -> entrypoint del motor (usa core/engine.py)
 dashboard.py          -> dashboard: ventana nativa (pywebview) o pagina web (--web, puerto 9000)
@@ -128,7 +129,8 @@ instalan/ejecutan - no hace falta pasarles ningun flag de plataforma.
   corriendo en una Kali/Ubuntu real (`MT5_BRIDGE_URL` en `.env` apuntando
   a esa otra maquina). Lo que SI funciona 100% local en Termux sin ninguna
   otra maquina: el dashboard (`dashboard.py --web`), los backtests, y
-  `run.sh --synthetic` para probar el motor con precios simulados.
+  `.venv/bin/python main.py --synthetic` para probar el motor con precios
+  simulados.
 - **Otras distros Linux con `apt-get`** (Debian, Mint, etc.): deberian
   funcionar por el mismo camino que Kali/Ubuntu, sin garantia especifica.
 - **Cualquier otra cosa** (Fedora, Arch, sin `apt-get` y no Termux):
@@ -160,14 +162,31 @@ script.
 
 ## Uso
 
-```bash
-./run.sh                 # arranca el bridge MT5 + el motor, usando .env (foreground)
-./run.sh --synthetic      # sin broker: precios simulados, solo para probar que todo corre
-./run.sh --daemon          # igual, pero corre en segundo plano (usar ./run.sh stop para pararlo)
-./run.sh stop                # detiene una instancia arrancada con --daemon
-./run.sh emergency-stop       # PARADA DE EMERGENCIA: cierra posiciones abiertas y detiene el motor ya
+`run.sh` arranca el **servidor** (el bridge MT5 + el dashboard) - nunca el
+motor (el bot que abre operaciones). El motor se prende y se apaga
+**exclusivamente desde el dashboard** (boton "Iniciar motor" / "Detener
+motor", o `POST /api/engine/start` / `/api/engine/stop`), a proposito: asi
+nunca arranca a operar solo (por ejemplo al reiniciar la maquina con el
+systemd template) sin que alguien lo haya prendido mirando el dashboard.
 
-.venv/bin/python dashboard.py       # pregunta: ventana nativa o web (independiente del motor)
+```bash
+./run.sh --start          # arranca el bridge MT5 + el dashboard en segundo plano
+./run.sh --status          # reporte prolijo: plataforma, bridge, dashboard, motor, cuenta
+./run.sh --stop             # apaga TODO (motor si estaba corriendo, dashboard, bridge, Xvfb) - no queda nada corriendo
+
+./run.sh emergency-stop       # PARADA DE EMERGENCIA: cierra posiciones abiertas y detiene el motor ya
+./run.sh verify                # compila todo, corre los tests y una prueba de humo del motor
+./run.sh doctor                  # diagnostico de la instalacion real (Wine, MT5, bridge, .env, disco...)
+```
+
+Con el servidor arriba (`./run.sh --start`), abrí
+`http://127.0.0.1:9000` (o la ventana nativa - ver mas abajo) y desde ahi
+arrancá el motor cuando estes listo. `./run.sh --status` refleja el estado
+real del motor consultando la propia API del dashboard, asi que los dos
+nunca se desincronizan.
+
+```bash
+.venv/bin/python dashboard.py       # pregunta: ventana nativa o web
 .venv/bin/python dashboard.py --web # directo como pagina web en http://127.0.0.1:9000
 .venv/bin/python dashboard.py --web --host 0.0.0.0 --port 9000  # accesible desde otro dispositivo en tu red
 
@@ -175,21 +194,25 @@ script.
 .venv/bin/python scripts/run_backtest.py --csv data/gold_history_1m.csv    # backtest con ese historial
 .venv/bin/python scripts/run_backtest.py --csv data/gold_history_1m.csv --composite --leverage 500  # + señales extra (ver Ronda 4)
 
-./run.sh verify           # compila todo, corre los tests y una prueba de humo del motor
-./run.sh doctor             # diagnostico de la instalacion real (Wine, MT5, bridge, .env, disco...)
+.venv/bin/python main.py --synthetic   # motor SIN broker, precios simulados, solo para probar en la terminal
+                                        # (no pasa por el dashboard - ./run.sh verify usa esto mismo para su prueba de humo)
 ```
 
 `install.sh` y `run.sh` son los unicos dos archivos `.sh` del proyecto -
-parar el motor, la parada de emergencia, verificar, y el diagnostico son
-subcomandos de `run.sh` (`stop`, `emergency-stop`, `verify`, `doctor`), no
-scripts separados.
+la parada de emergencia, verificar, y el diagnostico son subcomandos de
+`run.sh` (`emergency-stop`, `verify`, `doctor`), no scripts separados. Por
+ahora `--start`/`--stop`/`--status` son los unicos comandos de arranque del
+servidor - cualquier otro (incluido sin argumentos) muestra la ayuda.
 
 `./run.sh doctor` es el primer comando a correr cuando algo no funciona: no
 instala ni cambia nada, solo te dice exactamente que falta (Wine, el
 terminal MT5, el python de Wine, credenciales en `.env`, el bridge
 corriendo, espacio en disco...) en vez de tener que adivinar o re-correr
 `install.sh` a ciegas. En Termux ajusta solo sus propios chequeos (ver
-"Plataformas soportadas" mas arriba).
+"Plataformas soportadas" mas arriba). `install.sh` ya corre este mismo
+diagnostico solo al final de instalar, y falla con codigo de salida
+distinto de cero si algo sigue faltando - no se queda en "deberia estar
+todo bien" sin comprobarlo.
 
 `.github/workflows/ci.yml` corre exactamente `./run.sh verify` (mismo
 codigo, no una definicion paralela de "pasa") mas `ruff` y `shellcheck` en
@@ -198,10 +221,13 @@ runner de GitHub Actions estandar.
 
 ### Resiliencia
 
-`run.sh` supervisa tanto el bridge MT5 como el motor: si cualquiera de los
-dos se cae (crash de Wine, excepcion no manejada, perdida de conexion),
-se reinicia solo con backoff exponencial (2s, 4s, 8s... hasta 60s) en vez
-de tirar todo el sistema abajo. El cliente del bridge tambien reintenta
+`./run.sh --start` supervisa tanto el bridge MT5 como el dashboard: si
+cualquiera de los dos se cae (crash de Wine, excepcion no manejada,
+perdida de conexion), se reinicia solo con backoff exponencial (2s, 4s,
+8s... hasta 60s) en vez de tirar todo el sistema abajo. El motor, una vez
+arrancado desde el dashboard, tiene su propio supervisor independiente con
+la misma politica de reintentos (`core/engine_supervisor.py`) - un crash
+del motor no tira el dashboard ni el bridge, y viceversa. El cliente del bridge tambien reintenta
 llamadas individuales y vuelve a loguearse solo si la sesion de MT5 se
 cae sin que el proceso del bridge muera. Los logs quedan en `data/logs/`
 (rotan automaticamente, no crecen sin limite). La tabla `account_snapshots`
@@ -255,20 +281,22 @@ en el propio archivo.
 
 ### Parada de emergencia (interruptor manual)
 
-`./run.sh stop` requiere acceso por terminal a la maquina que corre el
-bot. Para cubrir el caso en que eso no este disponible (SSH caido,
-terminal inaccesible, querés que alguien mas pueda frenarlo), el motor
-revisa en cada ciclo si existe un archivo (`KILL_SWITCH_PATH` en `.env`,
-por defecto `data/EMERGENCY_STOP`). Si existe:
+Tanto `./run.sh --stop` como el boton "Detener motor" del dashboard
+requieren acceso a la maquina que corre el bot (terminal o red local). Para
+cubrir el caso en que ninguno de los dos este disponible (SSH caido,
+dashboard inalcanzable, querés que alguien mas pueda frenarlo con solo
+tocar un archivo), el motor revisa en cada ciclo si existe un archivo
+(`KILL_SWITCH_PATH` en `.env`, por defecto `data/EMERGENCY_STOP`). Si
+existe:
 
 1. Cierra a mercado cualquier posicion abierta inmediatamente (no espera
    a que el SL/TP la alcance).
-2. Se detiene, y evita que `run.sh` lo reinicie solo (a diferencia de un
-   crash comun, que si se reintenta con backoff).
+2. Se detiene, y evita que `core/engine_supervisor.py` lo reinicie solo (a
+   diferencia de un crash comun, que si se reintenta con backoff).
 
 ```bash
 ./run.sh emergency-stop            # activa: cierra posiciones y detiene el motor
-./run.sh emergency-stop --clear    # desactiva: borra el interruptor, listo para ./run.sh
+./run.sh emergency-stop --clear    # desactiva: borra el interruptor, listo para arrancar el motor de nuevo desde el dashboard
 ```
 
 Tambien alcanza con `touch data/EMERGENCY_STOP` desde cualquier cosa que
@@ -293,32 +321,49 @@ escuchando directamente en el puerto indicado (9000 por defecto) en vez
 de solo internamente para pywebview - se puede abrir desde cualquier
 navegador.
 
-Todas las rutas son de solo lectura (balance, curva de equity, historial
-de trades, eventos) - no existe ninguna ruta que abra o cierre una
-operacion desde el dashboard, en ningun modo. Aun asi, `--host 0.0.0.0`
-expone esos datos reales de la cuenta a cualquiera en tu red local; el
-programa avisa esto por consola al arrancar. Para acceso solo desde esta
-maquina (el default, mas seguro), dejá `--host 127.0.0.1` sin tocar.
+La mayoria de las rutas son de solo lectura (balance, curva de equity,
+historial de trades, eventos). Las que no lo son - guardar Settings,
+pausar/reanudar, e **iniciar/detener el motor** (`POST
+/api/engine/start|stop`, ver mas abajo) - nunca abren ni cierran una
+posicion directamente: arrancan o paran el *proceso* del motor, que es
+quien decide cuando operar segun la estrategia configurada. Aun asi,
+`--host 0.0.0.0` expone esos datos reales de la cuenta y esos controles a
+cualquiera en tu red local; el programa avisa esto por consola al
+arrancar, y `DASHBOARD_AUTH_TOKEN` (ver mas abajo) es la forma de
+protegerlos si vas a usar `0.0.0.0`. Para acceso solo desde esta maquina
+(el default, mas seguro), dejá `--host 127.0.0.1` sin tocar.
 
 pywebview (la libreria de la ventana nativa) ahora se importa solo cuando
 se usa ese modo, no al cargar el archivo - `--web` funciona incluso en
 una maquina sin ningun toolkit grafico instalado (un servidor headless).
 
-### Dashboard: pestaña Settings, y parar/reanudar el bot desde ahi
+### Dashboard: pestaña Settings, y controlar el motor desde ahi
 
-Dos controles nuevos, disponibles en los dos modos (nativo y web, mismo
-frontend):
+Tres controles, disponibles en los dos modos (nativo y web, mismo
+frontend), cada uno resolviendo un problema distinto a proposito:
 
-**Boton "Detener bot" / "Reanudar bot"** (arriba a la derecha, cambia de
-uno a otro segun el estado real). Pausa - no es el interruptor de
-emergencia: deja de abrir operaciones NUEVAS pero sigue gestionando y
-protegiendo cualquier posicion ya abierta (SL/TP siguen activos), y el
-motor sigue corriendo - no hace falta reiniciar nada, reanudar es
-instantaneo. Internamente toca/borra un archivo (`PAUSE_FLAG_PATH` en
-`.env`, `data/PAUSED` por defecto) que el motor ya revisa en cada paso. Si
-necesitas cerrar posiciones abiertas YA en vez de solo pausar, eso sigue
-siendo `./run.sh emergency-stop` (ver mas arriba) - son dos controles
-distintos a proposito.
+**Boton "Iniciar motor" / "Detener motor"** (arriba a la derecha, pill
+"Motor corriendo"/"Motor detenido" al lado). Es el arranque/parada real
+del *proceso* del motor - equivalente a lo que antes hacia `./run.sh` a
+secas. `./run.sh --start` deliberadamente NO prende esto: solo levanta el
+bridge y el dashboard, y el motor queda apagado hasta que alguien lo
+prenda aca, mirando el dashboard. Internamente lanza
+`core/engine_supervisor.py` (el mismo proceso detached, crash-resiliente
+con backoff que antes manejaba `run.sh`) via `POST /api/engine/start`;
+detenerlo manda SIGTERM via `POST /api/engine/stop` y espera hasta ~15s
+un cierre limpio antes de forzarlo. El boton "Pausar entradas" de abajo
+queda deshabilitado mientras el motor esta detenido - no tiene nada que
+pausar.
+
+**Boton "Pausar entradas" / "Reanudar entradas"**. Pausa - no es el
+interruptor de emergencia ni apaga el proceso: deja de abrir operaciones
+NUEVAS pero sigue gestionando y protegiendo cualquier posicion ya abierta
+(SL/TP siguen activos), y el motor sigue corriendo - no hace falta
+reiniciar nada, reanudar es instantaneo. Internamente toca/borra un
+archivo (`PAUSE_FLAG_PATH` en `.env`, `data/PAUSED` por defecto) que el
+motor ya revisa en cada paso. Si necesitas cerrar posiciones abiertas YA
+en vez de solo pausar, eso sigue siendo `./run.sh emergency-stop` (ver mas
+arriba) - tres controles distintos, cada uno para un caso distinto.
 
 **Pestaña Settings**: cuenta MT5 (login, password, servidor), si es demo,
 DRY_RUN, y los limites de riesgo (`RISK_PER_TRADE_USD`,
@@ -333,7 +378,8 @@ ningun lado del codigo).
 Detalles importantes:
 - **Los cambios se guardan en la base de datos local** (tabla
   `bot_settings`, sobrevive reinicios) y **se aplican la proxima vez que
-  arranca el motor** (`./run.sh`) - a proposito NO son en caliente. Cambiar
+  arranca el motor** (boton "Iniciar motor" en el dashboard) - a proposito
+  NO son en caliente. Cambiar
   de cuenta/servidor mientras el motor ya esta corriendo (y quizas con una
   posicion abierta) es un riesgo real de confundir en que cuenta esta
   parada esa posicion, asi que esto pide un reinicio en vez de intentar un

@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
+import signal
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -37,7 +39,19 @@ def _setup_logging(level: str) -> None:
     root.addHandler(console_handler)
 
 
+def _raise_system_exit(signum: int, frame: object) -> None:
+    # engine_supervisor.py sends SIGTERM to stop us and waits a bounded amount
+    # of time before escalating to SIGKILL. Relying on the OS default SIGTERM
+    # action works most of the time, but under load it can be slow enough to
+    # trip that escalation. Raising SystemExit here interrupts any blocking
+    # time.sleep() (bridge-wait retries, engine.run_forever()'s poll loop)
+    # immediately and unwinds cleanly - it's a BaseException, not an
+    # Exception, so it isn't swallowed by the engine's generic error handler.
+    raise SystemExit(0)
+
+
 def main() -> None:
+    signal.signal(signal.SIGTERM, _raise_system_exit)
     parser = argparse.ArgumentParser(description="XAUUSD 1m scalper engine")
     parser.add_argument("--synthetic", action="store_true",
                          help="Use synthetic price data instead of the MT5 bridge "
@@ -108,18 +122,29 @@ def main() -> None:
         engine.run_forever()
     except EngineHalted as exc:
         logger.critical("Motor detenido: %s", exc)
-        # run.sh's supervise() restarts main.py on ANY exit unless this
-        # exact file exists (see run.sh's STOP_FLAG) - without touching it
-        # here, a manual kill switch would just get respawned on the next
-        # backoff and immediately re-trigger, looping forever instead of
-        # actually stopping.
-        stop_flag = ROOT / "data" / "run" / "stop.flag"
-        stop_flag.parent.mkdir(parents=True, exist_ok=True)
-        stop_flag.touch()
+        # core/engine_supervisor.py restarts main.py on ANY exit that
+        # wasn't itself asked to stop via SIGTERM - a kill switch halt is
+        # a "stop trading now", not a crash, so it must not just get
+        # respawned on the next backoff and immediately re-trigger the
+        # same halt forever (EMERGENCY_STOP stays in place until someone
+        # explicitly clears it). engine_supervisor.py sets
+        # ENGINE_SUPERVISOR_PID when it spawns us specifically so we can
+        # tell IT (not touch a shared file - that used to double as
+        # run.sh's own bridge/dashboard stop flag, which this halt has no
+        # business touching) to stop restarting, the same way POST
+        # /api/engine/stop does.
+        supervisor_pid = os.environ.get("ENGINE_SUPERVISOR_PID")
+        if supervisor_pid:
+            try:
+                os.kill(int(supervisor_pid), signal.SIGTERM)
+                logger.critical("Aviso enviado al supervisor (PID %s) para que no reinicie el motor.",
+                                 supervisor_pid)
+            except (ValueError, ProcessLookupError, PermissionError):
+                logger.warning("No se pudo avisar al supervisor (PID %s) - puede reintentar solo.",
+                                supervisor_pid)
         logger.critical(
-            "Se creo %s para que run.sh no reinicie el motor. Para reanudar: borra el "
-            "interruptor de emergencia (%s) y %s, luego corre ./run.sh de nuevo.",
-            stop_flag, settings.kill_switch_path, stop_flag,
+            "Para reanudar: borra el interruptor de emergencia (%s) e inicia el motor de nuevo "
+            "desde el dashboard.", settings.kill_switch_path,
         )
         sys.exit(0)
 
