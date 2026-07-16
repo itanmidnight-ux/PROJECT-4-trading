@@ -47,6 +47,13 @@ class Signal:
     sl_distance_price: float = 0.0
     tp_levels: list[TpLevel] = field(default_factory=list)
     reason: str = ""
+    # atr / atr_baseline at signal time, clamped - see build_tp_ladder's
+    # vol_ratio param. 1.0 (neutral, no adjustment) unless a strategy
+    # actually computed it. Carried on the Signal so callers that rebuild
+    # the TP ladder with the real risk-sized lot (core/engine.py,
+    # core/backtest.py) can reuse the same market snapshot instead of
+    # recomputing indicators a second time.
+    vol_ratio: float = 1.0
 
 
 def compute_indicators(df: pd.DataFrame, bb_period: int = 20, bb_std: float = 2.0,
@@ -86,6 +93,13 @@ def compute_indicators(df: pd.DataFrame, bb_period: int = 20, bb_std: float = 2.
     ], axis=1).max(axis=1)
     out["atr"] = tr.ewm(alpha=1 / atr_period, min_periods=atr_period, adjust=False).mean()
 
+    # Slow-moving volatility baseline (independent of atr_period) used only
+    # to compute vol_ratio = atr / atr_baseline for the adaptive TP ladder
+    # (see build_tp_ladder) - "is right now more or less volatile than the
+    # recent past", not a trading signal itself, so it doesn't need to be
+    # configurable per strategy the way atr_period does.
+    out["atr_baseline"] = tr.ewm(alpha=1 / 100, min_periods=25, adjust=False).mean()
+
     # ADX (Wilder): measures trend STRENGTH regardless of direction, used
     # to keep the mean-reversion signal out of strong trends instead of
     # repeatedly fading them - see the module docstring for why that
@@ -104,6 +118,22 @@ def compute_indicators(df: pd.DataFrame, bb_period: int = 20, bb_std: float = 2.
     out["adx"] = dx.ewm(alpha=1 / adx_period, min_periods=adx_period, adjust=False).mean().fillna(0)
 
     return out
+
+
+# Bounds for vol_ratio (atr / atr_baseline) fed into build_tp_ladder's
+# adaptive spacing - without a clamp, a momentarily tiny atr_baseline (early
+# warmup, a dead-quiet stretch) could blow the ladder's spacing up
+# arbitrarily wide, or a spike could crush it to near-zero. 0.5-2.0 means
+# spacing can at most halve or double relative to the static (vol_ratio=1.0)
+# behavior - wide enough to matter, narrow enough to stay sane.
+VOL_RATIO_MIN = 0.5
+VOL_RATIO_MAX = 2.0
+
+
+def compute_vol_ratio(atr: float, atr_baseline: float) -> float:
+    if pd.isna(atr) or pd.isna(atr_baseline) or atr_baseline <= 0:
+        return 1.0
+    return max(VOL_RATIO_MIN, min(VOL_RATIO_MAX, atr / atr_baseline))
 
 
 class ScalpStrategy:
@@ -167,7 +197,7 @@ class ScalpStrategy:
             return float("inf")
         return self.min_tp_usd / value_per_point
 
-    def build_tp_ladder(self, lot: float, spread_price: float) -> list[TpLevel]:
+    def build_tp_ladder(self, lot: float, spread_price: float, vol_ratio: float = 1.0) -> list[TpLevel]:
         """
         Multi-scale TP: first level locks in >= min_tp_usd as soon as
         possible (plus spread buffer), later levels scale out further out
@@ -180,13 +210,24 @@ class ScalpStrategy:
         fixed dollar target doesn't). Two modes:
           - tp_targets_usd unset (default): only the first level is
             explicitly dollar-anchored (min_tp_usd); later levels are
-            geometric multiples of that price distance. This is the
-            original, backtested behavior (see README) - unchanged unless
-            tp_targets_usd is set.
+            geometric multiples of that price distance, spaced by
+            `vol_ratio` (see compute_vol_ratio) - denser in quiet markets
+            (levels 2+ sit closer, so a small move fills the whole ladder
+            faster - more realized trades/day in chop), wider in volatile
+            ones (more room before booking the rest, letting a real move
+            pay more instead of capping it at the same distance chop
+            would). TP1 itself is NEVER touched by vol_ratio - the dollar
+            floor (min_tp_usd) this project already warns against tuning
+            down carelessly stays exactly as fixed as before. This is the
+            "fixed base, intelligent spacing" ladder - vol_ratio=1.0
+            (the default) reproduces the original, backtested behavior
+            (see README) byte for byte.
           - tp_targets_usd set: EVERY level gets its own explicit dollar
             target for its slice, e.g. TP_TARGETS_USD=0.28,0.60,1.20 -
             more directly configurable ("this level books $X") instead of
-            only the first level being meaningful in dollar terms.
+            only the first level being meaningful in dollar terms. These
+            are explicit, operator-chosen targets - vol_ratio does NOT
+            apply here, same as before this feature existed.
         """
         n = self.tp_levels
         # front-load the fraction closed on the first (safest) level
@@ -216,8 +257,11 @@ class ScalpStrategy:
             return levels
 
         base_distance = self.min_tp_distance_for_lot(lot) + spread_price
-        # geometric spacing: 1x, 1.8x, 3x, ... of the base distance
-        multipliers = [1.0 + 0.8 * i for i in range(n)]
+        # geometric spacing: 1x, (1+0.8*vol_ratio)x, (1+1.6*vol_ratio)x, ...
+        # of the base distance - vol_ratio=1.0 gives the original 1x, 1.8x,
+        # 2.6x... spacing exactly.
+        step = 0.8 * vol_ratio
+        multipliers = [1.0 + step * i for i in range(n)]
         return [TpLevel(distance_price=base_distance * mult, close_fraction=frac)
                 for mult, frac in zip(multipliers, fractions, strict=True)]
 
@@ -256,6 +300,8 @@ class ScalpStrategy:
             return Signal(side=None, reason="no setup")
 
         sl_distance = max(last["atr"] * self.sl_atr_multiple, self.min_tp_distance_for_lot(lot_hint) * 1.5)
-        tp_levels = self.build_tp_ladder(lot_hint, spread_price)
+        vol_ratio = compute_vol_ratio(last["atr"], last["atr_baseline"])
+        tp_levels = self.build_tp_ladder(lot_hint, spread_price, vol_ratio=vol_ratio)
 
-        return Signal(side=side, sl_distance_price=sl_distance, tp_levels=tp_levels, reason="signal")
+        return Signal(side=side, sl_distance_price=sl_distance, tp_levels=tp_levels,
+                       reason="signal", vol_ratio=vol_ratio)

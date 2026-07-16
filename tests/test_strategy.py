@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from core.strategy import ScalpStrategy, compute_indicators
+from core.strategy import ScalpStrategy, Signal, compute_indicators
 
 
 def build_candles(closes: list[float]) -> pd.DataFrame:
@@ -222,3 +222,75 @@ def test_tp_targets_usd_misconfigured_as_decreasing_still_produces_a_valid_ladde
     distances = [l.distance_price for l in ladder]
     assert distances == sorted(distances)
     assert len(set(distances)) == 3  # strictly increasing, not just non-decreasing
+
+
+# ------------------------------------------------ adaptive ladder (vol_ratio)
+def test_vol_ratio_default_matches_the_original_static_ladder_exactly():
+    s = strategy()
+    default_ladder = s.build_tp_ladder(lot=0.02, spread_price=0.2)
+    explicit_neutral = s.build_tp_ladder(lot=0.02, spread_price=0.2, vol_ratio=1.0)
+    assert default_ladder == explicit_neutral
+
+
+def test_low_vol_ratio_produces_a_denser_ladder_for_levels_after_the_first():
+    s = strategy()
+    quiet = s.build_tp_ladder(lot=0.02, spread_price=0.2, vol_ratio=0.5)
+    normal = s.build_tp_ladder(lot=0.02, spread_price=0.2, vol_ratio=1.0)
+    # TP1 (index 0) is never touched by vol_ratio - only spacing beyond it.
+    assert quiet[0].distance_price == normal[0].distance_price
+    assert quiet[1].distance_price < normal[1].distance_price
+    assert quiet[2].distance_price < normal[2].distance_price
+
+
+def test_high_vol_ratio_produces_a_wider_ladder_for_levels_after_the_first():
+    s = strategy()
+    volatile = s.build_tp_ladder(lot=0.02, spread_price=0.2, vol_ratio=2.0)
+    normal = s.build_tp_ladder(lot=0.02, spread_price=0.2, vol_ratio=1.0)
+    assert volatile[0].distance_price == normal[0].distance_price
+    assert volatile[1].distance_price > normal[1].distance_price
+    assert volatile[2].distance_price > normal[2].distance_price
+
+
+def test_adaptive_ladder_still_nets_at_least_min_tp_usd_on_tp1_regardless_of_vol_ratio():
+    s = strategy()
+    lot = 0.02
+    for vr in (0.5, 1.0, 2.0):
+        ladder = s.build_tp_ladder(lot=lot, spread_price=0.2, vol_ratio=vr)
+        tp1 = ladder[0]
+        realized_usd = tp1.distance_price * s.value_per_point_per_lot * (lot * tp1.close_fraction)
+        assert realized_usd >= s.min_tp_usd
+
+
+def test_tp_targets_usd_path_ignores_vol_ratio_entirely():
+    """Explicit operator-chosen dollar targets are untouched by the
+    adaptive spacing feature - same guarantee as before it existed."""
+    targets = [0.28, 0.60, 1.20]
+    s = ScalpStrategy(min_tp_usd=0.28, tp_levels=3, value_per_point_per_lot=100.0, tp_targets_usd=targets)
+    quiet = s.build_tp_ladder(lot=0.02, spread_price=0.2, vol_ratio=0.5)
+    volatile = s.build_tp_ladder(lot=0.02, spread_price=0.2, vol_ratio=2.0)
+    assert quiet == volatile
+
+
+def test_compute_vol_ratio_clamps_to_configured_bounds():
+    from core.strategy import VOL_RATIO_MAX, VOL_RATIO_MIN, compute_vol_ratio
+    assert compute_vol_ratio(atr=10.0, atr_baseline=0.1) == VOL_RATIO_MAX  # would be 100x uncapped
+    assert compute_vol_ratio(atr=0.01, atr_baseline=10.0) == VOL_RATIO_MIN  # would be ~0.001x uncapped
+    assert compute_vol_ratio(atr=1.0, atr_baseline=1.0) == 1.0
+
+
+def test_compute_vol_ratio_is_neutral_on_missing_or_invalid_data():
+    from core.strategy import compute_vol_ratio
+    assert compute_vol_ratio(atr=float("nan"), atr_baseline=1.0) == 1.0
+    assert compute_vol_ratio(atr=1.0, atr_baseline=float("nan")) == 1.0
+    assert compute_vol_ratio(atr=1.0, atr_baseline=0.0) == 1.0
+
+
+def test_generate_signal_sets_a_sane_vol_ratio_on_a_real_signal():
+    s = strategy()
+    signal = s.generate_signal(oversold_candles(), spread_price=0.2, lot_hint=0.01)
+    assert signal.side == "BUY"
+    assert 0.5 <= signal.vol_ratio <= 2.0
+
+
+def test_signal_without_an_explicit_vol_ratio_defaults_to_neutral():
+    assert Signal(side=None).vol_ratio == 1.0

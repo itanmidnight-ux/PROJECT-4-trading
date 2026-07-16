@@ -211,7 +211,7 @@ def load_settings() -> Settings:
         max_daily_drawdown_pct=_float("MAX_DAILY_DRAWDOWN_PCT", 20.0),
         max_trades_per_day=_int("MAX_TRADES_PER_DAY", 1000),
         min_tp_usd=_float("MIN_TP_USD", 0.28),
-        tp_levels=_int("TP_LEVELS", 3),
+        tp_levels=_int("TP_LEVELS", 5),  # see .env.example / README "Ronda 5" for why 5, not 3
         dry_run=_bool("DRY_RUN", True),
         db_path=os.getenv("DASHBOARD_DB_PATH", "data/trades.db"),
         snapshot_retention_days=_int("SNAPSHOT_RETENTION_DAYS", 30),

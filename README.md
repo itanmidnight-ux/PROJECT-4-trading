@@ -542,6 +542,50 @@ lo que evita este proyecto en cada ronda: nunca reportar un numero
 optimista sin haberlo corrido primero, y nunca activar por defecto algo que
 el propio backtest muestra que empeora el resultado.
 
+**Ronda 5: ladder de TP adaptativo a la volatilidad (`vol_ratio`), pedido
+explicitamente para intentar arreglar el desbalance encontrado en la Ronda
+4.** `core/strategy.py::build_tp_ladder` ahora recibe un `vol_ratio` (ATR
+actual dividido por un ATR base mas lento, acotado a 0.5-2.0) que separa
+mas los niveles de TP 2+ en mercados volatiles (mas espacio para que un
+movimiento real pague mas) y los junta en mercados tranquilos (la escalera
+se completa mas rapido, mas operaciones realizadas por dia). El primer
+nivel (`MIN_TP_USD`) queda **exactamente igual que antes** - "fijo" en el
+pedido del usuario significa eso: ese piso en dolares no se toca, solo el
+espaciado de lo que viene despues es "inteligente". Se probo tambien subir
+`TP_LEVELS` de 3 a 5 (mas escalones = mas capital que puede salir en
+distintos niveles de la escalera en vez de solo 3 cortes).
+
+| Configuracion | Trades | Trades/dia | Win rate | PnL | Drawdown max |
+|---|---|---|---|---|---|
+| Reversion a la media, ladder adaptativo (TP_LEVELS=3) | 17 | ~3.2 | 82.4% | -$0.95 | 12.6% |
+| Reversion a la media, ladder adaptativo (TP_LEVELS=5) | 17 | ~3.2 | 82.4% | **-$0.13** | 12.5% |
+| Las 5 señales extra, ladder adaptativo (TP_LEVELS=3) | 116 | ~21.8 | 70.7% | -$38.01 | 77.2% |
+| Las 5 señales extra, ladder adaptativo (TP_LEVELS=5) | 123 | ~23.1 | 69.9% | -$39.25 | 79.8% |
+
+**Resultado honesto, en dos partes distintas:**
+
+Para la reversion a la media (la unica estrategia con historial real
+validado), el ladder adaptativo con `TP_LEVELS=5` **si ayuda, y bastante**:
+de -$0.79 (Ronda 3, ladder fijo) a -$0.13 - practicamente breakeven sobre
+esta muestra de 7 dias, sin cambiar ni una señal de entrada, solo como se
+reparte la salida. Tiene sentido: una reversion a la media que funciona
+tipicamente SI atraviesa varios niveles de TP en su camino de vuelta hacia
+el promedio, asi que una escalera con mas escalones y espaciado ajustado a
+la volatilidad real aprovecha mejor ese recorrido.
+
+Para las 5 señales extra de la Ronda 4, el mismo ladder **no arregla el
+problema real**: -$38.01 y -$39.25 son practicamente lo mismo que el
+-$38.78 del ladder fijo original. La razon, investigada en vez de asumida:
+estas señales son de continuacion, no de reversion - o el movimiento sigue
+de una y atraviesa varios niveles de TP rapido, o se da vuelta y toca el
+stop casi de inmediato, sin el recorrido gradual que hace que un ladder
+mas fino ayude. El desbalance real (stop proporcionalmente mas ancho que
+lo que tarda en llegar CUALQUIER TP) no es un problema de forma de la
+escalera, es un problema de que el stop de estas señales sigue siendo
+demasiado ancho para su propio patron de resultado binario. Siguen
+**apagadas por defecto** - este ladder adaptativo no cambia esa
+recomendacion.
+
 ## Credenciales
 
 Nunca van al repositorio. `install.sh` las guarda en `.env` (con permisos

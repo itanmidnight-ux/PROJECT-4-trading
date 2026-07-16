@@ -475,3 +475,22 @@ def test_composite_shares_cooldown_lockstep_across_all_sub_strategies():
         composite.on_bar_closed()
     signal = composite.generate_signal(df, spread_price=0.2, lot_hint=0.01)
     assert signal.side == "BUY"  # cooldown cleared, extra fires now
+
+
+def test_composite_computes_and_applies_vol_ratio_when_an_extra_fires():
+    """When mean-reversion stays silent and an extra signal fires,
+    CompositeStrategy must compute its own vol_ratio from the shared `ind`
+    frame (mean-reversion's own generate_signal never ran to compute one)
+    and use it to build that signal's TP ladder - not silently fall back
+    to the static vol_ratio=1.0 ladder."""
+    mr = mean_reversion()
+    always = _AlwaysFires(side="BUY")
+    composite = CompositeStrategy(mean_reversion=mr, extra_strategies=[("always", always)])
+    df = _flat_candles()
+
+    signal = composite.generate_signal(df, spread_price=0.2, lot_hint=0.01)
+    assert signal.side == "BUY"
+    assert 0.5 <= signal.vol_ratio <= 2.0
+
+    expected_ladder = mr.build_tp_ladder(0.01, 0.2, vol_ratio=signal.vol_ratio)
+    assert signal.tp_levels == expected_ladder
