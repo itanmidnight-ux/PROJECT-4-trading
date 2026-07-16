@@ -326,13 +326,23 @@ case "$PLATFORM" in
     *) install_unknown ;;
 esac
 
-# ------------------------------------------------------ final sanity check
-log "Verificacion final: dependencias de Python importan correctamente"
-# shellcheck disable=SC1091
-source "$VENV_DIR/bin/activate"
-if [ "$PLATFORM" = "termux" ]; then
-    python3 -c "import pandas, numpy, flask, requests, dotenv" && log "Dependencias de Termux importan correctamente (webview omitido - no hay entorno grafico nativo en Termux, usa dashboard.py --web)."
+# ------------------------------------------------------ final re-verification
+# Don't just trust that the steps above worked - run the same diagnostic a
+# user would run by hand (./run.sh doctor) and fail loudly if it still finds
+# something missing. This is the single source of truth for "is this
+# machine set up correctly" - reused as-is by ./run.sh doctor - so install.sh
+# never drifts out of sync with what the doctor command actually checks.
+# A "FALTA" (missing) item is a real install failure worth a nonzero exit;
+# "AVISO" items (e.g. MT5 credentials still blank, DRY_RUN warnings) are not
+# install failures - doctor itself already only returns nonzero on FALTA.
+log "Paso final: re-verificando la instalacion (./run.sh doctor)"
+echo
+if ./run.sh doctor; then
+    echo
+    log "Re-verificacion OK: la instalacion esta completa y lista para usar."
 else
-    python3 -c "import pandas, numpy, flask, requests, dotenv, webview" && log "Dependencias importan correctamente."
+    echo
+    err "La re-verificacion encontro cosas que faltan (ver [FALTA] arriba)."
+    err "Revisa los mensajes, resuelve lo que falta (a mano o corriendo ./install.sh de nuevo)."
+    exit 1
 fi
-deactivate

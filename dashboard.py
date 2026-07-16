@@ -14,17 +14,29 @@ trade history, and engine events - all read live from the same SQLite
 database the trading engine writes to (data/trades.db by default). Safe to
 run at any time, independently of whether the engine is running.
 
-Two routes are NOT read-only: the Settings tab's save (POST /api/settings)
-and the pause/resume toggle (POST /api/bot/pause, /api/bot/resume). No
-route can open/close a trade or send anything to the broker - saved
-settings only take effect the NEXT time the engine process starts (see
-core/config.py::apply_db_overrides), and pause/resume only flips a flag
-file the running engine already polls for on its own. Both require
-X-Dashboard-Token when DASHBOARD_AUTH_TOKEN is set - see _check_dashboard_auth.
+Routes that are NOT read-only: the Settings tab's save (POST
+/api/settings), the pause/resume toggle (POST /api/bot/pause,
+/api/bot/resume), and engine process control (POST /api/engine/start,
+/api/engine/stop). Saved settings only take effect the NEXT time the
+engine process starts (see core/config.py::apply_db_overrides);
+pause/resume only flips a flag file an ALREADY-RUNNING engine polls for on
+its own - it does nothing if the engine process isn't running at all, use
+engine/start for that. All of these require X-Dashboard-Token when
+DASHBOARD_AUTH_TOKEN is set - see _check_dashboard_auth.
+
+Engine process control (start/stop) is deliberately handled here, not by
+run.sh: `./run.sh --start` only brings up the bridge and this dashboard,
+so the engine (the thing that actually places orders) only ever runs when
+explicitly started from here - see core/engine_supervisor.py for the
+crash-resilient (restart-with-backoff) process it spawns and controls.
 """
 from __future__ import annotations
 
 import argparse
+import contextlib
+import os
+import signal
+import subprocess
 import sys
 import threading
 import time
@@ -46,6 +58,8 @@ from core.database import Database  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent
 DASHBOARD_DIR = ROOT / "dashboard"
+RUN_DIR = ROOT / "data" / "run"
+ENGINE_PID_FILE = RUN_DIR / "engine.pid"
 
 settings = load_settings()
 db = Database(settings.db_path)
@@ -55,6 +69,61 @@ app = Flask(__name__, static_folder=None)
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _reap_children(signum: int, frame: object) -> None:
+    """SIGCHLD fires the instant any child of this process (the engine
+    supervisor spawned by /api/engine/start) exits, for any reason - not
+    only when this dashboard itself sent the SIGTERM (POST
+    /api/engine/stop). run.sh's --stop kills the supervisor's PID
+    directly from the pidfile, bypassing that route entirely, so
+    _engine_pid()'s lazy reap-on-next-check isn't enough on its own:
+    nothing guarantees a status check happens before something else
+    (run.sh's kill_pidfile_external, polling `kill -0` in a loop) finds
+    an exited-but-unreaped zombie reporting "still alive" forever.
+    Reaping here, proactively, the moment the kernel tells us a child
+    exited, closes that gap regardless of who signaled the child or
+    when anyone next asks about it."""
+    with contextlib.suppress(ChildProcessError):
+        while True:
+            pid, _status = os.waitpid(-1, os.WNOHANG)
+            if pid == 0:
+                break
+
+
+def _engine_pid() -> int | None:
+    """Returns the tracked engine supervisor's PID if it's actually still
+    alive - self-heals a stale pidfile (process died without anyone
+    calling /api/engine/stop, e.g. it crashed past its own retry budget or
+    the machine restarted) by deleting it right here, so every caller
+    (status, start, stop) sees a consistent, truthful answer without a
+    separate cleanup step anywhere.
+
+    Reaps the process first (os.waitpid with WNOHANG) before checking
+    os.kill(pid, 0) - this dashboard process IS the supervisor's real OS
+    parent (subprocess.Popen made it so; start_new_session=True only
+    detaches its session/controlling terminal, not the parent-child
+    relationship wait() relies on), so an exited-but-unreaped supervisor
+    sits as a zombie: still present in the process table, still a
+    "yes" from kill(pid, 0), forever, until reaped. Found via an actual
+    Playwright run of the stop button: without this, /api/status kept
+    reporting engine_running=true long after the process had already
+    logged its own clean shutdown."""
+    if not ENGINE_PID_FILE.exists():
+        return None
+    try:
+        pid = int(ENGINE_PID_FILE.read_text().strip())
+    except ValueError:
+        ENGINE_PID_FILE.unlink(missing_ok=True)
+        return None
+    with contextlib.suppress(ChildProcessError):
+        os.waitpid(pid, os.WNOHANG)
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, PermissionError):
+        ENGINE_PID_FILE.unlink(missing_ok=True)
+        return None
+    return pid
 
 
 def _row_to_dict(row) -> dict:
@@ -110,6 +179,7 @@ def api_status():
         "login": settings.mt5_login or "sin configurar",
         "server": settings.mt5_server,
         "paused": Path(settings.pause_flag_path).exists(),
+        "engine_running": _engine_pid() is not None,
         "auth_required": bool(settings.dashboard_auth_token),
     })
 
@@ -228,7 +298,8 @@ def api_save_settings():
     db.set_settings(to_save)
     db.log_event(ts=_now_iso(), level="INFO",
                  message="Configuracion actualizada desde el dashboard (aplica en el proximo arranque del motor)")
-    return jsonify({"ok": True, "message": "Guardado. Se aplica la proxima vez que arranque el motor (./run.sh)."})
+    return jsonify({"ok": True, "message": "Guardado. Se aplica la proxima vez que arranque el motor "
+                                            "(boton \"Iniciar motor\" arriba)."})
 
 
 @app.route("/api/bot/pause", methods=["POST"])
@@ -249,6 +320,53 @@ def api_bot_resume():
     flag.unlink(missing_ok=True)
     db.log_event(ts=_now_iso(), level="INFO", message="Motor reanudado manualmente desde el dashboard")
     return jsonify({"ok": True, "paused": False})
+
+
+@app.route("/api/engine/start", methods=["POST"])
+def api_engine_start():
+    """Spawns core/engine_supervisor.py detached (start_new_session=True:
+    survives this dashboard process restarting or exiting) - that module,
+    not this route, owns restart-on-crash policy for the actual engine.
+    409, not 200, if one is already tracked and alive - starting a second
+    one would mean two processes both trying to manage the same broker
+    account's positions."""
+    if _engine_pid() is not None:
+        return jsonify({"ok": False, "error": "El motor ya esta corriendo."}), 409
+
+    RUN_DIR.mkdir(parents=True, exist_ok=True)
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "core.engine_supervisor"],
+        cwd=str(ROOT),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    ENGINE_PID_FILE.write_text(str(proc.pid))
+    db.log_event(ts=_now_iso(), level="INFO", message="Motor iniciado desde el dashboard")
+    return jsonify({"ok": True, "engine_running": True})
+
+
+@app.route("/api/engine/stop", methods=["POST"])
+def api_engine_stop():
+    """Sends SIGTERM to the supervisor (not main.py directly) - the
+    supervisor catches it, stops its current child gracefully (up to 15s,
+    see core/engine_supervisor.py), and exits without restarting. This
+    route does NOT block waiting for that to finish: the pidfile is left
+    as-is and _engine_pid() self-heals it once the process actually exits,
+    so /api/status settles to engine_running=false within its own next
+    poll instead of holding this HTTP request open for up to 15s."""
+    pid = _engine_pid()
+    if pid is None:
+        return jsonify({"ok": False, "error": "El motor no esta corriendo."}), 409
+    os.kill(pid, signal.SIGTERM)
+    db.log_event(ts=_now_iso(), level="WARN", message="Motor detenido desde el dashboard")
+    # Deliberately NOT claiming engine_running: false here - the process is
+    # still shutting down (up to ~15s) at the moment this responds. The
+    # frontend shows a transitional "deteniendo..." state and lets the next
+    # /api/status poll confirm the real transition instead of asserting one
+    # that may not have happened yet.
+    return jsonify({"ok": True, "stopping": True,
+                     "message": "Señal de parada enviada - puede tardar unos segundos en cerrar del todo."})
 
 
 WEB_DEFAULT_PORT = 9000
@@ -319,6 +437,7 @@ def _prompt_mode() -> str:
 
 
 def main() -> None:
+    signal.signal(signal.SIGCHLD, _reap_children)
     parser = argparse.ArgumentParser(description="XAUUSD scalper - dashboard")
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument("--web", action="store_true",
