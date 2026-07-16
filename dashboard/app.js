@@ -1,6 +1,16 @@
 const POLL_MS = 3000;
 const tooltip = document.getElementById('tooltip');
 
+// Defense in depth: most fields rendered below come from fixed server-side
+// enums (side, status, level) and are safe as-is, but event messages can
+// embed raw exception text (see core/engine.py's generic error handler,
+// f"{type(exc).__name__}: {exc}") - an exception's string form isn't
+// bounded to any safe character set. Escaping everything interpolated into
+// innerHTML below costs nothing and doesn't rely on that always staying true.
+const escapeHtml = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+}[c]));
+
 const fmtUsd = (v) => {
   const n = Number(v || 0);
   const sign = n < 0 ? '-' : '';
@@ -47,6 +57,12 @@ function renderLineChart(containerId, points, { valueKey = 'equity', label = 'Eq
   const range = (max - min) || 1;
   const x = (i) => PAD + (i / (points.length - 1)) * (W - PAD * 1.5);
   const y = (v) => H - PAD + 4 - ((v - min) / range) * (H - PAD * 1.5);
+  // Must match x(i)'s actual spacing - this used to be W / points.length,
+  // an unrelated quantity that only coincidentally lined up when PAD was
+  // negligible relative to W, leaving the invisible tooltip hit-boxes
+  // increasingly misaligned from the real point positions as PAD's share
+  // of W grew (small containers, few points).
+  const hitStep = (W - PAD * 1.5) / (points.length - 1);
 
   let gridSvg = '';
   for (let i = 0; i <= 3; i++) {
@@ -67,7 +83,7 @@ function renderLineChart(containerId, points, { valueKey = 'equity', label = 'Eq
       <path d="${areaPath}" fill="var(--series-1-wash)" stroke="none" />
       <path d="${path}" fill="none" stroke="var(--series-1)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />
       <circle cx="${x(points.length - 1)}" cy="${y(last[valueKey])}" r="4" fill="var(--series-1)" stroke="var(--surface-1)" stroke-width="2" />
-      ${points.map((p, i) => `<rect x="${x(i) - (W / points.length) / 2}" y="0" width="${W / points.length}" height="${H}" fill="transparent" data-i="${i}" class="hit" />`).join('')}
+      ${points.map((p, i) => `<rect x="${(x(i) - hitStep / 2).toFixed(1)}" y="0" width="${hitStep.toFixed(1)}" height="${H}" fill="transparent" data-i="${i}" class="hit" />`).join('')}
     </svg>`;
   container.innerHTML = svg;
 
@@ -173,11 +189,11 @@ function renderTrades(containerId, trades) {
     const sideClass = t.side === 'BUY' ? 'badge buy' : 'badge sell';
     return `<tr>
       <td>${new Date(t.opened_at).toLocaleString()}</td>
-      <td><span class="${sideClass}">${t.side}</span></td>
+      <td><span class="${sideClass}">${escapeHtml(t.side)}</span></td>
       <td>${Number(t.lot).toFixed(2)}</td>
       <td>${Number(t.entry_price).toFixed(2)}</td>
       <td>${t.exit_price ? Number(t.exit_price).toFixed(2) : '—'}</td>
-      <td>${t.status}</td>
+      <td>${escapeHtml(t.status)}</td>
       <td class="${pnlClass}">${pnlText}</td>
     </tr>`;
   }).join('');
@@ -202,37 +218,64 @@ function renderEvents(containerId, events) {
   container.innerHTML = events.map(e => `
     <div class="event-row">
       <span class="event-time">${new Date(e.ts).toLocaleString()}</span>
-      <span class="event-level ${levelClass(e.level)}">${e.level}</span>
-      <span class="event-message">${e.message}</span>
+      <span class="event-level ${levelClass(e.level)}">${escapeHtml(e.level)}</span>
+      <span class="event-message">${escapeHtml(e.message)}</span>
     </div>`).join('');
 }
 
 // -------------------------------------------------------------------- poll
-async function refresh() {
+
+// Resolves to the parsed JSON body, or null on any failure (network error,
+// non-2xx status, invalid JSON) - never throws, so one bad endpoint can't
+// take the rest of the dashboard down with it.
+async function fetchJson(path) {
   try {
-    const [status, summary, equity, daily, monthly, trades, events] = await Promise.all([
-      fetch('/api/status').then(r => r.json()),
-      fetch('/api/summary').then(r => r.json()),
-      fetch('/api/equity_curve').then(r => r.json()),
-      fetch('/api/pnl_daily').then(r => r.json()),
-      fetch('/api/pnl_monthly').then(r => r.json()),
-      fetch('/api/trades').then(r => r.json()),
-      fetch('/api/events').then(r => r.json()),
-    ]);
+    const r = await fetch(path);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return await r.json();
+  } catch (e) {
+    console.error(`No se pudo cargar ${path}:`, e);
+    return null;
+  }
+}
 
-    document.getElementById('acct-login').textContent = status.login || '—';
-    document.getElementById('acct-server').textContent = status.server || '—';
+async function refresh() {
+  const [status, summary, equity, daily, monthly, trades, events] = await Promise.all([
+    fetchJson('/api/status'),
+    fetchJson('/api/summary'),
+    fetchJson('/api/equity_curve'),
+    fetchJson('/api/pnl_daily'),
+    fetchJson('/api/pnl_monthly'),
+    fetchJson('/api/trades'),
+    fetchJson('/api/events'),
+  ]);
 
-    const modePill = document.getElementById('pill-mode');
-    modePill.className = 'pill ' + (status.mode === 'LIVE' ? 'off' : 'dry');
-    document.getElementById('pill-mode-text').textContent = status.mode === 'LIVE' ? 'LIVE — ordenes reales' : 'DRY RUN — simulado';
+  const connPill = document.getElementById('pill-conn');
+  if (status === null) {
+    // /api/status failing means the dashboard's own local Flask server
+    // didn't respond at all - nothing else can be trusted either.
+    connPill.className = 'pill off';
+    document.getElementById('pill-conn-text').textContent = 'Sin conexion al motor';
+    return;
+  }
 
-    const connPill = document.getElementById('pill-conn');
-    connPill.className = 'pill ' + (status.connected ? 'live' : 'off');
-    document.getElementById('pill-conn-text').textContent = status.connected ? 'Motor activo' : 'Motor sin datos recientes';
+  document.getElementById('acct-login').textContent = status.login || '—';
+  document.getElementById('acct-server').textContent = status.server || '—';
 
-    document.getElementById('pill-updated').textContent = new Date().toLocaleTimeString();
+  const modePill = document.getElementById('pill-mode');
+  modePill.className = 'pill ' + (status.mode === 'LIVE' ? 'off' : 'dry');
+  document.getElementById('pill-mode-text').textContent = status.mode === 'LIVE' ? 'LIVE — ordenes reales' : 'DRY RUN — simulado';
 
+  connPill.className = 'pill ' + (status.connected ? 'live' : 'off');
+  document.getElementById('pill-conn-text').textContent = status.connected ? 'Motor activo' : 'Motor sin datos recientes';
+
+  document.getElementById('pill-updated').textContent = new Date().toLocaleTimeString();
+
+  // Each section below only updates if ITS OWN fetch succeeded - a single
+  // failing endpoint leaves that one panel showing its last good state
+  // instead of blanking the entire dashboard (the old Promise.all-based
+  // version failed everything together on any single rejection).
+  if (summary) {
     const eqEl = document.getElementById('tile-equity');
     animateValue(eqEl, summary.equity || 0, fmtUsd);
     document.getElementById('tile-balance').textContent = fmtUsd(summary.balance);
@@ -246,17 +289,14 @@ async function refresh() {
     const wr = summary.total_trades ? Math.round((summary.wins / summary.total_trades) * 100) : 0;
     document.getElementById('tile-winrate').textContent = `${wr}%`;
 
-    renderLineChart('chart-equity', equity, { valueKey: 'equity', label: 'Equity' });
     renderDonut('chart-donut', summary.wins || 0, summary.losses || 0);
-    renderBarChart('chart-daily', [...daily].reverse(), { xKey: 'day', valueKey: 'pnl' });
-    renderBarChart('chart-monthly', [...monthly].reverse(), { xKey: 'month', valueKey: 'pnl' });
-    renderTrades('trades-table', trades);
-    renderEvents('events-list', events);
-  } catch (e) {
-    document.getElementById('pill-conn').className = 'pill off';
-    document.getElementById('pill-conn-text').textContent = 'Sin conexion al motor';
-    console.error(e);
   }
+
+  if (equity) renderLineChart('chart-equity', equity, { valueKey: 'equity', label: 'Equity' });
+  if (daily) renderBarChart('chart-daily', [...daily].reverse(), { xKey: 'day', valueKey: 'pnl' });
+  if (monthly) renderBarChart('chart-monthly', [...monthly].reverse(), { xKey: 'month', valueKey: 'pnl' });
+  if (trades) renderTrades('trades-table', trades);
+  if (events) renderEvents('events-list', events);
 }
 
 refresh();
