@@ -86,6 +86,33 @@ def _err(message: str, code: int = 400):
     return jsonify({"ok": False, "error": message}), code
 
 
+def _pick_filling_mode(symbol: str) -> int:
+    """An order's type_filling must match what the SYMBOL actually accepts
+    (SYMBOL_FILLING_FOK=1 / SYMBOL_FILLING_IOC=2 bitmask on symbol_info) -
+    a mismatch fails EVERY order with retcode 10030 (unsupported filling
+    mode), which would silently take the whole bot offline with no way to
+    trade at all even though everything else (bridge, risk sizing, signal
+    generation) is working correctly. This used to hardcode
+    ORDER_FILLING_IOC, which works for many broker/symbol combinations but
+    isn't guaranteed - ask the broker what it actually supports instead of
+    assuming. IOC preferred when available (matches the deviation/slippage
+    tolerance already used for market orders); FOK and RETURN as fallbacks
+    in MT5's own documented preference order.
+
+    Not exercised by the test suite - this module only runs under the
+    Windows python.exe inside Wine, which is unavailable in this sandbox.
+    The bitmask logic itself matches MetaTrader5's documented SYMBOL_FILLING_*
+    constants, not something guessed for FBS specifically.
+    """
+    info = mt5.symbol_info(symbol)
+    filling_mask = info.filling_mode if info is not None else 0
+    if filling_mask & 2:  # SYMBOL_FILLING_IOC
+        return mt5.ORDER_FILLING_IOC
+    if filling_mask & 1:  # SYMBOL_FILLING_FOK
+        return mt5.ORDER_FILLING_FOK
+    return mt5.ORDER_FILLING_RETURN
+
+
 @app.before_request
 def _check_auth():
     """
@@ -302,7 +329,7 @@ def order_open():
         "magic": 990321,
         "comment": "xauusd-scalper",
         "type_time": mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_IOC,
+        "type_filling": _pick_filling_mode(symbol),
     }
     if sl_price:
         request_dict["sl"] = float(sl_price)
@@ -352,7 +379,7 @@ def order_close():
         "magic": 990321,
         "comment": "xauusd-scalper-tp",
         "type_time": mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_IOC,
+        "type_filling": _pick_filling_mode(p.symbol),
     }
     result = mt5.order_send(request_dict)
     if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
