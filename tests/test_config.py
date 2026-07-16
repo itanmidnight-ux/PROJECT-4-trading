@@ -1,6 +1,6 @@
 import os
 
-from core.config import load_settings
+from core.config import apply_db_overrides, load_settings
 
 
 def test_defaults_when_env_vars_absent(monkeypatch):
@@ -84,3 +84,61 @@ def test_tp_targets_usd_defaults_empty_and_parses_comma_list(monkeypatch):
 def test_tp_targets_usd_malformed_falls_back_to_empty(monkeypatch):
     monkeypatch.setenv("TP_TARGETS_USD", "not-a-number,0.5")
     assert load_settings().tp_targets_usd == []
+
+
+def test_apply_db_overrides_empty_dict_is_a_noop():
+    settings = load_settings()
+    assert apply_db_overrides(settings, {}) is settings
+
+
+def test_apply_db_overrides_overrides_connection_fields():
+    settings = load_settings()
+    overridden = apply_db_overrides(settings, {
+        "mt5_login": "999888", "mt5_password": "hunter2", "mt5_server": "ICMarkets-Live",
+    })
+    assert overridden.mt5_login == "999888"
+    assert overridden.mt5_password == "hunter2"
+    assert overridden.mt5_server == "ICMarkets-Live"
+    # everything else untouched
+    assert overridden.symbol == settings.symbol
+    assert overridden.risk_per_trade_usd == settings.risk_per_trade_usd
+
+
+def test_apply_db_overrides_casts_numeric_and_bool_fields():
+    settings = load_settings()
+    overridden = apply_db_overrides(settings, {
+        "risk_per_trade_usd": "2.5", "max_trades_per_day": "500",
+        "dry_run": "false", "mt5_is_demo": "true",
+    })
+    assert overridden.risk_per_trade_usd == 2.5
+    assert overridden.max_trades_per_day == 500
+    assert overridden.dry_run is False
+    assert overridden.mt5_is_demo is True
+
+
+def test_apply_db_overrides_ignores_malformed_numeric_value_instead_of_crashing():
+    settings = load_settings()
+    overridden = apply_db_overrides(settings, {"risk_per_trade_usd": "not-a-number"})
+    assert overridden.risk_per_trade_usd == settings.risk_per_trade_usd
+
+
+def test_apply_db_overrides_never_touches_db_path():
+    """db_path can't be DB-overridden - chicken-and-egg, the DB has to
+    already be open using .env's path before it can be asked for overrides."""
+    settings = load_settings()
+    overridden = apply_db_overrides(settings, {"db_path": "/tmp/somewhere-else.db"})
+    assert overridden.db_path == settings.db_path
+
+
+def test_dashboard_auth_token_defaults_blank_and_reads_from_env(monkeypatch):
+    monkeypatch.delenv("DASHBOARD_AUTH_TOKEN", raising=False)
+    assert load_settings().dashboard_auth_token == ""
+    monkeypatch.setenv("DASHBOARD_AUTH_TOKEN", "secret123")
+    assert load_settings().dashboard_auth_token == "secret123"
+
+
+def test_pause_flag_path_defaults_and_reads_from_env(monkeypatch):
+    monkeypatch.delenv("PAUSE_FLAG_PATH", raising=False)
+    assert load_settings().pause_flag_path == "data/PAUSED"
+    monkeypatch.setenv("PAUSE_FLAG_PATH", "/tmp/custom_pause")
+    assert load_settings().pause_flag_path == "/tmp/custom_pause"

@@ -1,5 +1,6 @@
 const POLL_MS = 3000;
 const THEME_KEY = 'xauusd-dashboard-theme';
+const AUTH_TOKEN_KEY = 'xauusd-dashboard-token';
 const tooltip = document.getElementById('tooltip');
 
 // Defense in depth: most fields rendered below come from fixed server-side
@@ -43,6 +44,28 @@ function initTheme() {
     localStorage.setItem(THEME_KEY, next);
     applyTheme(next);
   });
+}
+
+// -------------------------------------------------------------------- auth
+// Wraps fetch() for the mutating routes (settings save, pause/resume),
+// which require X-Dashboard-Token when DASHBOARD_AUTH_TOKEN is configured
+// (see dashboard.py's _check_dashboard_auth). On a 401 - no token stored
+// yet, or a stale one - prompts once, stores it, and retries; read-only
+// GETs never need this, the backend doesn't gate them.
+async function authFetch(path, options = {}) {
+  const token = localStorage.getItem(AUTH_TOKEN_KEY);
+  const headers = { ...(options.headers || {}) };
+  if (token) headers['X-Dashboard-Token'] = token;
+  let resp = await fetch(path, { ...options, headers });
+  if (resp.status === 401) {
+    const entered = window.prompt(
+      'Esta accion requiere el token del dashboard (DASHBOARD_AUTH_TOKEN en .env). Ingresalo:');
+    if (entered) {
+      localStorage.setItem(AUTH_TOKEN_KEY, entered);
+      resp = await fetch(path, { ...options, headers: { ...headers, 'X-Dashboard-Token': entered } });
+    }
+  }
+  return resp;
 }
 
 function animateValue(el, to, formatter) {
@@ -289,6 +312,117 @@ function renderEvents(containerId, events) {
     </div>`).join('');
 }
 
+// -------------------------------------------------------------------- tabs
+function initTabs() {
+  document.querySelectorAll('.tab-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.tab-btn').forEach((b) => b.classList.remove('active'));
+      document.querySelectorAll('.tab-panel').forEach((p) => p.classList.remove('active'));
+      btn.classList.add('active');
+      document.getElementById(`tab-${btn.dataset.tab}`)?.classList.add('active');
+      if (btn.dataset.tab === 'settings') loadSettings();
+    });
+  });
+}
+
+// ---------------------------------------------------------- pause / resume
+function updatePauseButton(paused) {
+  // Single source of truth for both the button AND the "Pausado" pill, so
+  // a manual click updates them together immediately instead of the pill
+  // lagging up to POLL_MS behind until the next scheduled refresh() call.
+  const pausedPill = document.getElementById('pill-paused');
+  if (pausedPill) pausedPill.hidden = !paused;
+
+  const btn = document.getElementById('btn-pause-resume');
+  if (!btn) return;
+  btn.textContent = paused ? 'Reanudar bot' : 'Detener bot';
+  btn.classList.toggle('is-paused', paused);
+  btn.dataset.paused = paused ? '1' : '0';
+}
+
+function initPauseButton() {
+  const btn = document.getElementById('btn-pause-resume');
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    const isPaused = btn.dataset.paused === '1';
+    const endpoint = isPaused ? '/api/bot/resume' : '/api/bot/pause';
+    btn.disabled = true;
+    try {
+      const resp = await authFetch(endpoint, { method: 'POST' });
+      if (resp.ok) {
+        const result = await resp.json();
+        updatePauseButton(!!result.paused);
+      }
+    } catch (e) {
+      console.error('No se pudo cambiar el estado del bot:', e);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+
+// ------------------------------------------------------------- settings tab
+async function loadSettings() {
+  const data = await fetchJson('/api/settings');
+  if (!data) return;
+  document.getElementById('set-login').value = data.mt5_login || '';
+  document.getElementById('set-server').value = data.mt5_server || '';
+  const pwEl = document.getElementById('set-password');
+  pwEl.value = '';
+  pwEl.placeholder = data.has_password ? '•••••••• (sin cambios)' : '(sin configurar)';
+  document.getElementById('set-is-demo').checked = !!data.mt5_is_demo;
+  document.getElementById('set-dry-run').checked = !!data.dry_run;
+  document.getElementById('set-risk').value = data.risk_per_trade_usd ?? '';
+  document.getElementById('set-max-loss').value = data.max_daily_loss_usd ?? '';
+  document.getElementById('set-max-dd').value = data.max_daily_drawdown_pct ?? '';
+  document.getElementById('set-max-trades').value = data.max_trades_per_day ?? '';
+}
+
+function initSettingsForm() {
+  const form = document.getElementById('settings-form');
+  if (!form) return;
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const msgEl = document.getElementById('settings-message');
+    msgEl.textContent = '';
+    msgEl.className = 'settings-message';
+
+    const payload = {
+      mt5_login: document.getElementById('set-login').value.trim(),
+      mt5_server: document.getElementById('set-server').value.trim(),
+      mt5_is_demo: document.getElementById('set-is-demo').checked,
+      dry_run: document.getElementById('set-dry-run').checked,
+      risk_per_trade_usd: Number(document.getElementById('set-risk').value),
+      max_daily_loss_usd: Number(document.getElementById('set-max-loss').value),
+      max_daily_drawdown_pct: Number(document.getElementById('set-max-dd').value),
+      max_trades_per_day: Number(document.getElementById('set-max-trades').value),
+    };
+    const password = document.getElementById('set-password').value;
+    if (password) payload.mt5_password = password;
+
+    try {
+      const resp = await authFetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const result = await resp.json();
+      if (resp.ok && result.ok) {
+        msgEl.textContent = result.message || 'Guardado.';
+        msgEl.className = 'settings-message ok';
+        loadSettings();
+      } else {
+        msgEl.textContent = result.error || `Error al guardar (HTTP ${resp.status}).`;
+        msgEl.className = 'settings-message error';
+      }
+    } catch (err) {
+      msgEl.textContent = 'No se pudo conectar con el dashboard.';
+      msgEl.className = 'settings-message error';
+      console.error(err);
+    }
+  });
+}
+
 // -------------------------------------------------------------------- poll
 
 // Resolves to the parsed JSON body, or null on any failure (network error,
@@ -337,6 +471,8 @@ async function refresh() {
 
   document.getElementById('pill-updated').textContent = new Date().toLocaleTimeString();
 
+  updatePauseButton(!!status.paused);
+
   // Each section below only updates if ITS OWN fetch succeeded - a single
   // failing endpoint leaves that one panel showing its last good state
   // instead of blanking the entire dashboard.
@@ -376,6 +512,9 @@ async function refresh() {
 }
 
 initTheme();
+initTabs();
+initPauseButton();
+initSettingsForm();
 refresh();
 setInterval(refresh, POLL_MS);
 window.addEventListener('resize', refresh);
