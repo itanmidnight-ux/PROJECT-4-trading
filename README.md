@@ -78,6 +78,7 @@ core/
   config.py           -> carga .env
   risk_manager.py      -> sizing de posicion + limites diarios
   strategy.py           -> señal (Bollinger+RSI) + escalera de TP
+  signals.py             -> señales extra opcionales + CompositeStrategy (ver Ronda 4)
   engine.py              -> loop principal
   broker.py               -> BridgeBroker (real) / SimulatedBroker (paper)
   market_data.py            -> BridgeMarketData (real) / SyntheticMarketData (pruebas)
@@ -135,6 +136,7 @@ manualmente y ajusta las rutas al inicio del script.
 
 .venv/bin/python scripts/fetch_market_data.py --interval 1m --range 5d   # historial real (proxy) para backtestear
 .venv/bin/python scripts/run_backtest.py --csv data/gold_history_1m.csv    # backtest con ese historial
+.venv/bin/python scripts/run_backtest.py --csv data/gold_history_1m.csv --composite --leverage 500  # + señales extra (ver Ronda 4)
 
 ./scripts/verify.sh       # compila todo, corre los tests y una prueba de humo del motor
 ./scripts/doctor.sh        # diagnostico de la instalacion real (Wine, MT5, bridge, .env, disco...)
@@ -486,6 +488,59 @@ con la cantidad de datos disponible en este entorno, cualquier resultado
 mas optimista que este seria, con alta probabilidad, ruido estadistico
 maquillado de señal. Antes de operar en real: repeti este proceso con
 historial real de FBS (exportado del bridge una vez conectado).
+
+**Ronda 4: se probaron 5 señales M1 nuevas, independientes de la reversion a
+la media - adaptadas de un EA de referencia (MQL5) que me pasaron, con una
+diferencia deliberada e importante.** Ese EA gana confirmaciones (12
+filtros direccionales: cruces de EMA multi-timeframe, RSI, ventanas de
+sesion, ruptura de rango, estructura de swings) pero su gestion de riesgo
+real es un grid/martingale: ninguna orden individual lleva stop-loss, agrega
+mas posiciones si el precio sigue en contra y espera un take-profit sobre el
+precio promedio de todo el grupo - el mismo patron que ya casi quebro una
+cuenta en el backtest de este proyecto (Ronda 2, arriba). Se descarto ese
+mecanismo a proposito (decision confirmada explicitamente antes de tocar
+codigo) y se tomaron solo las ideas de señal, cada una pasando por el mismo
+`RiskManager` y el mismo `RISK_PER_TRADE_USD` que la reversion a la media -
+ver `core/signals.py` para el detalle completo de que se adapto y por que.
+
+Las 5 señales (cruce de EMA9/21 en M1 confirmado por la pendiente de EMA50
+en M5, cruce de RSI por la linea de 50 con histeresis, vela direccional
+fuerte, apertura de sesion Londres/Nueva York, y ruptura del rango
+asiatico) se probaron sobre los mismos 7 dias reales de oro COMEX
+(`scripts/fetch_market_data.py`, risk-usd=$3, apalancamiento 1:500 fijo de
+metales en FBS - ver la nota de apalancamiento mas arriba), cada una sola
+encima de la reversion a la media, y las 5 juntas:
+
+| Configuracion | Trades | Trades/dia | Win rate | PnL | Drawdown max |
+|---|---|---|---|---|---|
+| Solo reversion a la media (baseline) | 17 | ~3.2 | 82.4% | -$0.79 | 12.6% |
+| + cruce de EMA (momentum) | 137 | ~25.8 | 75.9% | -$37.22 | 74.9% |
+| + histeresis de RSI | 79 | ~14.9 | 73.4% | -$36.85 | 75.3% |
+| + vela direccional | 85 | ~16.0 | 67.1% | -$37.02 | 75.3% |
+| + apertura de sesion | 82 | ~15.4 | 76.8% | -$24.97 | 54.9% |
+| + ruptura de rango asiatico | 51 | ~9.6 | 78.4% | -$11.93 | 34.8% |
+| Las 5 juntas | 116 | ~21.8 | 70.7% | -$38.78 | 78.6% |
+
+**El objetivo de frecuencia SI se cumple - cada señal, sola, multiplica los
+trades/dia entre ~3x y ~8x la reversion a la media sola.** Pero el
+resultado en dolares es peor en las 5, no mejor: el win rate se mantiene
+alto (67-78%) pero no compensa perdidas individuales mas grandes,
+exactamente el mismo desbalance ganancia/perdida que ya aparecio en las
+Rondas 1-3 para la reversion a la media, aca mas marcado porque estas 5
+señales son de CONTINUACION (siguen un movimiento que ya empezo) y
+comparten el mismo primer nivel de TP chico y dolar-anclado
+(`MIN_TP_USD=0.28`) que la reversion a la media, la cual sí puede justificar
+un TP chico porque entra EN un extremo estadistico. Una entrada de
+continuacion entrando a mitad de un movimiento no tiene esa misma
+justificacion para un TP tan ajustado frente a su propio stop.
+
+**Por eso las 5 quedan en el codigo, probadas y documentadas, pero
+APAGADAS por defecto** (`STRAT_ENABLE_*=false` en `.env.example`) - activar
+una es una decision informada de quien corra su propio backtest despues de
+ajustarla, no un cambio de comportamiento por defecto. Esto es exactamente
+lo que evita este proyecto en cada ronda: nunca reportar un numero
+optimista sin haberlo corrido primero, y nunca activar por defecto algo que
+el propio backtest muestra que empeora el resultado.
 
 ## Credenciales
 

@@ -40,6 +40,10 @@ def main() -> None:
     parser.add_argument("--min-tp-usd", type=float, default=0.28)
     parser.add_argument("--tp-levels", type=int, default=3)
     parser.add_argument("--spread", type=float, default=0.25)
+    parser.add_argument("--composite", action="store_true",
+                         help="Use the composite strategy (mean reversion + the extra M1 signals in "
+                              "core/signals.py, per STRAT_ENABLE_* in .env/defaults) instead of just "
+                              "mean reversion alone.")
     args = parser.parse_args()
 
     candles = pd.read_csv(args.csv) if args.csv else synthetic_candles(args.bars)
@@ -47,14 +51,23 @@ def main() -> None:
     spec = SymbolSpec(contract_size=100.0, volume_min=0.01, volume_max=1.0,
                        volume_step=0.01, point=0.01, trade_tick_value=1.0)
 
+    strategy = None
+    if args.composite:
+        from core.config import load_settings  # noqa: PLC0415 - optional import, only needed for --composite
+        from core.signals import build_strategy_from_settings  # noqa: PLC0415
+        value_per_point_per_lot = spec.trade_tick_value / spec.point
+        strategy = build_strategy_from_settings(load_settings(), value_per_point_per_lot)
+
     result = run_backtest(
         candles=candles, spec=spec, starting_balance=args.balance, leverage=args.leverage,
         risk_per_trade_usd=args.risk_usd, min_tp_usd=args.min_tp_usd, tp_levels=args.tp_levels,
-        assumed_spread_price=args.spread,
+        assumed_spread_price=args.spread, strategy=strategy,
     )
 
-    print(f"Bars: {len(candles)}  Spread assumed: {args.spread}")
-    print(f"Trades: {result.trades}  Wins: {result.wins}  Losses: {result.losses}  "
+    days = max(len(candles) / 1440, 1e-9)  # 1440 M1 bars/day - approximate, doesn't account for market closures
+    print(f"Strategy: {'composite (mean reversion + extra signals)' if args.composite else 'mean reversion only'}")
+    print(f"Bars: {len(candles)} (~{days:.1f} days)  Spread assumed: {args.spread}")
+    print(f"Trades: {result.trades}  (~{result.trades / days:.2f}/day)  Wins: {result.wins}  Losses: {result.losses}  "
           f"Win rate: {result.win_rate * 100:.1f}%")
     print(f"Total PnL: {result.total_pnl:+.2f} USD   Final balance: {result.final_balance:.2f} USD")
     print(f"Max drawdown: {result.max_drawdown_pct:.1f}%")

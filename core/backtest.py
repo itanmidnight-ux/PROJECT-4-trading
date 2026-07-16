@@ -38,15 +38,30 @@ def run_backtest(
     assumed_spread_price: float,
     max_trades_per_day: int = 1000,
     strategy_overrides: dict | None = None,
+    strategy: object | None = None,
+    max_lookback_bars: int = 600,
 ) -> BacktestResult:
     """candles: columns open, high, low, close, time (oldest -> newest).
     strategy_overrides passes extra kwargs straight to ScalpStrategy (e.g.
     sl_atr_multiple, trend_filter_adx_threshold) for sweeping parameters
-    without a dedicated CLI flag for every single one."""
+    without a dedicated CLI flag for every single one - ignored if
+    `strategy` is given directly (e.g. a CompositeStrategy from
+    core.signals.build_strategy_from_settings), which is used as-is.
+
+    max_lookback_bars caps how much history each strategy call sees (same
+    role as Settings.candle_history_count in the live engine, same default)
+    - this matters for two reasons, not just speed: it keeps backtest and
+    live directly comparable (a strategy never sees more history live than
+    it did in backtest), and without it CompositeStrategy's M5 resample
+    gets recomputed on a window that grows every single bar for the whole
+    replay, which is O(n^2) and turns a multi-thousand-bar backtest into a
+    multi-minute one for no accuracy benefit (600 bars is already more than
+    enough for every indicator used here, including the slowest, EMA50)."""
     value_per_point_per_lot = spec.trade_tick_value / spec.point
-    strategy = ScalpStrategy(min_tp_usd=min_tp_usd, tp_levels=tp_levels,
-                              value_per_point_per_lot=value_per_point_per_lot,
-                              **(strategy_overrides or {}))
+    if strategy is None:
+        strategy = ScalpStrategy(min_tp_usd=min_tp_usd, tp_levels=tp_levels,
+                                  value_per_point_per_lot=value_per_point_per_lot,
+                                  **(strategy_overrides or {}))
     risk = RiskManager(risk_per_trade_usd=risk_per_trade_usd, max_daily_loss_usd=10**9,
                         max_daily_drawdown_pct=100.0, max_trades_per_day=max_trades_per_day)
 
@@ -60,7 +75,7 @@ def run_backtest(
 
     warmup = 25
     for i in range(warmup, len(candles)):
-        window = candles.iloc[: i + 1]
+        window = candles.iloc[max(0, i + 1 - max_lookback_bars): i + 1]
         bar = candles.iloc[i]
         mid = bar["close"]
         bid, ask = mid - assumed_spread_price / 2, mid + assumed_spread_price / 2
