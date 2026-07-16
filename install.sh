@@ -188,6 +188,7 @@ cat <<'EOF'
    ./run.sh
 
  Para ver el dashboard:
-   .venv/bin/python dashboard.py
+   .venv/bin/python dashboard.py            # pregunta ventana nativa o web
+   .venv/bin/python dashboard.py --web      # directo como pagina web (puerto 9000)
 =====================================================================
 EOF
