@@ -69,8 +69,9 @@ y un dashboard nativo para ver resultados.
 ## Arquitectura
 
 ```
-run.sh              -> arranca Xvfb (si hace falta), el bridge MT5 (Wine) y el motor
-install.sh           -> instala todo: deps de sistema, venv, Wine, terminal MT5, python de Windows
+run.sh              -> arranca Xvfb (si hace falta), el bridge MT5 (Wine) y el motor;
+                        tambien: run.sh stop / emergency-stop / verify / doctor
+install.sh           -> instala todo, auto-detectando la plataforma (Kali/Ubuntu/Termux)
 main.py              -> entrypoint del motor (usa core/engine.py)
 dashboard.py          -> dashboard: ventana nativa (pywebview) o pagina web (--web, puerto 9000)
 
@@ -104,31 +105,67 @@ sistema (Python normal de Linux) consume por HTTP. Esta separacion es lo
 que permite que el motor, el dashboard y el risk manager sean Python
 comun y silvestre, sin depender de Wine para nada mas que hablar con MT5.
 
+### Plataformas soportadas (auto-detectadas)
+
+`install.sh` y `run.sh` detectan solos en que sistema estan corriendo
+(`/etc/os-release`, o las variables que Termux define) y ajustan que
+instalan/ejecutan - no hace falta pasarles ningun flag de plataforma.
+
+- **Kali Linux y Ubuntu** (o cualquier Debian-like con `apt-get`): soporte
+  completo. `install.sh` instala Wine + el terminal MT5 real + un Python
+  de Windows dentro de Wine, asi que esta maquina puede correr un bridge
+  local y operar en una cuenta real de punta a punta.
+- **Termux en Android, sin root**: soporte real pero **deliberadamente
+  parcial**, y esto no es una limitacion de este proyecto sino de Wine en
+  si - no existe una forma confiable de correr una aplicacion Win32 GUI
+  real (el terminal MT5) bajo Wine en Android sin root; las combinaciones
+  experimentales con proot/box64 que existen no son algo que este script
+  pueda honestamente prometer que funcionan para un bot con dinero real.
+  Por eso, en Termux `install.sh` instala **solo el lado Python puro**
+  (motor, dashboard, backtest - nada de eso necesita Wine) y configura la
+  maquina como **cliente de un bridge remoto**: `run.sh` en el telefono no
+  intenta levantar Wine local, sino que le habla por HTTP a un bridge
+  corriendo en una Kali/Ubuntu real (`MT5_BRIDGE_URL` en `.env` apuntando
+  a esa otra maquina). Lo que SI funciona 100% local en Termux sin ninguna
+  otra maquina: el dashboard (`dashboard.py --web`), los backtests, y
+  `run.sh --synthetic` para probar el motor con precios simulados.
+- **Otras distros Linux con `apt-get`** (Debian, Mint, etc.): deberian
+  funcionar por el mismo camino que Kali/Ubuntu, sin garantia especifica.
+- **Cualquier otra cosa** (Fedora, Arch, sin `apt-get` y no Termux):
+  `install.sh` avisa que no reconoce la plataforma, instala igual el lado
+  Python puro, y te deja instalar Wine/MT5 a mano antes de reintentar.
+
+`./run.sh doctor` siempre muestra que plataforma detecto en la primera
+linea, y ajusta sus propios chequeos (por ejemplo, en Termux no reporta
+"falta Wine" como un error - ahi eso es exactamente lo esperado).
+
 ## Instalacion
 
 ```bash
 ./install.sh
 ```
 
-Instala dependencias de sistema (apt), crea el venv de Linux, instala
-Wine + el terminal MetaTrader 5 + un Python de Windows dentro de Wine con
-el paquete `MetaTrader5`, y crea `.env` a partir de `.env.example`
-(pidiendo login/password/server de forma interactiva; ese archivo queda
-en `.gitignore` y nunca se commitea).
+En Kali/Ubuntu: instala dependencias de sistema (apt), crea el venv de
+Linux, instala Wine + el terminal MetaTrader 5 + un Python de Windows
+dentro de Wine con el paquete `MetaTrader5`, y crea `.env` a partir de
+`.env.example` (pidiendo login/password/server de forma interactiva; ese
+archivo queda en `.gitignore` y nunca se commitea). En Termux hace lo
+mismo pero solo para el lado Python puro (ver arriba).
 
 `install.sh` descarga instaladores desde `download.mql5.com` y
-`python.org`; necesitas salida a internet para esos dos dominios. Si tu
-red los bloquea, descarga `mt5setup.exe` y el instalador de Python 3.11
-manualmente y ajusta las rutas al inicio del script.
+`python.org` (solo en el camino Kali/Ubuntu); necesitas salida a internet
+para esos dos dominios. Si tu red los bloquea, descarga `mt5setup.exe` y
+el instalador de Python 3.11 manualmente y ajusta las rutas al inicio del
+script.
 
 ## Uso
 
 ```bash
 ./run.sh                 # arranca el bridge MT5 + el motor, usando .env (foreground)
 ./run.sh --synthetic      # sin broker: precios simulados, solo para probar que todo corre
-./run.sh --daemon          # igual, pero corre en segundo plano (usar ./stop.sh para pararlo)
-./stop.sh                   # detiene una instancia arrancada con --daemon
-./emergency_stop.sh         # PARADA DE EMERGENCIA: cierra posiciones abiertas y detiene el motor ya
+./run.sh --daemon          # igual, pero corre en segundo plano (usar ./run.sh stop para pararlo)
+./run.sh stop                # detiene una instancia arrancada con --daemon
+./run.sh emergency-stop       # PARADA DE EMERGENCIA: cierra posiciones abiertas y detiene el motor ya
 
 .venv/bin/python dashboard.py       # pregunta: ventana nativa o web (independiente del motor)
 .venv/bin/python dashboard.py --web # directo como pagina web en http://127.0.0.1:9000
@@ -138,18 +175,24 @@ manualmente y ajusta las rutas al inicio del script.
 .venv/bin/python scripts/run_backtest.py --csv data/gold_history_1m.csv    # backtest con ese historial
 .venv/bin/python scripts/run_backtest.py --csv data/gold_history_1m.csv --composite --leverage 500  # + señales extra (ver Ronda 4)
 
-./scripts/verify.sh       # compila todo, corre los tests y una prueba de humo del motor
-./scripts/doctor.sh        # diagnostico de la instalacion real (Wine, MT5, bridge, .env, disco...)
+./run.sh verify           # compila todo, corre los tests y una prueba de humo del motor
+./run.sh doctor             # diagnostico de la instalacion real (Wine, MT5, bridge, .env, disco...)
 ```
 
-`scripts/doctor.sh` es el primer comando a correr cuando algo no funciona: no
+`install.sh` y `run.sh` son los unicos dos archivos `.sh` del proyecto -
+parar el motor, la parada de emergencia, verificar, y el diagnostico son
+subcomandos de `run.sh` (`stop`, `emergency-stop`, `verify`, `doctor`), no
+scripts separados.
+
+`./run.sh doctor` es el primer comando a correr cuando algo no funciona: no
 instala ni cambia nada, solo te dice exactamente que falta (Wine, el
 terminal MT5, el python de Wine, credenciales en `.env`, el bridge
 corriendo, espacio en disco...) en vez de tener que adivinar o re-correr
-`install.sh` a ciegas.
+`install.sh` a ciegas. En Termux ajusta solo sus propios chequeos (ver
+"Plataformas soportadas" mas arriba).
 
-`.github/workflows/ci.yml` corre exactamente `scripts/verify.sh` (mismo
-script, no una definicion paralela de "pasa") mas `ruff` y `shellcheck` en
+`.github/workflows/ci.yml` corre exactamente `./run.sh verify` (mismo
+codigo, no una definicion paralela de "pasa") mas `ruff` y `shellcheck` en
 cada push/PR - no necesita Wine ni un broker, asi que corre en cualquier
 runner de GitHub Actions estandar.
 
@@ -212,11 +255,11 @@ en el propio archivo.
 
 ### Parada de emergencia (interruptor manual)
 
-`stop.sh` requiere acceso por terminal a la maquina que corre el bot. Para
-cubrir el caso en que eso no este disponible (SSH caido, terminal
-inaccesible, querés que alguien mas pueda frenarlo), el motor revisa en
-cada ciclo si existe un archivo (`KILL_SWITCH_PATH` en `.env`, por defecto
-`data/EMERGENCY_STOP`). Si existe:
+`./run.sh stop` requiere acceso por terminal a la maquina que corre el
+bot. Para cubrir el caso en que eso no este disponible (SSH caido,
+terminal inaccesible, querés que alguien mas pueda frenarlo), el motor
+revisa en cada ciclo si existe un archivo (`KILL_SWITCH_PATH` en `.env`,
+por defecto `data/EMERGENCY_STOP`). Si existe:
 
 1. Cierra a mercado cualquier posicion abierta inmediatamente (no espera
    a que el SL/TP la alcance).
@@ -224,13 +267,13 @@ cada ciclo si existe un archivo (`KILL_SWITCH_PATH` en `.env`, por defecto
    crash comun, que si se reintenta con backoff).
 
 ```bash
-./emergency_stop.sh            # activa: cierra posiciones y detiene el motor
-./emergency_stop.sh --clear    # desactiva: borra el interruptor, listo para ./run.sh
+./run.sh emergency-stop            # activa: cierra posiciones y detiene el motor
+./run.sh emergency-stop --clear    # desactiva: borra el interruptor, listo para ./run.sh
 ```
 
 Tambien alcanza con `touch data/EMERGENCY_STOP` desde cualquier cosa que
-pueda escribir al filesystem (no hace falta el script ni una sesion de
-shell interactiva). `scripts/doctor.sh` reporta si el interruptor esta
+pueda escribir al filesystem (no hace falta el subcomando ni una sesion de
+shell interactiva). `./run.sh doctor` reporta si el interruptor esta
 activo.
 
 ### Dashboard: ventana nativa o pagina web
@@ -274,7 +317,7 @@ motor sigue corriendo - no hace falta reiniciar nada, reanudar es
 instantaneo. Internamente toca/borra un archivo (`PAUSE_FLAG_PATH` en
 `.env`, `data/PAUSED` por defecto) que el motor ya revisa en cada paso. Si
 necesitas cerrar posiciones abiertas YA en vez de solo pausar, eso sigue
-siendo `./emergency_stop.sh` (ver mas arriba) - son dos controles
+siendo `./run.sh emergency-stop` (ver mas arriba) - son dos controles
 distintos a proposito.
 
 **Pestaña Settings**: cuenta MT5 (login, password, servidor), si es demo,
@@ -314,7 +357,7 @@ Detalles importantes:
   el dashboard solo necesita el token cuando elegis exponerlo con
   `--web --host 0.0.0.0` - forzarlo siempre agregaria una pregunta de
   token hasta para el uso 100% local (ventana nativa), que no gana nada
-  de seguridad real ahi. `scripts/doctor.sh` reporta si esta configurado.
+  de seguridad real ahi. `./run.sh doctor` reporta si esta configurado.
 
 ### Dashboard: rediseño visual
 

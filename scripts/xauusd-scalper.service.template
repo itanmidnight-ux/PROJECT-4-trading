@@ -20,7 +20,7 @@ After=network-online.target
 Type=simple
 WorkingDirectory=__PROJECT_ROOT__
 ExecStart=__PROJECT_ROOT__/run.sh
-ExecStop=__PROJECT_ROOT__/stop.sh
+ExecStop=__PROJECT_ROOT__/run.sh stop
 Restart=on-failure
 RestartSec=10
 

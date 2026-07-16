@@ -165,10 +165,10 @@ class TradingEngine:
         self.db.record_snapshot(ts=_now_iso(), balance=account.balance,
                                  equity=account.equity, free_margin=account.free_margin)
 
-        # Manual kill switch: checked every step, independent of run.sh/
-        # stop.sh process supervision, so it works even without terminal
-        # access to whatever machine is running the bot - e.g. `touch
-        # data/EMERGENCY_STOP` from anything that can write to the
+        # Manual kill switch: checked every step, independent of run.sh's
+        # own process supervision (`./run.sh stop`), so it works even
+        # without terminal access to whatever machine is running the bot -
+        # e.g. `touch data/EMERGENCY_STOP` from anything that can write to the
         # filesystem. Takes priority over the drawdown breaker below since
         # it's an explicit operator decision, not a derived risk check.
         if Path(self.settings.kill_switch_path).exists():
