@@ -482,3 +482,65 @@ def test_kill_switch_file_blocks_new_trades_when_flat(tmp_path):
 
     assert len(engine._open_positions) == 0
     assert db.recent_trades(limit=5) == []
+
+
+def test_pause_flag_blocks_opening_a_new_trade_when_flat(tmp_path):
+    """Unlike the kill switch, pausing must NOT raise/halt the engine - it's
+    a reversible, everyday control, not an emergency measure."""
+    pause_flag = tmp_path / "PAUSED"
+    pause_flag.touch()
+    entry_state, _ = oversold_entry_state()
+    market_data = ScriptedMarketData([entry_state])
+    broker = SimulatedBroker(starting_balance=50_000.0, leverage=100, spec=SPEC)
+    db = Database(str(tmp_path / "engine_pause_flat.db"))
+    settings = make_settings(pause_flag_path=str(pause_flag))
+    engine = TradingEngine(settings, market_data, broker, db, poll_seconds=0)
+
+    engine.step()  # would open on this oversold signal if not paused
+
+    assert len(engine._open_positions) == 0
+    assert db.recent_trades(limit=5) == []
+
+
+def test_pause_flag_keeps_managing_an_already_open_position(tmp_path):
+    """The core distinction from the kill switch: pause does NOT force-close
+    existing positions - it only blocks new ones. An open position's own
+    SL/TP still gets processed normally while paused."""
+    pause_flag = tmp_path / "PAUSED"
+    entry_state, last_close = oversold_entry_state()
+    down_tick = Tick(bid=last_close - 50, ask=last_close - 49.8, spread_price=0.2, time=1_700_002_060)
+    down_state = LiveState(tick=down_tick, candles=entry_state.candles)
+    market_data = ScriptedMarketData([entry_state, down_state])
+    broker = SimulatedBroker(starting_balance=50_000.0, leverage=100, spec=SPEC)
+    db = Database(str(tmp_path / "engine_pause_managed.db"))
+    settings = make_settings(pause_flag_path=str(pause_flag))
+    engine = TradingEngine(settings, market_data, broker, db, poll_seconds=0)
+
+    engine.step()  # opens the BUY (not paused yet)
+    assert len(engine._open_positions) == 1
+
+    pause_flag.touch()  # pause AFTER the position is already open
+    engine.step()  # big adverse move: the SL must still fire despite the pause
+
+    assert len(engine._open_positions) == 0
+    trades = db.recent_trades(limit=5)
+    assert trades[0]["status"] == "closed"
+    assert trades[0]["pnl_usd"] < 0
+
+
+def test_removing_the_pause_flag_resumes_trading_on_the_next_step(tmp_path):
+    pause_flag = tmp_path / "PAUSED"
+    pause_flag.touch()
+    entry_state, _ = oversold_entry_state()
+    market_data = ScriptedMarketData([entry_state, entry_state])
+    broker = SimulatedBroker(starting_balance=50_000.0, leverage=100, spec=SPEC)
+    db = Database(str(tmp_path / "engine_pause_resume.db"))
+    settings = make_settings(pause_flag_path=str(pause_flag))
+    engine = TradingEngine(settings, market_data, broker, db, poll_seconds=0)
+
+    engine.step()
+    assert len(engine._open_positions) == 0, "must stay paused"
+
+    pause_flag.unlink()
+    engine.step()
+    assert len(engine._open_positions) == 1, "must resume immediately once unpaused, no restart needed"

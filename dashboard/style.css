@@ -218,10 +218,150 @@ body {
 .pill.live .dot { background: var(--good); box-shadow: 0 0 8px var(--good); animation: pulse 1.6s infinite; }
 .pill.dry .dot { background: var(--warning); box-shadow: 0 0 8px var(--warning); }
 .pill.off .dot { background: var(--critical); box-shadow: 0 0 8px var(--critical); }
+#pill-paused { color: var(--warning); border-color: var(--warning); }
+#pill-paused .dot { background: var(--warning); box-shadow: 0 0 8px var(--warning); }
+/* .pill's own `display: inline-flex` is an author-stylesheet rule, so it
+   wins over the browser's default `[hidden] { display: none }` UA rule at
+   equal specificity (origin beats specificity in the cascade) - without
+   this, toggling the `hidden` attribute via JS silently did nothing. */
+#pill-paused[hidden] { display: none; }
+
+/* ---------- pause/resume control ---------- */
+.btn-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  border: 1px solid var(--critical);
+  background: color-mix(in srgb, var(--critical) 12%, transparent);
+  color: var(--critical);
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;
+  white-space: nowrap;
+}
+.btn-control:hover { transform: translateY(-1px); box-shadow: var(--shadow-sm); }
+.btn-control:active { transform: translateY(0); }
+.btn-control:disabled { opacity: 0.6; cursor: wait; transform: none; }
+.btn-control.is-paused {
+  border-color: var(--good);
+  background: color-mix(in srgb, var(--good) 12%, transparent);
+  color: var(--good);
+}
 
 @keyframes pulse {
   0%, 100% { opacity: 1; transform: scale(1); }
   50% { opacity: 0.55; transform: scale(0.8); }
+}
+
+/* ---------- tabs ---------- */
+.tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid var(--border);
+}
+.tab-btn {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 700;
+  padding: 10px 16px;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+.tab-btn:hover { color: var(--text-primary); }
+.tab-btn.active { color: var(--series-1); border-bottom-color: var(--series-1); }
+
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+
+/* ---------- settings form ---------- */
+.field-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.field { display: flex; flex-direction: column; gap: 6px; }
+.field-label { font-size: 12px; color: var(--text-secondary); font-weight: 600; }
+.field input[type="text"],
+.field input[type="password"],
+.field input[type="number"] {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 9px 12px;
+  font-size: 14px;
+  color: var(--text-primary);
+  font-family: inherit;
+  transition: border-color 0.15s ease;
+}
+.field input:focus {
+  outline: none;
+  border-color: var(--series-1);
+}
+.field-checkbox {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  padding-top: 22px;
+}
+.field-checkbox input[type="checkbox"] {
+  width: 17px; height: 17px;
+  accent-color: var(--series-1);
+  cursor: pointer;
+}
+.field-checkbox span { font-size: 13px; color: var(--text-secondary); font-weight: 600; }
+
+#tab-settings h3 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin: 24px 0 14px;
+  font-weight: 700;
+}
+
+.settings-actions { display: flex; align-items: center; gap: 14px; margin-top: 4px; }
+.btn-primary {
+  appearance: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 10px 20px;
+  font-size: 13px;
+  font-weight: 700;
+  background: var(--series-1);
+  color: white;
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, filter 0.15s ease;
+}
+.btn-primary:hover { filter: brightness(1.08); transform: translateY(-1px); box-shadow: var(--shadow-sm); }
+.btn-primary:active { transform: translateY(0); }
+
+.settings-message { font-size: 12px; font-weight: 600; }
+.settings-message.ok { color: var(--delta-good); }
+.settings-message.error { color: var(--delta-critical); }
+
+.settings-note {
+  margin-top: 22px;
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.6;
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
+}
+.settings-note code {
+  background: var(--surface-2);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 11px;
 }
 
 /* ---------- stat tiles ---------- */

@@ -12,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from core.broker import BridgeBroker, SimulatedBroker  # noqa: E402
-from core.config import load_settings  # noqa: E402
+from core.config import apply_db_overrides, load_settings  # noqa: E402
 from core.database import Database  # noqa: E402
 from core.engine import EngineHalted, TradingEngine  # noqa: E402
 from core.market_data import BridgeMarketData, SyntheticMarketData  # noqa: E402
@@ -50,6 +50,7 @@ def main() -> None:
 
     settings = load_settings()
     db = Database(settings.db_path)
+    settings = apply_db_overrides(settings, db.get_all_settings())
 
     if args.synthetic:
         logger.warning("SYNTHETIC MODE: no broker connection, prices are simulated.")

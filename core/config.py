@@ -1,8 +1,9 @@
 """Loads .env into a typed Settings object. No secrets ever hit git."""
 from __future__ import annotations
 
+import contextlib
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -93,6 +94,20 @@ class Settings:
     # filesystem (a synced folder, a cron job, a phone SSH app).
     kill_switch_path: str = "data/EMERGENCY_STOP"
 
+    # Manual pause: distinct from kill_switch_path above. While this file
+    # exists the engine stops opening NEW trades but keeps managing/
+    # protecting any already-open position and keeps running (no process
+    # exit, unlike the kill switch) - a reversible day-to-day control, not
+    # an emergency measure. Toggled by the dashboard's pause/resume button.
+    pause_flag_path: str = "data/PAUSED"
+
+    # Shared secret required (via X-Dashboard-Token) on dashboard.py's
+    # mutating routes (settings save, pause/resume) when set - mirrors
+    # bridge_auth_token's role for the MT5 bridge. Blank means those routes
+    # are unauthenticated, fine on 127.0.0.1-only native mode but a real gap
+    # if the dashboard is ever run with --web --host 0.0.0.0.
+    dashboard_auth_token: str = ""
+
     # account_snapshots gets a row every engine poll with no natural cap
     # (unlike trades/events, which only grow with real activity) - the
     # engine prunes rows older than this on an hourly check so the DB
@@ -158,4 +173,45 @@ def load_settings() -> Settings:
         bridge_auth_token=os.getenv("BRIDGE_AUTH_TOKEN", ""),
         kill_switch_path=os.getenv("KILL_SWITCH_PATH", "data/EMERGENCY_STOP"),
         tp_targets_usd=_float_list("TP_TARGETS_USD", []),
+        pause_flag_path=os.getenv("PAUSE_FLAG_PATH", "data/PAUSED"),
+        dashboard_auth_token=os.getenv("DASHBOARD_AUTH_TOKEN", ""),
     )
+
+
+# Fields the dashboard's Settings tab is allowed to override, and how to cast
+# the TEXT value stored in bot_settings back to the right Python type. A
+# deliberately small subset (broker connection + risk limits) - not the full
+# Settings surface, and never db_path itself (chicken-and-egg: the DB has to
+# already be open, using the path .env gave us, before it can be asked for
+# overrides).
+DB_OVERRIDABLE_BOOL_FIELDS = {"mt5_is_demo", "dry_run"}
+DB_OVERRIDABLE_FLOAT_FIELDS = {"risk_per_trade_usd", "max_daily_loss_usd", "max_daily_drawdown_pct"}
+DB_OVERRIDABLE_INT_FIELDS = {"max_trades_per_day"}
+DB_OVERRIDABLE_STR_FIELDS = {"mt5_login", "mt5_password", "mt5_server"}
+
+
+def apply_db_overrides(settings: Settings, db_settings: dict[str, str]) -> Settings:
+    """Layers settings saved from the dashboard (core/database.py's
+    bot_settings table) on top of .env-derived Settings. Call once at
+    startup, after the Database is open - see main.py. A malformed stored
+    value (shouldn't happen via the dashboard's own validation, but the DB
+    doesn't enforce types) is skipped rather than crashing the engine; the
+    .env-derived default is used for that one field instead."""
+    if not db_settings:
+        return settings
+    overrides: dict[str, object] = {}
+    for key in DB_OVERRIDABLE_STR_FIELDS:
+        if key in db_settings:
+            overrides[key] = db_settings[key]
+    for key in DB_OVERRIDABLE_BOOL_FIELDS:
+        if key in db_settings:
+            overrides[key] = db_settings[key].strip().lower() in ("1", "true", "yes", "on")
+    for key in DB_OVERRIDABLE_FLOAT_FIELDS:
+        if key in db_settings:
+            with contextlib.suppress(ValueError):
+                overrides[key] = float(db_settings[key])
+    for key in DB_OVERRIDABLE_INT_FIELDS:
+        if key in db_settings:
+            with contextlib.suppress(ValueError):
+                overrides[key] = int(db_settings[key])
+    return replace(settings, **overrides) if overrides else settings
