@@ -167,7 +167,7 @@ def run_backtest(
                     entry = ask if signal.side == "BUY" else bid
                     direction = 1 if signal.side == "BUY" else -1
                     sl = entry - direction * signal.sl_distance_price
-                    tp_levels = strategy.build_tp_ladder(sizing.lot, assumed_spread_price)
+                    tp_levels = strategy.build_tp_ladder(sizing.lot, assumed_spread_price, vol_ratio=signal.vol_ratio)
                     open_pos = {"side": signal.side, "entry": entry, "sl": sl, "tp_levels": tp_levels,
                                 "next_idx": 0, "remaining_lot": sizing.lot, "orig_lot": sizing.lot,
                                 "realized_pnl": 0.0, "trail_distance": tp_levels[0].distance_price,

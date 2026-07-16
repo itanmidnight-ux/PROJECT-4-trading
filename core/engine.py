@@ -232,7 +232,7 @@ class TradingEngine:
             self.db.log_event(ts=_now_iso(), level="WARN", message=sizing.reason)
             return
 
-        tp_levels = self._strategy.build_tp_ladder(sizing.lot, tick.spread_price)
+        tp_levels = self._strategy.build_tp_ladder(sizing.lot, tick.spread_price, vol_ratio=signal.vol_ratio)
         fill_price = tick.ask if signal.side == "BUY" else tick.bid
         sl_price = fill_price - signal.sl_distance_price if signal.side == "BUY" else fill_price + signal.sl_distance_price
 
