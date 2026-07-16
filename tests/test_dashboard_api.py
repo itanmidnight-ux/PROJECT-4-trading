@@ -1,6 +1,6 @@
 """Tests for dashboard.py's mutating Flask routes (settings save, pause/
 resume) and the auth gate protecting them. The read-only GET routes are
-already exercised end-to-end by scripts/verify.sh; this focuses on the
+already exercised end-to-end by `./run.sh verify`; this focuses on the
 write paths added for the Settings tab and the pause/resume control, since
 those are the ones that can now change stored broker credentials or
 trading state - not just read them.
