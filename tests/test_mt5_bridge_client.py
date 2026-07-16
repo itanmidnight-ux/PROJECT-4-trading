@@ -28,7 +28,7 @@ def test_symbol_spec_picks_up_broker_reported_margin_initial():
         "trade_tick_size": 0.01, "spread": 20, "margin_initial": 8.13,
     }
     client = Mt5BridgeClient("http://127.0.0.1:5001")
-    with patch("requests.get", return_value=_fake_response(payload)):
+    with patch("requests.Session.get", return_value=_fake_response(payload)):
         spec = client.symbol_spec("XAUUSD")
     assert spec.margin_initial == 8.13
 
@@ -42,7 +42,7 @@ def test_symbol_spec_handles_missing_margin_initial_gracefully():
         "trade_tick_size": 0.01, "spread": 20, "margin_initial": None,
     }
     client = Mt5BridgeClient("http://127.0.0.1:5001")
-    with patch("requests.get", return_value=_fake_response(payload)):
+    with patch("requests.Session.get", return_value=_fake_response(payload)):
         spec = client.symbol_spec("XAUUSD")
     assert spec.margin_initial is None
 
@@ -50,7 +50,7 @@ def test_symbol_spec_handles_missing_margin_initial_gracefully():
 def test_bridge_error_raised_on_not_ok_response():
     payload = {"ok": False, "error": "symbol_select(XAUUSD) failed"}
     client = Mt5BridgeClient("http://127.0.0.1:5001", max_retries=1)
-    with patch("requests.get", return_value=_fake_response(payload)), \
+    with patch("requests.Session.get", return_value=_fake_response(payload)), \
             pytest.raises(BridgeError, match="symbol_select"):
         client.symbol_spec("XAUUSD")
 
@@ -63,7 +63,7 @@ def test_auth_token_sent_as_header_when_configured():
                "volume_step": 0.01, "point": 0.01, "digits": 2, "trade_tick_value": 1.0,
                "trade_tick_size": 0.01, "spread": 20, "margin_initial": None}
     client = Mt5BridgeClient("http://127.0.0.1:5001", auth_token="secret-token-123")
-    with patch("requests.get", return_value=_fake_response(payload)) as mock_get:
+    with patch("requests.Session.get", return_value=_fake_response(payload)) as mock_get:
         client.symbol_spec("XAUUSD")
     _, kwargs = mock_get.call_args
     assert kwargs["headers"]["X-Bridge-Token"] == "secret-token-123"
@@ -74,7 +74,7 @@ def test_no_auth_header_sent_when_token_not_configured():
                "volume_step": 0.01, "point": 0.01, "digits": 2, "trade_tick_value": 1.0,
                "trade_tick_size": 0.01, "spread": 20, "margin_initial": None}
     client = Mt5BridgeClient("http://127.0.0.1:5001")
-    with patch("requests.get", return_value=_fake_response(payload)) as mock_get:
+    with patch("requests.Session.get", return_value=_fake_response(payload)) as mock_get:
         client.symbol_spec("XAUUSD")
     _, kwargs = mock_get.call_args
     assert "X-Bridge-Token" not in kwargs["headers"]

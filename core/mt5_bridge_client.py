@@ -40,15 +40,25 @@ class Mt5BridgeClient:
         self.max_retries = max_retries
         self._credentials: Optional[dict] = None
         self._headers = {"X-Bridge-Token": auth_token} if auth_token else {}
+        # One Session, reused for every call this client makes for its
+        # entire lifetime (one instance per engine process - see main.py).
+        # requests.get/post without a Session open a brand new TCP
+        # connection (and re-do the TLS handshake, for an https bridge_url)
+        # on every single call; the engine polls the bridge multiple times
+        # (price, candles, account, positions...) every poll_seconds, so a
+        # bare module-level requests.get/post was paying that connection
+        # setup cost on every one of those, for the whole session's
+        # duration, instead of once.
+        self._session = requests.Session()
 
     def _raw_get(self, path: str, **params) -> dict:
-        resp = requests.get(f"{self.base_url}{path}", params=params, timeout=self.timeout,
-                             headers=self._headers)
+        resp = self._session.get(f"{self.base_url}{path}", params=params, timeout=self.timeout,
+                                  headers=self._headers)
         return resp.json()
 
     def _raw_post(self, path: str, payload: dict) -> dict:
-        resp = requests.post(f"{self.base_url}{path}", json=payload, timeout=self.timeout,
-                              headers=self._headers)
+        resp = self._session.post(f"{self.base_url}{path}", json=payload, timeout=self.timeout,
+                                   headers=self._headers)
         return resp.json()
 
     def _call(self, raw_fn, *args, allow_relogin: bool = True, **kwargs) -> dict:
@@ -89,7 +99,7 @@ class Mt5BridgeClient:
 
     def health(self) -> bool:
         try:
-            resp = requests.get(f"{self.base_url}/health", timeout=self.timeout)
+            resp = self._session.get(f"{self.base_url}/health", timeout=self.timeout)
             return resp.ok and resp.json().get("ok", False)
         except requests.RequestException:
             return False
