@@ -408,7 +408,16 @@ function initEngineButton() {
       const result = await resp.json().catch(() => ({}));
       if (resp.ok && result.ok) {
         if (!isRunning) updateEngineButton(true);  // start responds with the real state immediately
-        // stop: leave the "Deteniendo..." state as-is, refresh() confirms it
+        // stop: leave the "Deteniendo..." state as-is - the regular
+        // setInterval(refresh, POLL_MS) poll confirms it eventually, but
+        // that tick isn't synced to this click, so it could be up to a
+        // full POLL_MS (3s) away. One extra refresh() shortly after closes
+        // that gap instead of making every stop feel sluggish - refresh()
+        // just re-renders from whatever the server says at the time, so
+        // calling it early is always safe, never wrong (if the process
+        // hasn't actually exited yet, this shows "still running" and the
+        // regular poll picks it up next, same as before this existed).
+        if (isRunning) setTimeout(refresh, 1200);
       } else {
         updateEngineButton(isRunning);  // request rejected (409/etc) - revert to what we knew before
         console.error('No se pudo cambiar el estado del motor:', result.error);
