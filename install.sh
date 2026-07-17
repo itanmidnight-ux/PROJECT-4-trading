@@ -220,15 +220,39 @@ install_termux() {
         return 1
     fi
 
-    # numpy/pandas separately, and NOT fatal if they fail - see the long
-    # comment above about no-build-isolation being reverted: pandas'
-    # build-time numpy requirement gets built from scratch inside pip's
-    # isolated build venv regardless of the pkg-provided numpy above, and
-    # that from-source numpy build is known to fail on some Termux/ARM
-    # toolchains on its own SIMD dispatch code (confirmed live: "ninja:
-    # build stopped" compiling numpy's libhighway_qsort ASIMD routines) -
-    # a genuine numpy/ARM-toolchain compatibility issue this script has no
-    # way to fix blindly without being able to test on that exact device.
+    # numpy/pandas separately, and NOT fatal if they fail.
+    #
+    # If numpy came from pkg above, build pandas with --no-build-isolation
+    # so its own build doesn't try to rebuild a SECOND, vanilla numpy from
+    # source. Confirmed live why that second build reliably fails, not
+    # just slowly: Android's libc (Bionic) does not provide the `long
+    # double` complex-math functions (cpowl, cexpl, ccosl, csinl, ctanl,
+    # ccoshl, csinhl, ctanhl - all of <complex.h>) that numpy's C source
+    # calls unconditionally - "call to undeclared library function
+    # 'cpow'... ISO C99 and later do not support implicit function
+    # declarations", pointing straight at <complex.h>. That's a real,
+    # permanent gap in Android's libc, not a slow-but-eventually-working
+    # situation - a vanilla `pip install numpy` compiling from the plain
+    # PyPI sdist CANNOT succeed on Termux no matter how long it's given.
+    # Termux's own `pkg install python-numpy` binary already has this
+    # patched by the Termux maintainers (that's why it works) - the
+    # problem is pandas' isolated build venv ignores that pkg-provided
+    # numpy and low-level rebuilds its own straight from source, hitting
+    # the exact same wall all over again as a hidden step of "installing
+    # pandas". --no-build-isolation is what lets pandas' build see the
+    # already-working numpy instead.
+    local no_isolation_flag=""
+    if [ "$got_numpy_via_pkg" -eq 1 ]; then
+        log "numpy ya viene de pkg - preparando un build sin aislamiento para pandas, para"
+        log "que no intente recompilar su propio numpy sin parchear (eso es lo que fallaba)."
+        pkg install -y ninja 2>/dev/null || true
+        if pip install -q Cython meson meson-python wheel setuptools 'versioneer[toml]' 2>/dev/null; then
+            no_isolation_flag="--no-build-isolation"
+        else
+            warn "No se pudieron instalar las herramientas de build livianas - sigo por el camino normal."
+        fi
+    fi
+
     local pandas_ok=1
     if [ "$SKIP_PANDAS" -eq 1 ]; then
         pandas_ok=0
@@ -242,7 +266,8 @@ install_termux() {
         warn "nuevo (ej. despues de 'pkg upgrade', o si Termux agrego el paquete binario)."
     else
         log "Instalando numpy/pandas (esto es lo que puede tardar o fallar en Termux - ver mas abajo)..."
-        if grep -vE "$skip_pattern" requirements.txt | grep -E '^(pandas|numpy)' | run_pip_install 5400 -r /dev/stdin; then
+        # shellcheck disable=SC2086  # no_isolation_flag is deliberately either empty or one flag word - nothing to quote-split wrong
+        if grep -vE "$skip_pattern" requirements.txt | grep -E '^(pandas|numpy)' | run_pip_install 5400 $no_isolation_flag -r /dev/stdin; then
             rm -f "$PANDAS_FAILED_MARKER"
         else
             pandas_ok=0
