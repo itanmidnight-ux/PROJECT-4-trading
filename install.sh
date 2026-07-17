@@ -174,32 +174,49 @@ install_termux() {
     cpu_count="$(nproc 2>/dev/null || echo 2)"
     export MAKEFLAGS="-j${cpu_count}"
 
-    # Tried --no-build-isolation here (skip pip's throwaway isolated build
-    # venv for pandas, which otherwise re-fetches/rebuilds its OWN numpy
-    # from scratch even though pkg already gave us one, purely to satisfy
-    # pandas' build-time requirement) to avoid that redundant numpy build.
-    # REVERTED: confirmed on a real Termux device this broke the build
-    # instead of just speeding it up - pandas' meson build needs more of
-    # its declared build-system requirements than the handful this script
-    # pre-installed (its own version-generation step failed:
-    # "generate_version.py --print" exited 1, likely missing versioneer/
-    # setuptools_scm or another build-time dep not guessed here), and
-    # --no-build-isolation means pip stops auto-resolving those for us.
-    # Correctly hand-rolling pandas' FULL build-time dependency set isn't
-    # worth the risk of trading "slow" for "silently broken" - the
-    # isolated path below is slower but has been confirmed end-to-end.
-    log "Instalando el resto de las dependencias con pip (con progreso visible)..."
-    log "Si pandas termina compilando desde el codigo fuente (normal en Termux, no hay wheels"
-    log "para Android en PyPI) puede tardar bastante - no se colgo, va mostrando progreso real."
-    log "Compilando con $cpu_count nucleo(s) en paralelo para acelerarlo."
-    if ! grep -vE "$skip_pattern" requirements.txt | run_pip_install 5400 -r /dev/stdin; then
+    # dashboard.py itself never imports pandas (only core/strategy.py,
+    # core/backtest.py, core/signals.py, core/market_data.py, and
+    # core/mt5_bridge_client.py do - all only reachable through the
+    # ENGINE, not the dashboard) - so install requests/python-dotenv/Flask
+    # FIRST, on their own, completely independent of whether pandas ever
+    # succeeds. Those have real Android wheels and install fast and
+    # reliably; splitting them out means a pandas failure below can no
+    # longer take an otherwise-working dashboard down with it.
+    local core_skip_pattern="${skip_pattern}|^pandas|^numpy"
+    log "Instalando dependencias del dashboard (rapido, no necesitan compilar)..."
+    if ! grep -vE "$core_skip_pattern" requirements.txt | run_pip_install 600 -r /dev/stdin; then
         deactivate
-        err "'pkg search python-pandas' te dice si tu repo de Termux lo tiene como paquete binario"
-        err "(evita la compilacion por completo, ver arriba)."
+        err "Fallo instalando las dependencias basicas (requests/Flask/python-dotenv) - esto no"
+        err "deberia tardar ni fallar normalmente. Revisa la conexion a internet."
         return 1
     fi
+
+    # numpy/pandas separately, and NOT fatal if they fail - see the long
+    # comment above about no-build-isolation being reverted: pandas'
+    # build-time numpy requirement gets built from scratch inside pip's
+    # isolated build venv regardless of the pkg-provided numpy above, and
+    # that from-source numpy build is known to fail on some Termux/ARM
+    # toolchains on its own SIMD dispatch code (confirmed live: "ninja:
+    # build stopped" compiling numpy's libhighway_qsort ASIMD routines) -
+    # a genuine numpy/ARM-toolchain compatibility issue this script has no
+    # way to fix blindly without being able to test on that exact device.
+    local pandas_ok=1
+    log "Instalando numpy/pandas (esto es lo que puede tardar o fallar en Termux - ver mas abajo)..."
+    if ! grep -vE "$skip_pattern" requirements.txt | grep -E '^(pandas|numpy)' | run_pip_install 5400 -r /dev/stdin; then
+        pandas_ok=0
+        warn "numpy/pandas no se pudieron instalar en esta maquina - normal en algunos"
+        warn "telefonos/toolchains de Termux, no es un bug de este script. Sin ellos, el"
+        warn "MOTOR y los BACKTESTS no van a funcionar aca, pero el DASHBOARD si (no los usa)."
+        warn "'pkg search python-pandas' te dice si tu repo de Termux ya lo agrego como binario"
+        warn "(evita la compilacion por completo) - si no, corre el motor real en una maquina"
+        warn "Kali/Ubuntu y usa esta como cliente remoto del dashboard nada mas."
+    fi
     deactivate
-    log "venv listo en $VENV_DIR (sin pywebview - usa dashboard.py --web en Termux)"
+    if [ "$pandas_ok" -eq 1 ]; then
+        log "venv listo en $VENV_DIR (sin pywebview - usa dashboard.py --web en Termux)"
+    else
+        warn "venv listo en $VENV_DIR PERO SIN pandas/numpy - ver arriba."
+    fi
 
     log "Paso 3/3: configuracion (.env)"
     setup_env_file
@@ -208,7 +225,8 @@ install_termux() {
     log "http://192.168.1.50:5001), y BRIDGE_AUTH_TOKEN con el mismo token"
     log "que install.sh genero en esa otra maquina (copialo de su .env)."
 
-    cat <<'EOF'
+    if [ "$pandas_ok" -eq 1 ]; then
+        cat <<'EOF'
 
 =====================================================================
  Instalacion completa (modo Termux / cliente remoto).
@@ -231,6 +249,35 @@ install_termux() {
    ./run.sh doctor
 =====================================================================
 EOF
+    else
+        cat <<'EOF'
+
+=====================================================================
+ Instalacion PARCIAL (modo Termux / cliente remoto) - sin pandas/numpy.
+
+ numpy/pandas no se pudieron compilar en esta maquina (ver los avisos
+ arriba). Esta maquina SI puede: correr el dashboard como visor de una
+ cuenta cuyo motor corre en otra parte. NO puede: correr el motor real
+ ni backtests localmente - ambos necesitan pandas.
+
+ Para arrancar el dashboard igual (recomendado --web, no hay entorno
+ grafico nativo):
+   ./run.sh --start
+   luego abrí http://127.0.0.1:9000 - podes ver cuentas/trades/eventos
+   normalmente, con tal de que el MOTOR corra en otra maquina que si
+   tenga pandas (Kali/Ubuntu) y esta se configure como cliente remoto
+   (MT5_BRIDGE_URL en .env apuntando a esa otra maquina).
+
+ Para reintentar pandas mas adelante (ej. si Termux agrega el paquete
+ binario, o corres esto de nuevo con mas parches/version del sistema):
+   pkg search python-pandas
+   .venv/bin/pip install pandas
+
+ Diagnostico completo (que falta, que esta bien):
+   ./run.sh doctor
+=====================================================================
+EOF
+    fi
 }
 
 # --------------------------------------------------------- Debian-like path
