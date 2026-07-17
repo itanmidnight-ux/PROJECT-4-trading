@@ -174,11 +174,35 @@ install_termux() {
     cpu_count="$(nproc 2>/dev/null || echo 2)"
     export MAKEFLAGS="-j${cpu_count}"
 
+    # If pandas has to compile from source (no pkg binary above), its own
+    # pyproject.toml build-system requirements (meson-python, Cython,
+    # ninja, AND numpy - it needs numpy at build time, not just at
+    # runtime) get installed into a fresh, throwaway venv that pip creates
+    # just for that one build step - fully isolated from
+    # --system-site-packages by design, so it ignores the numpy pkg
+    # already gave us above and fetches/compiles its OWN numpy from
+    # scratch, for real, just to satisfy that build-time requirement.
+    # numpy is one of the heaviest things here - that's real, avoidable
+    # time, not the pandas compile itself. Pre-installing the (much
+    # lighter) build tools and passing --no-build-isolation lets pandas'
+    # build see the numpy that's already there instead of re-fetching one.
+    local no_isolation_flag=""
+    if [ "$got_numpy_via_pkg" -eq 1 ] && [ "$got_pandas_via_pkg" -eq 0 ]; then
+        log "Preparando un build sin aislamiento para pandas (evita recompilar numpy de nuevo solo para eso)..."
+        pkg install -y ninja 2>/dev/null || true
+        if pip install -q Cython meson meson-python wheel setuptools 2>/dev/null; then
+            no_isolation_flag="--no-build-isolation"
+        else
+            warn "No se pudieron instalar las herramientas de build livianas - sigo por el camino normal (mas lento pero mas seguro)."
+        fi
+    fi
+
     log "Instalando el resto de las dependencias con pip (con progreso visible)..."
     log "Si pandas termina compilando desde el codigo fuente (normal en Termux, no hay wheels"
     log "para Android en PyPI) puede tardar bastante - no se colgo, va mostrando progreso real."
     log "Compilando con $cpu_count nucleo(s) en paralelo para acelerarlo."
-    if ! grep -vE "$skip_pattern" requirements.txt | run_pip_install 5400 -r /dev/stdin; then
+    # shellcheck disable=SC2086  # no_isolation_flag is deliberately either empty or one flag word - nothing to quote-split wrong
+    if ! grep -vE "$skip_pattern" requirements.txt | run_pip_install 5400 $no_isolation_flag -r /dev/stdin; then
         deactivate
         err "'pkg search python-pandas' te dice si tu repo de Termux lo tiene como paquete binario"
         err "(evita la compilacion por completo, ver arriba)."
