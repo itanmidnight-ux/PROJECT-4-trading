@@ -97,6 +97,14 @@ def main() -> None:
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     backoff = 2.0
+    # Give up after this many consecutive near-instant deaths: a process
+    # that can't even survive 10 seconds five times in a row is broken in a
+    # way a retry won't fix (missing pandas on a partial Termux install,
+    # bad credentials file, syntax error...) - retrying forever just burns
+    # battery and fills the log while the dashboard's pidfile check keeps
+    # reporting this supervisor as "running". Exiting cleanly lets
+    # dashboard.py's _engine_pid() self-heal to "Motor detenido".
+    fast_failures = 0
     with open(LOG_PATH, "a") as log_file:
         log_file.write(f"\n[engine_supervisor] iniciado (PID {os.getpid()})\n")
         log_file.flush()
@@ -106,8 +114,18 @@ def main() -> None:
                 log_file.write("[engine_supervisor] detenido por pedido explicito (stop), no se reinicia.\n")
                 log_file.flush()
                 break
+            if ran_for < 10:
+                fast_failures += 1
+                if fast_failures >= 5:
+                    log_file.write(
+                        "[engine_supervisor] main.py fallo 5 veces seguidas en <10s - "
+                        "rindiendome para no quedar en bucle infinito. "
+                        "Revisa data/logs/engine.stdout.log para ver el error real.\n")
+                    log_file.flush()
+                    break
             if ran_for >= 60:
                 backoff = 2.0
+                fast_failures = 0
             log_file.write(f"[engine_supervisor] main.py termino tras {ran_for:.0f}s, reintentando en {backoff:.0f}s...\n")
             log_file.flush()
             slept = 0.0
