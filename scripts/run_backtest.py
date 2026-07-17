@@ -35,7 +35,20 @@ def main() -> None:
     parser.add_argument("--csv", help="CSV with columns time,open,high,low,close (real MT5 history)")
     parser.add_argument("--bars", type=int, default=3000)
     parser.add_argument("--balance", type=float, default=50.0)
-    parser.add_argument("--leverage", type=int, default=1)
+    # 500 matches FBS's own documented metals leverage (README, "apalancamiento
+    # 1:1 de la cuenta probablemente no aplica al oro") - NOT 1:1. Leverage=1
+    # inflates the required margin per lot by 500x (contract_size * price /
+    # leverage), which silently turns every backtest run into a MARGIN test
+    # instead of a signal-quality test: on a $50 balance a single 0.01 lot at
+    # ~$4000 gold needs ~$4070 margin at leverage=1 (impossible), so every
+    # signal gets rejected before the risk-per-trade check is ever reached -
+    # indistinguishable from "the strategy has no signals" unless you know to
+    # look for it. Confirmed live: this exact default made a real sweep look
+    # like 0 trades at every risk_usd from 1 to 8 on real data, when the
+    # actual constraint was margin, not risk - passing --leverage 500
+    # (matching the account this bot actually targets) surfaced real trades
+    # immediately. Override with --leverage if your account's is different.
+    parser.add_argument("--leverage", type=int, default=500)
     parser.add_argument("--risk-usd", type=float, default=1.0)
     parser.add_argument("--min-tp-usd", type=float, default=0.28)
     parser.add_argument("--tp-levels", type=int, default=3)
