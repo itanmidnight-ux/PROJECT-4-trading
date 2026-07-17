@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import importlib.util
 import os
 import signal
 import subprocess
@@ -89,6 +90,14 @@ def _reap_children(signum: int, frame: object) -> None:
             pid, _status = os.waitpid(-1, os.WNOHANG)
             if pid == 0:
                 break
+
+
+def _engine_deps_available() -> bool:
+    """Whether main.py's heavy imports (pandas/numpy) exist in this venv -
+    the engine and this dashboard share it, so checking here is
+    authoritative. See api_engine_start for why this gate exists."""
+    return (importlib.util.find_spec("pandas") is not None
+            and importlib.util.find_spec("numpy") is not None)
 
 
 def _engine_pid() -> int | None:
@@ -332,6 +341,21 @@ def api_engine_start():
     account's positions."""
     if _engine_pid() is not None:
         return jsonify({"ok": False, "error": "El motor ya esta corriendo."}), 409
+
+    # On a partial Termux install (pandas/numpy failed to build - a
+    # documented, supported outcome, see install.sh) main.py can't even
+    # import: without this check, spawning the supervisor put it into an
+    # eternal crash-restart loop while this dashboard reported "Motor
+    # corriendo" (the supervisor process itself stays alive). Refuse up
+    # front with a clear reason instead. find_spec, not a subprocess
+    # probe: this process and main.py share the same venv, so lookup here
+    # is authoritative - and subprocess.run would drag Popen into it,
+    # which broke under test mocks of Popen for exactly that reason.
+    if not _engine_deps_available():
+        return jsonify({"ok": False, "error":
+            "Faltan pandas/numpy en esta maquina - el motor no puede correr aca. "
+            "En Termux esto es lo esperado si install.sh no pudo compilarlos: "
+            "usa esta maquina solo como visor y corre el motor en una Kali/Ubuntu."}), 409
 
     RUN_DIR.mkdir(parents=True, exist_ok=True)
     proc = subprocess.Popen(
