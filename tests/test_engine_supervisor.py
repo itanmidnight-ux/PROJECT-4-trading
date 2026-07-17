@@ -108,6 +108,34 @@ os.kill(int(os.environ["ENGINE_SUPERVISOR_PID"]), signal.SIGTERM)
     assert marker.read_text().strip() == "1"  # never restarted
 
 
+def test_main_gives_up_after_five_consecutive_fast_failures(tmp_path, monkeypatch):
+    """A main.py that dies instantly every time (missing pandas on a
+    partial Termux install, bad config, syntax error) must NOT be retried
+    forever - before this, the supervisor crash-looped it eternally with
+    the dashboard reporting 'Motor corriendo' the whole time. It must try
+    exactly 5 times, log why it's giving up, and exit on its own."""
+    monkeypatch.setattr(sup, "ROOT", tmp_path)
+    monkeypatch.setattr(sup, "LOG_PATH", tmp_path / "engine.stdout.log")
+    marker = tmp_path / "run_count.txt"
+    _write_fake_main(tmp_path, f"""
+from pathlib import Path
+marker = Path({str(marker)!r})
+count = int(marker.read_text()) if marker.exists() else 0
+marker.write_text(str(count + 1))
+raise SystemExit(1)
+""")
+
+    sup._stop_requested = False
+    try:
+        sup.main()  # must terminate by itself - a hang here IS the failure
+    finally:
+        sup._stop_requested = False
+
+    assert marker.read_text().strip() == "5"
+    log_text = sup.LOG_PATH.read_text()
+    assert "rindiendome" in log_text
+
+
 def test_main_restarts_a_child_that_exits_on_its_own(tmp_path, monkeypatch):
     """A crash (non-stop exit) must trigger a restart, not a permanent
     stop - this is the actual crash-resilience this module exists for."""

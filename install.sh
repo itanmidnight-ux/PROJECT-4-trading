@@ -246,7 +246,7 @@ install_termux() {
         log "numpy ya viene de pkg - preparando un build sin aislamiento para pandas, para"
         log "que no intente recompilar su propio numpy sin parchear (eso es lo que fallaba)."
         pkg install -y ninja 2>/dev/null || true
-        if pip install -q Cython meson meson-python wheel setuptools 'versioneer[toml]' 2>/dev/null; then
+        if timeout 600 pip install -q Cython meson meson-python wheel setuptools 'versioneer[toml]'; then
             no_isolation_flag="--no-build-isolation"
         else
             warn "No se pudieron instalar las herramientas de build livianas - sigo por el camino normal."
@@ -369,11 +369,13 @@ install_debian_like() {
     # apt can hang indefinitely waiting on another apt/dpkg process holding
     # the lock (e.g. unattended-upgrades) - bounded here too rather than
     # blocking forever with no indication why.
-    if ! timeout 1200 "$SUDO" apt-get update -y; then
+    # shellcheck disable=SC2086  # $SUDO debe desaparecer (no ser un arg vacio "") cuando se corre como root - quoted, timeout intenta ejecutar '' y falla siempre
+    if ! timeout 1200 $SUDO apt-get update -y; then
         err "apt-get update fallo o se paso de 20 minutos - revisa la conexion, o si otro proceso (unattended-upgrades) tiene el lock de apt/dpkg."
         exit 1
     fi
-    if ! timeout 1800 "$SUDO" apt-get install -y --no-install-recommends \
+    # shellcheck disable=SC2086
+    if ! timeout 1800 $SUDO apt-get install -y --no-install-recommends \
         python3 python3-venv python3-pip \
         wine wine64 winbind \
         xvfb xdotool cabextract wget curl unzip ca-certificates; then
