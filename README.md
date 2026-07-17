@@ -130,7 +130,16 @@ instalan/ejecutan - no hace falta pasarles ningun flag de plataforma.
   a esa otra maquina). Lo que SI funciona 100% local en Termux sin ninguna
   otra maquina: el dashboard (`dashboard.py --web`), los backtests, y
   `.venv/bin/python main.py --synthetic` para probar el motor con precios
-  simulados.
+  simulados - los ultimos dos necesitan `pandas`, que en algunos
+  telefonos/toolchains de Termux directamente no compila (PyPI no publica
+  wheels precompilados para Android; el compilado desde el codigo fuente
+  puede fallar por una incompatibilidad real del toolchain con el codigo
+  SIMD de numpy para ARM, no un bug de este script). Si eso pasa,
+  `install.sh` no aborta: el dashboard queda funcionando igual (nunca usa
+  pandas), solo motor/backtests locales quedan sin disponibles ahi. Un
+  fallo se recuerda para no reintentar un compilado de hasta 90 minutos
+  en cada corrida - `./install.sh --skip-pandas` lo salta directamente,
+  `./install.sh --retry-pandas` fuerza un nuevo intento.
 - **Otras distros Linux con `apt-get`** (Debian, Mint, etc.): deberian
   funcionar por el mismo camino que Kali/Ubuntu, sin garantia especifica.
 - **Cualquier otra cosa** (Fedora, Arch, sin `apt-get` y no Termux):
