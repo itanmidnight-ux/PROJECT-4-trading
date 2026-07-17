@@ -62,6 +62,30 @@ def _kill_and_reap(pid: int) -> None:
         pass
 
 
+def test_engine_start_refuses_when_pandas_missing(tmp_path, monkeypatch):
+    """On a partial Termux install (pandas/numpy failed to build), starting
+    the engine used to crash-loop the supervisor forever while /api/status
+    kept saying engine_running=true. The route must probe importability
+    first and refuse with a clear 409 - without ever spawning anything."""
+    client, _db = make_client(tmp_path)
+
+    # Patch the dashboard's own helper, not importlib/subprocess: those are
+    # stdlib modules shared with everything else (see _real_popen's caveat
+    # above for how that bites).
+    monkeypatch.setattr(dmod, "_engine_deps_available", lambda: False)
+
+    def _explode(*a, **k):
+        raise AssertionError("Popen must not be called when the probe fails")
+    monkeypatch.setattr(dmod.subprocess, "Popen", _explode)
+
+    resp = client.post("/api/engine/start")
+    assert resp.status_code == 409
+    body = resp.get_json()
+    assert body["ok"] is False
+    assert "pandas" in body["error"]
+    assert not dmod.ENGINE_PID_FILE.exists()
+
+
 def test_engine_start_spawns_and_tracks_a_real_process(tmp_path, monkeypatch):
     client, _db = make_client(tmp_path)
     monkeypatch.setattr(dmod.subprocess, "Popen", _fake_popen_sleep)
