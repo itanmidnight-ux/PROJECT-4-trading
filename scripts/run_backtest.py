@@ -49,9 +49,15 @@ def main() -> None:
     # (matching the account this bot actually targets) surfaced real trades
     # immediately. Override with --leverage if your account's is different.
     parser.add_argument("--leverage", type=int, default=500)
-    parser.add_argument("--risk-usd", type=float, default=1.0)
+    # Mirrors core/config.py's real defaults (RISK_PER_TRADE_USD=3.0,
+    # TP_LEVELS=5 - see README "Ronda 6" / "Ronda 5") so a plain
+    # `run_backtest.py --csv ...` with no flags tests what the bot actually
+    # ships with, not a stale earlier default - drifting these two apart
+    # is exactly what silently made this tool's "0 trades" readings
+    # unrepresentative of the real bot before Ronda 6 caught it.
+    parser.add_argument("--risk-usd", type=float, default=3.0)
     parser.add_argument("--min-tp-usd", type=float, default=0.28)
-    parser.add_argument("--tp-levels", type=int, default=3)
+    parser.add_argument("--tp-levels", type=int, default=5)
     parser.add_argument("--spread", type=float, default=0.25)
     parser.add_argument("--composite", action="store_true",
                          help="Use the composite strategy (mean reversion + the extra M1 signals in "
