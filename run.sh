@@ -280,7 +280,12 @@ cmd_doctor() {
         if [ -n "${MT5_LOGIN:-}" ] && [ -n "${MT5_PASSWORD:-}" ]; then
             ok "MT5_LOGIN y MT5_PASSWORD estan configurados"
         else
-            bad "MT5_LOGIN o MT5_PASSWORD vacios en .env - editalo, corre ./install.sh, o completalo desde la pestaña Settings del dashboard"
+            # Not a hard failure on purpose: an install is fully functional
+            # without credentials yet (dashboard-only Termux client, or "fill
+            # them in later") - they're completable any time from the
+            # dashboard's Settings tab, so this must never block install.sh's
+            # final re-verification the way a genuinely broken .venv/.env would.
+            warn_msg "MT5_LOGIN o MT5_PASSWORD vacios en .env - editalo, corre ./install.sh, o completalo desde la pestaña Settings del dashboard"
         fi
         if [ "${DRY_RUN:-true}" = "true" ]; then
             ok "DRY_RUN=true (modo seguro: precios reales, sin ordenes reales)"
