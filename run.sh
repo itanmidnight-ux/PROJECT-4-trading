@@ -476,6 +476,20 @@ cmd_status() {
     printf "%b\n" "$RESET"
 
     row "Plataforma" "$platform"
+
+    # ---- kill switch: a filesystem check, independent of whether the
+    # dashboard/bridge respond, so it shows up even when everything else
+    # is down - the whole point of the kill switch is working without a
+    # process being reachable. Surfaced here (not just in ./run.sh doctor)
+    # because it directly explains an otherwise-confusing "engine says
+    # running but never opens a trade" - doctor is a deep diagnostic
+    # someone has to think to run, --status is the one people check first.
+    local kill_switch_path=""
+    [ -f ".env" ] && kill_switch_path="$(grep -E '^KILL_SWITCH_PATH=' .env 2>/dev/null | head -1 | cut -d= -f2-)"
+    kill_switch_path="${kill_switch_path:-data/EMERGENCY_STOP}"
+    if [ -f "$PROJECT_ROOT/$kill_switch_path" ]; then
+        row "Interruptor" "${RED}●${RESET} EMERGENCY STOP ACTIVO -- el motor no abrira operaciones. ./run.sh emergency-stop --clear para reanudar."
+    fi
     echo
 
     # ---- bridge ----
