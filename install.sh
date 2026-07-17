@@ -99,6 +99,50 @@ download_with_timeout() {
     wget --timeout=30 --tries=3 -q -O "$2" "$1"
 }
 
+# Creates (or repairs) the venv, activates it, and PROVES the activation
+# actually took - three real failure modes this covers that a bare
+# `python3 -m venv && source activate` does not:
+#   1. A partially-created venv from an interrupted earlier run (Ctrl-C,
+#      disk full): the directory exists so naive `[ ! -d ]` skips creation,
+#      then activate/pip are missing or broken and everything after fails
+#      cryptically. Detected (bin/activate or bin/pip missing) -> recreated.
+#   2. Activation that silently doesn't stick: if `pip` still resolves
+#      OUTSIDE $VENV_DIR after sourcing activate, every dependency would
+#      install into the system python instead of the venv - run.sh would
+#      later report "faltan dependencias" with no obvious cause. Verified
+#      with `command -v pip` and failed loudly here instead.
+#   3. pip's self-upgrade stalling forever on a bad connection: bounded.
+# $@: extra flags for `python3 -m venv` (e.g. --system-site-packages).
+# Leaves the venv ACTIVATED on success; returns 1 (with errors printed) on
+# any failure. Callers keep their own `deactivate`s.
+ensure_venv() {
+    if [ -d "$VENV_DIR" ] && { [ ! -f "$VENV_DIR/bin/activate" ] || [ ! -x "$VENV_DIR/bin/pip" ]; }; then
+        warn "El venv en $VENV_DIR esta incompleto/roto (probablemente una corrida anterior interrumpida) - recreandolo."
+        rm -rf "$VENV_DIR"
+    fi
+    if [ ! -d "$VENV_DIR" ]; then
+        if ! python3 -m venv "$@" "$VENV_DIR"; then
+            err "No se pudo crear el venv en $VENV_DIR - revisa que el modulo 'venv' de Python este instalado"
+            err "(en Debian/Ubuntu/Kali: apt install python3-venv) y que haya espacio en disco."
+            return 1
+        fi
+    fi
+    # shellcheck disable=SC1091
+    source "$VENV_DIR/bin/activate"
+    case "$(command -v pip 2>/dev/null)" in
+        "$VENV_DIR"/*) ;;  # pip is the venv's own - activation really took
+        *)
+            err "La activacion del venv no funciono: 'pip' resuelve a '$(command -v pip 2>/dev/null || echo ninguno)'"
+            err "en vez de a $VENV_DIR/bin/pip. Instalar seguiria en el Python del sistema - abortando"
+            err "en vez de instalar las dependencias en el lugar equivocado. Proba borrar $VENV_DIR y reintentar."
+            return 1
+            ;;
+    esac
+    timeout 300 pip install --upgrade pip -q \
+        || warn "No se pudo actualizar pip (sin conexion o tardo >5min) - siguiendo con la version que ya hay."
+    return 0
+}
+
 # ------------------------------------------------------- platform detection
 # Termux sets $PREFIX to its own userland root (no root access, no real
 # /usr) - the standard, most reliable way to detect it. $TERMUX_VERSION is
@@ -176,12 +220,7 @@ install_termux() {
         warn "El venv existente no tiene --system-site-packages - recreandolo para que vea numpy/pandas de pkg."
         rm -rf "$VENV_DIR"
     fi
-    if [ ! -d "$VENV_DIR" ]; then
-        python3 -m venv --system-site-packages "$VENV_DIR"
-    fi
-    # shellcheck disable=SC1091
-    source "$VENV_DIR/bin/activate"
-    pip install --upgrade pip -q
+    ensure_venv --system-site-packages || return 1
 
     # pywebview (ventana nativa) necesita un backend GTK/Qt real que Termux
     # no tiene - se omite a proposito (dashboard.py ya hace el import de
@@ -389,12 +428,7 @@ install_debian_like() {
     fi
 
     log "Paso 2/5: venv de Python (Linux) - motor + dashboard"
-    if [ ! -d "$VENV_DIR" ]; then
-        python3 -m venv "$VENV_DIR"
-    fi
-    # shellcheck disable=SC1091
-    source "$VENV_DIR/bin/activate"
-    pip install --upgrade pip -q
+    ensure_venv || exit 1
     if ! run_pip_install 1200 -r requirements.txt; then
         deactivate
         exit 1
@@ -507,12 +541,7 @@ install_unknown() {
     warn "va a seguir con el venv de Python y la configuracion de .env igual."
 
     log "venv de Python (Linux) - motor + dashboard"
-    if [ ! -d "$VENV_DIR" ]; then
-        python3 -m venv "$VENV_DIR"
-    fi
-    # shellcheck disable=SC1091
-    source "$VENV_DIR/bin/activate"
-    pip install --upgrade pip -q
+    ensure_venv || exit 1
     if ! run_pip_install 1800 -r requirements.txt; then
         deactivate
         exit 1
