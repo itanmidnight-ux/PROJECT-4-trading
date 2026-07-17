@@ -10,8 +10,9 @@ y un dashboard nativo para ver resultados.
   de reversion a la media (Bandas de Bollinger + RSI en 1m) filtradas por
   spread y volatilidad. Es una estrategia razonable, no una maquina de
   dinero garantizado. Va a perder trades — el objetivo del diseño es que
-  cada perdida este acotada (`RISK_PER_TRADE_USD` en `.env`, ~1 USD por
-  defecto) y que el sistema se detenga solo si el dia se pone feo
+  cada perdida este acotada (`RISK_PER_TRADE_USD` en `.env`, 3 USD por
+  defecto - ver "Ronda 6" mas abajo para por que no es 1) y que el sistema
+  se detenga solo si el dia se pone feo
   (`MAX_DAILY_LOSS_USD`, `MAX_DAILY_DRAWDOWN_PCT`).
 - **Sobre el "apalancamiento 1:1" de la cuenta: probablemente no aplica al
   oro.** Segun la documentacion propia de FBS, el apalancamiento de metales
@@ -683,6 +684,69 @@ escalera, es un problema de que el stop de estas señales sigue siendo
 demasiado ancho para su propio patron de resultado binario. Siguen
 **apagadas por defecto** - este ladder adaptativo no cambia esa
 recomendacion.
+
+**Ronda 6: se encontro (y corrigio) un bug de herramienta que invalidaba
+las lecturas de riesgo, y se re-verifico `RISK_PER_TRADE_USD` con datos
+reales frescos.** Al pedir una nueva pasada de mejoras se descargaron 7
+dias reales de oro COMEX terminados hoy mismo (`scripts/fetch_market_data.py`)
+y se corrio un barrido de `RISK_PER_TRADE_USD` con la misma metodologia
+train/test 60/40 de siempre. Primer resultado: **0 operaciones en TODOS
+los niveles probados, de $1 a $8** - mucho mas severo que lo esperado.
+Investigando en vez de asumir que "la estrategia no genera señales" (que
+hubiera sido la conclusion facil y equivocada), aparecio la causa real: el
+**default de `--leverage` en `scripts/run_backtest.py` estaba en 1**, no en
+500 (el apalancamiento real de metales en FBS, ver la nota mas arriba). Con
+apalancamiento 1:1 el margen requerido para el lote minimo en oro a ~$4000
+es ~$4070 - imposible sobre un balance de $50 - asi que CUALQUIER señal se
+rechazaba por margen antes de siquiera llegar al chequeo de riesgo,
+indistinguible de "no hay señales" sin mirar el motivo exacto del rechazo.
+Este bug era **solo de la herramienta de backtest** (el motor en vivo/
+DRY_RUN siempre usa el apalancamiento real que reporta el broker via
+`account.leverage`, nunca este default) pero **invalidaba silenciosamente
+cualquier barrido de riesgo corrido con el CLI sin pasar `--leverage 500`
+a mano** - potencialmente incluyendo lecturas pasadas. Se corrigio el
+default a 500 (`scripts/run_backtest.py`).
+
+Con el apalancamiento corregido, el barrido de `RISK_PER_TRADE_USD` (mismo
+split, `STRAT_SL_ATR_MULTIPLE=4.0`, `TP_LEVELS=5`) dio:
+
+| RISK_PER_TRADE_USD | TRAIN trades | TRAIN win% | TRAIN PnL | TRAIN DD | TEST trades | TEST win% | TEST PnL | TEST DD |
+|---|---|---|---|---|---|---|---|---|
+| 1.0 | 0 | - | $0.00 | 0% | 0 | - | $0.00 | 0% |
+| 2.0 | 1 | 0% | -$2.88 | 5.8% | 0 | - | $0.00 | 0% |
+| 3.0 | 10 | 80.0% | -$1.13 | 13.0% | 10 | 80.0% | -$1.19 | 7.4% |
+| 5.0 | 80 | 87.5% | -$9.13 | **54.9%** | 56 | 92.9% | +$11.30 | 15.5% |
+
+**Confirma exactamente lo que la Ronda 2 ya habia encontrado, ahora con
+datos de hoy:** con el default publicado hasta ahora (`RISK_PER_TRADE_USD=1.0`),
+el bot **no puede operar en absoluto** a los precios actuales del oro - no
+es conservador, esta inerte. `2.0` sigue siendo insuficiente (1 sola
+operacion en todo el tramo de train, 0 en test - muestra demasiado chica
+para significar nada). `5.0` genera volumen real (80+56 operaciones) pero
+es **inestable entre mitades**: +$11.30 en test contra un drawdown de
+**54.9% en train** - una sola mala racha se comio mas de la mitad de la
+cuenta en la mitad de entrenamiento, exactamente el patron de riesgo que
+este proyecto evita en cada ronda anterior. `3.0` es el unico nivel
+**consistente entre train y test** (10 operaciones en cada mitad, ~80% de
+aciertos en ambas, resultado levemente negativo y de magnitud similar en
+las dos: -$1.13 y -$1.19, drawdown razonable de 7-13%) - y coincide, en
+orden de magnitud, con lo que la Ronda 3 ya habia reportado a este mismo
+nivel de riesgo (-$0.42 / -$4.74).
+
+**La decision, honesta:** se sube el default de `RISK_PER_TRADE_USD` de
+1.0 a **3.0** en `.env.example` y `core/config.py`. Esto **no es una
+afirmacion de que la estrategia ahora es rentable** - sigue siendo
+levemente negativa en ambos tramos, igual que en la Ronda 3. Es el piso
+minimo para que el bot pueda generar operaciones reales y consistentes en
+absoluto con el precio actual del oro y el lote minimo del broker, en vez
+de quedarse inerte silenciosamente mientras el operador cree que esta
+"probando en modo seguro". `5.0` se probo y se descarta como default por
+inestable (el drawdown del 54.9% en una mitad es motivo suficiente,
+independientemente de que la otra mitad haya dado ganancia). Sigue
+pendiente el mismo trabajo real de las rondas anteriores: mas historial
+(semanas/meses del feed real de FBS, no dias de un proxy COMEX) antes de
+confiar en que $3.0 - o cualquier otro numero - sea el nivel correcto para
+una cuenta real.
 
 ## Credenciales
 
