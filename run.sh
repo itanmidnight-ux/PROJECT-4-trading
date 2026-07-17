@@ -241,10 +241,25 @@ cmd_doctor() {
     if [ -d ".venv" ]; then
         ok ".venv existe"
         if [ "$platform" = "termux" ]; then
-            if .venv/bin/python3 -c "import pandas, numpy, flask, requests, dotenv" 2>/dev/null; then
-                ok "dependencias (sin pywebview - no aplica en Termux) importan correctamente"
+            # Split on purpose: dashboard.py never imports pandas/numpy (only
+            # core/strategy.py, core/backtest.py etc. do, reachable only
+            # through the engine) - numpy/pandas are known to sometimes fail
+            # to compile from source on Termux/ARM (a real toolchain
+            # limitation, see install.sh's install_termux), so a missing
+            # pandas there is a warning about the engine/backtest, not a
+            # "the whole install is broken" failure the way a missing Flask
+            # would be.
+            if .venv/bin/python3 -c "import flask, requests, dotenv" 2>/dev/null; then
+                ok "dependencias del dashboard (Flask/requests/python-dotenv) importan correctamente"
             else
-                bad "faltan dependencias en .venv - corre ./install.sh"
+                bad "faltan dependencias basicas del dashboard en .venv - corre ./install.sh"
+            fi
+            if .venv/bin/python3 -c "import pandas, numpy" 2>/dev/null; then
+                ok "pandas/numpy importan correctamente (motor y backtests disponibles aca)"
+            else
+                warn_msg "pandas/numpy no estan instalados - el motor y los backtests NO van a funcionar en esta"
+                warn_msg "maquina (el dashboard si). Normal en algunos telefonos/toolchains de Termux - ver los"
+                warn_msg "avisos de ./install.sh, o usa esta maquina solo como cliente remoto del dashboard."
             fi
         elif .venv/bin/python3 -c "import pandas, numpy, flask, requests, dotenv, webview" 2>/dev/null; then
             ok "dependencias de requirements.txt importan correctamente"
