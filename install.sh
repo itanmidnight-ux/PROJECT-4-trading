@@ -174,35 +174,25 @@ install_termux() {
     cpu_count="$(nproc 2>/dev/null || echo 2)"
     export MAKEFLAGS="-j${cpu_count}"
 
-    # If pandas has to compile from source (no pkg binary above), its own
-    # pyproject.toml build-system requirements (meson-python, Cython,
-    # ninja, AND numpy - it needs numpy at build time, not just at
-    # runtime) get installed into a fresh, throwaway venv that pip creates
-    # just for that one build step - fully isolated from
-    # --system-site-packages by design, so it ignores the numpy pkg
-    # already gave us above and fetches/compiles its OWN numpy from
-    # scratch, for real, just to satisfy that build-time requirement.
-    # numpy is one of the heaviest things here - that's real, avoidable
-    # time, not the pandas compile itself. Pre-installing the (much
-    # lighter) build tools and passing --no-build-isolation lets pandas'
-    # build see the numpy that's already there instead of re-fetching one.
-    local no_isolation_flag=""
-    if [ "$got_numpy_via_pkg" -eq 1 ] && [ "$got_pandas_via_pkg" -eq 0 ]; then
-        log "Preparando un build sin aislamiento para pandas (evita recompilar numpy de nuevo solo para eso)..."
-        pkg install -y ninja 2>/dev/null || true
-        if pip install -q Cython meson meson-python wheel setuptools 2>/dev/null; then
-            no_isolation_flag="--no-build-isolation"
-        else
-            warn "No se pudieron instalar las herramientas de build livianas - sigo por el camino normal (mas lento pero mas seguro)."
-        fi
-    fi
-
+    # Tried --no-build-isolation here (skip pip's throwaway isolated build
+    # venv for pandas, which otherwise re-fetches/rebuilds its OWN numpy
+    # from scratch even though pkg already gave us one, purely to satisfy
+    # pandas' build-time requirement) to avoid that redundant numpy build.
+    # REVERTED: confirmed on a real Termux device this broke the build
+    # instead of just speeding it up - pandas' meson build needs more of
+    # its declared build-system requirements than the handful this script
+    # pre-installed (its own version-generation step failed:
+    # "generate_version.py --print" exited 1, likely missing versioneer/
+    # setuptools_scm or another build-time dep not guessed here), and
+    # --no-build-isolation means pip stops auto-resolving those for us.
+    # Correctly hand-rolling pandas' FULL build-time dependency set isn't
+    # worth the risk of trading "slow" for "silently broken" - the
+    # isolated path below is slower but has been confirmed end-to-end.
     log "Instalando el resto de las dependencias con pip (con progreso visible)..."
     log "Si pandas termina compilando desde el codigo fuente (normal en Termux, no hay wheels"
     log "para Android en PyPI) puede tardar bastante - no se colgo, va mostrando progreso real."
     log "Compilando con $cpu_count nucleo(s) en paralelo para acelerarlo."
-    # shellcheck disable=SC2086  # no_isolation_flag is deliberately either empty or one flag word - nothing to quote-split wrong
-    if ! grep -vE "$skip_pattern" requirements.txt | run_pip_install 5400 $no_isolation_flag -r /dev/stdin; then
+    if ! grep -vE "$skip_pattern" requirements.txt | run_pip_install 5400 -r /dev/stdin; then
         deactivate
         err "'pkg search python-pandas' te dice si tu repo de Termux lo tiene como paquete binario"
         err "(evita la compilacion por completo, ver arriba)."
