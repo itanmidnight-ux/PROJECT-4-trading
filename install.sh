@@ -23,9 +23,37 @@
 #     not 127.0.0.1). Backtesting and the dashboard work fully locally on
 #     the phone either way.
 #
-# Safe to re-run: every step checks whether it's already done first.
+# Safe to re-run: every step checks whether it's already done first. On
+# Termux specifically, a PREVIOUS failed pandas/numpy build is remembered
+# (see PANDAS_FAILED_MARKER below) so a re-run doesn't blindly repeat a
+# doomed 90-minute compile attempt - pass --skip-pandas to skip it up
+# front instead of waiting for it to fail again, or --retry-pandas to
+# force one more attempt (e.g. after Termux ships a binary package, or
+# after `pkg upgrade`).
+#
+# Usage: ./install.sh [--skip-pandas | --retry-pandas]
 # =====================================================================
 set -euo pipefail
+
+SKIP_PANDAS=0
+RETRY_PANDAS=0
+for arg in "$@"; do
+    case "$arg" in
+        --skip-pandas) SKIP_PANDAS=1 ;;
+        --retry-pandas) RETRY_PANDAS=1 ;;
+        -h|--help)
+            echo "Uso: ./install.sh [--skip-pandas | --retry-pandas]"
+            echo "  --skip-pandas    No intentar instalar numpy/pandas (Termux) - el dashboard"
+            echo "                   funciona igual, el motor y los backtests no."
+            echo "  --retry-pandas   Reintentar numpy/pandas aunque haya fallado antes (Termux)."
+            exit 0
+            ;;
+        *)
+            echo "[install][error] Argumento desconocido: $arg (ver --help)" >&2
+            exit 1
+            ;;
+    esac
+done
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_ROOT"
@@ -34,6 +62,7 @@ VENV_DIR="$PROJECT_ROOT/.venv"
 WINEPREFIX_DIR="$PROJECT_ROOT/.wine"
 MT5_INSTALLER_URL="https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe"
 WIN_PYTHON_URL="https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe"
+PANDAS_FAILED_MARKER="$VENV_DIR/.pandas_build_failed"
 
 log()  { printf '\033[1;36m[install]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[install][warn]\033[0m %s\n' "$*"; }
@@ -201,15 +230,32 @@ install_termux() {
     # a genuine numpy/ARM-toolchain compatibility issue this script has no
     # way to fix blindly without being able to test on that exact device.
     local pandas_ok=1
-    log "Instalando numpy/pandas (esto es lo que puede tardar o fallar en Termux - ver mas abajo)..."
-    if ! grep -vE "$skip_pattern" requirements.txt | grep -E '^(pandas|numpy)' | run_pip_install 5400 -r /dev/stdin; then
+    if [ "$SKIP_PANDAS" -eq 1 ]; then
         pandas_ok=0
-        warn "numpy/pandas no se pudieron instalar en esta maquina - normal en algunos"
-        warn "telefonos/toolchains de Termux, no es un bug de este script. Sin ellos, el"
-        warn "MOTOR y los BACKTESTS no van a funcionar aca, pero el DASHBOARD si (no los usa)."
-        warn "'pkg search python-pandas' te dice si tu repo de Termux ya lo agrego como binario"
-        warn "(evita la compilacion por completo) - si no, corre el motor real en una maquina"
-        warn "Kali/Ubuntu y usa esta como cliente remoto del dashboard nada mas."
+        log "Saltando numpy/pandas (--skip-pandas). El dashboard funciona igual; el motor y los"
+        log "backtests no van a estar disponibles en esta maquina."
+    elif [ -f "$PANDAS_FAILED_MARKER" ] && [ "$RETRY_PANDAS" -ne 1 ] && [ "$got_pandas_via_pkg" -ne 1 ]; then
+        pandas_ok=0
+        warn "numpy/pandas ya habian fallado en una corrida anterior de ./install.sh en esta"
+        warn "maquina - no reintentando el compilado (podia tardar hasta 90 minutos para el"
+        warn "mismo resultado). Corre './install.sh --retry-pandas' si queres intentarlo de"
+        warn "nuevo (ej. despues de 'pkg upgrade', o si Termux agrego el paquete binario)."
+    else
+        log "Instalando numpy/pandas (esto es lo que puede tardar o fallar en Termux - ver mas abajo)..."
+        if grep -vE "$skip_pattern" requirements.txt | grep -E '^(pandas|numpy)' | run_pip_install 5400 -r /dev/stdin; then
+            rm -f "$PANDAS_FAILED_MARKER"
+        else
+            pandas_ok=0
+            mkdir -p "$VENV_DIR" && touch "$PANDAS_FAILED_MARKER"
+            warn "numpy/pandas no se pudieron instalar en esta maquina - normal en algunos"
+            warn "telefonos/toolchains de Termux, no es un bug de este script. Sin ellos, el"
+            warn "MOTOR y los BACKTESTS no van a funcionar aca, pero el DASHBOARD si (no los usa)."
+            warn "'pkg search python-pandas' te dice si tu repo de Termux ya lo agrego como binario"
+            warn "(evita la compilacion por completo) - si no, corre el motor real en una maquina"
+            warn "Kali/Ubuntu y usa esta como cliente remoto del dashboard nada mas."
+            warn "La proxima corrida de ./install.sh va a saltear este intento solo - usa"
+            warn "--retry-pandas para forzarlo de nuevo."
+        fi
     fi
     deactivate
     if [ "$pandas_ok" -eq 1 ]; then
