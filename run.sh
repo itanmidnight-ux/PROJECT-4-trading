@@ -332,8 +332,20 @@ cmd_doctor() {
                 ;;
             *)
                 ok "MT5_BRIDGE_URL configurado como remoto: $bridge_url"
-                if curl -fsS "${bridge_url}/health" >/dev/null 2>&1; then
-                    ok "el bridge remoto responde"
+                case "$bridge_url" in
+                    http://*)
+                        warn_msg "el bridge remoto es http:// (sin cifrar): las credenciales MT5 viajan en texto plano por esa red. En una red local propia puede ser aceptable; si no, usa un tunel SSH o una VPN tipo Tailscale (ver README)."
+                        ;;
+                esac
+                local bridge_latency
+                if bridge_latency=$(curl -fsS -o /dev/null -w '%{time_total}' --max-time 10 "${bridge_url}/health" 2>/dev/null); then
+                    # Latency matters here: the engine makes several bridge
+                    # calls per poll cycle, each paying this round-trip.
+                    if awk "BEGIN{exit !($bridge_latency > 1.0)}"; then
+                        warn_msg "el bridge remoto responde pero LENTO (${bridge_latency}s por request) - el motor hace varias llamadas por ciclo; revisa la red/Wi-Fi entre esta maquina y el bridge."
+                    else
+                        ok "el bridge remoto responde (latencia ${bridge_latency}s)"
+                    fi
                 else
                     warn_msg "el bridge remoto no responde ahora mismo (normal si esa maquina no lo tiene corriendo)"
                 fi
@@ -470,6 +482,14 @@ cmd_stop_all() {
 
     rm -f "$STOP_FLAG"
 
+    # Mirror of the wake lock taken in cmd_start: nothing is running
+    # anymore, so stop keeping the phone awake (battery). Safe to call
+    # even if no lock was ever taken.
+    if command -v termux-wake-unlock >/dev/null 2>&1; then
+        termux-wake-unlock 2>/dev/null || true
+        log "Wake lock de Termux liberado."
+    fi
+
     if [ "$anything" -eq 0 ]; then
         log "No habia nada corriendo."
     else
@@ -597,6 +617,17 @@ cmd_start() {
 
     mkdir -p "$LOG_DIR" "$RUN_DIR"
     rm -f "$STOP_FLAG"
+
+    # Android agresivamente suspende/mata procesos de fondo cuando la
+    # pantalla se apaga (Doze, "phantom process killer") - sin un wake
+    # lock, el dashboard/motor corriendo en Termux puede morir en cuanto
+    # el telefono queda inactivo. termux-wake-lock (viene con Termux, no
+    # necesita termux-api) lo evita; se libera en ./run.sh --stop.
+    if [ "$(detect_platform)" = "termux" ] && command -v termux-wake-lock >/dev/null 2>&1; then
+        termux-wake-lock 2>/dev/null || true
+        log "Wake lock de Termux adquirido (evita que Android suspenda el servidor con la pantalla apagada)."
+        log "Consejo: exclui Termux de la optimizacion de bateria de Android para maxima estabilidad (ver README)."
+    fi
 
     log "Arrancando el servidor (bridge + dashboard) en segundo plano..."
     RUN_SH_FOREGROUND=1 nohup "$0" --start >>"$LOG_DIR/run.log" 2>&1 &

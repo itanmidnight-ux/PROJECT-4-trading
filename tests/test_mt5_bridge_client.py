@@ -3,6 +3,7 @@ response instead of a real Wine/MT5 bridge process."""
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 
 from core.mt5_bridge_client import BridgeError, Mt5BridgeClient
 
@@ -78,3 +79,64 @@ def test_no_auth_header_sent_when_token_not_configured():
         client.symbol_spec("XAUUSD")
     _, kwargs = mock_get.call_args
     assert "X-Bridge-Token" not in kwargs["headers"]
+
+
+def test_open_order_does_not_retry_on_network_timeout():
+    """THE duplicate-order guard: a timeout on /order/open is ambiguous -
+    the order may have reached MT5 and filled even though the response
+    was lost. Before this fix, _call() blindly re-sent it (up to
+    max_retries times), so one flaky-Wi-Fi timeout could place two or
+    three REAL positions. The client must send it exactly ONCE and raise,
+    handing the ambiguity to core/engine.py's reconcile logic (which
+    exists precisely for this case but was unreachable while the client
+    retried internally)."""
+    client = Mt5BridgeClient("http://127.0.0.1:5001", max_retries=3)
+    with patch("requests.Session.post", side_effect=requests.Timeout("read timed out")) as mock_post, \
+            pytest.raises(BridgeError, match="NO se reintenta"):
+        client.open_order("XAUUSD", "BUY", 0.01, sl_price=4000.0)
+    assert mock_post.call_count == 1  # exactly one attempt, never re-sent
+
+
+def test_close_and_modify_do_not_retry_on_network_timeout_either():
+    client = Mt5BridgeClient("http://127.0.0.1:5001", max_retries=3)
+    for call in (lambda: client.close_order("123", 0.01),
+                 lambda: client.modify_sl("123", 4000.0)):
+        with patch("requests.Session.post", side_effect=requests.Timeout("read timed out")) as mock_post, \
+                pytest.raises(BridgeError):
+            call()
+        assert mock_post.call_count == 1
+
+
+def test_read_calls_still_retry_on_network_errors(monkeypatch):
+    """The asymmetry's other half: reads (price/candles/account) are
+    idempotent, so the existing retry-with-backoff behavior must survive
+    the mutating-call fix untouched - a transient Wi-Fi blip on a phone
+    polling a remote bridge should NOT bubble up as an engine error if
+    the next attempt succeeds."""
+    monkeypatch.setattr("core.mt5_bridge_client.time.sleep", lambda _s: None)  # no real backoff waits in tests
+    ok_payload = {"ok": True, "bid": 4000.0, "ask": 4000.3, "spread_price": 0.3, "time": 1}
+    client = Mt5BridgeClient("http://127.0.0.1:5001", max_retries=3)
+    with patch("requests.Session.get",
+               side_effect=[requests.ConnectionError("refused"), _fake_response(ok_payload)]) as mock_get:
+        tick = client.price("XAUUSD")
+    assert mock_get.call_count == 2  # failed once, retried, succeeded
+    assert tick.bid == 4000.0
+
+
+def test_mutating_call_still_relogs_in_after_clean_not_logged_in_refusal():
+    """A clean JSON 'not logged in' from the bridge is NOT ambiguous (the
+    bridge refused the request - nothing reached MT5), so the transparent
+    relogin-and-retry path must keep working for mutating calls: dropping
+    it would turn every MT5 session hiccup into a failed close/modify."""
+    client = Mt5BridgeClient("http://127.0.0.1:5001", max_retries=3)
+    responses = [
+        _fake_response({"ok": True}),                                   # initial login()
+        _fake_response({"ok": False, "error": "not logged in"}),        # close attempt 1: refused cleanly
+        _fake_response({"ok": True}),                                   # automatic re-login
+        _fake_response({"ok": True, "closed": True}),                   # close attempt 2: succeeds
+    ]
+    with patch("requests.Session.post", side_effect=responses) as mock_post:
+        client.login("123", "pw", "FBS-Demo")
+        result = client.close_order("456", 0.01)
+    assert result["closed"] is True
+    assert mock_post.call_count == 4
