@@ -530,7 +530,13 @@ if __name__ == "__main__":
     parser.add_argument("--token", default="", help="Shared secret required on every request "
                          "(except /health) via the X-Bridge-Token header. Passed by run.sh from "
                          "BRIDGE_AUTH_TOKEN in .env; leave unset only for local manual debugging.")
+    parser.add_argument("--terminal-path", default="", help="Windows-style path to terminal64.exe "
+                         "inside THIS wine prefix (e.g. 'C:\\Program Files\\MetaTrader 5\\terminal64.exe'). "
+                         "Passed by run.sh from its MT5-install autodetection, so a system MT5 "
+                         "(e.g. the `metatrader` launcher) works, not just the project's own prefix.")
     args = parser.parse_args()
+    if args.terminal_path:
+        TERMINAL_PATH = args.terminal_path
     _setup_logging()
     if args.token:
         _expected_token = args.token
