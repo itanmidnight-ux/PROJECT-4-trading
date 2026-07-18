@@ -142,7 +142,14 @@ instalan/ejecutan - no hace falta pasarles ningun flag de plataforma.
   en cada corrida - `./install.sh --skip-pandas` lo salta directamente,
   `./install.sh --retry-pandas` fuerza un nuevo intento.
 
-  Dos detalles practicos mas del camino Termux:
+  Detalles practicos del camino Termux:
+  - **Del lado del bridge (la Kali/Ubuntu), hay que abrir el binding**: el
+    bridge escucha solo en `127.0.0.1` por defecto, asi que un telefono
+    NO puede conectarse aunque `MT5_BRIDGE_URL` este bien configurado.
+    En el `.env` de la maquina del bridge pone `BRIDGE_BIND_HOST=0.0.0.0`
+    y reinicia con `./run.sh --stop && ./run.sh --start`. El token
+    (`BRIDGE_AUTH_TOKEN`) se sigue exigiendo en cada pedido; copia ese
+    mismo token al `.env` del telefono.
   - **Pantalla apagada / bateria**: Android suspende o mata procesos de
     fondo agresivamente (Doze, "phantom process killer"). `./run.sh
     --start` en Termux adquiere solo un **wake lock** (`termux-wake-lock`,
