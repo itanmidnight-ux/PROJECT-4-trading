@@ -742,14 +742,32 @@ cmd_start_foreground() {
                 err "BRIDGE_AUTH_TOKEN no esta en .env - corre ./install.sh para generarlo (el bridge arrancara sin autenticacion mientras tanto)."
             fi
 
+            # Where the bridge LISTENS. 127.0.0.1 (default) = this machine
+            # only - a Termux phone using this machine as its remote bridge
+            # can NOT connect unless this is widened to 0.0.0.0 (all
+            # interfaces) in .env. The bridge server itself enforces the
+            # auth token on every request either way (defense in depth for
+            # exactly this widening - see bridge/mt5_bridge_server.py).
+            BRIDGE_BIND_HOST="$(grep -E '^BRIDGE_BIND_HOST=' "$PROJECT_ROOT/.env" 2>/dev/null | head -1 | cut -d= -f2-)"
+            BRIDGE_BIND_HOST="${BRIDGE_BIND_HOST:-127.0.0.1}"
+            if [ "$BRIDGE_BIND_HOST" != "127.0.0.1" ] && [ -z "$BRIDGE_AUTH_TOKEN" ]; then
+                err "BRIDGE_BIND_HOST=$BRIDGE_BIND_HOST expone el bridge a la red SIN token de autenticacion."
+                err "Cualquiera en esa red podria operar la cuenta. Corre ./install.sh para generar BRIDGE_AUTH_TOKEN antes de abrir el binding."
+            fi
+
             supervise "bridge MT5" "$RUN_DIR/bridge.pid" "$LOG_DIR/bridge.log" \
-                wine "$WIN_PYTHON" "$PROJECT_ROOT/bridge/mt5_bridge_server.py" --port 5001 --token "$BRIDGE_AUTH_TOKEN" &
+                wine "$WIN_PYTHON" "$PROJECT_ROOT/bridge/mt5_bridge_server.py" --port 5001 --host "$BRIDGE_BIND_HOST" --token "$BRIDGE_AUTH_TOKEN" &
             disown
 
-            log "Esperando a que el bridge responda en http://127.0.0.1:5001/health ..."
+            # Health-check target: with 0.0.0.0 (all interfaces) or the
+            # 127.0.0.1 default, loopback works; with a specific LAN IP
+            # bind, loopback does NOT - poll the actual bound IP.
+            BRIDGE_HEALTH_HOST="$BRIDGE_BIND_HOST"
+            [ "$BRIDGE_HEALTH_HOST" = "0.0.0.0" ] && BRIDGE_HEALTH_HOST="127.0.0.1"
+            log "Esperando a que el bridge responda en http://${BRIDGE_HEALTH_HOST}:5001/health ..."
             ready=0
             for _ in $(seq 1 60); do
-                if curl -fsS "http://127.0.0.1:5001/health" >/dev/null 2>&1; then
+                if curl -fsS "http://${BRIDGE_HEALTH_HOST}:5001/health" >/dev/null 2>&1; then
                     ready=1
                     break
                 fi
