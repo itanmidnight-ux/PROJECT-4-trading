@@ -886,6 +886,44 @@ mas que el resultado, ese es un trade-off que debe elegirse sabiendo
 estos numeros - no algo que este README vaya a presentar como "ganancias
 pequeñas por vela".
 
+**Ronda 8: time-stop probado (no ayudo - queda apagado), y una divergencia
+real backtest/vivo corregida.** Dos trabajos con la misma vara de siempre:
+
+*Time-stop.* La hipotesis, salida directamente del perfil de perdidas
+documentado en las Rondas 2-6 (pocas perdidas grandes de trades que nunca
+revierten y viajan hasta el stop de 4xATR): si la reversion no ocurrio en
+N velas, cerrar a mercado en vez de esperar el stop lejano. Se implemento
+en `core/backtest.py` (`max_hold_bars`, solo pre-TP1 - despues de TP1 el
+trailing ya gestiona la salida) y se barrio N en {15, 30, 60, 90} sobre
+los mismos 7 dias reales, split 60/40:
+
+| max_hold_bars | TRAIN PnL | TEST PnL |
+|---|---|---|
+| 0 (apagado) | -$1.13 | -$1.19 |
+| 15 | -$1.13 | **-$4.62** |
+| 30 / 60 / 90 | -$1.13 | -$1.19 |
+
+Resultado honesto: **no ayuda en estos datos**. Con N=15 empeora el tramo
+de prueba (corta trades que SI iban a revertir); con N>=30 no cambia nada
+(los trades reales ya resuelven TP1-o-stop antes de 30 velas). Por eso NO
+se cablea al motor ni se activa por defecto - queda como parametro de
+experimentacion del backtest (`--max-hold-bars` en `scripts/run_backtest.py`,
+default 0 = apagado, con test que fija su comportamiento).
+
+*Divergencia backtest/vivo (esta si se corrigio).* El backtest evalua
+señales una vez por vela CERRADA; el motor en vivo las evaluaba cada
+ciclo de poll (2s) sobre la vela EN FORMACION, cuyo cierre todavia se
+esta moviendo. Es decir: todos los numeros validados de este README se
+midieron con una regla de entrada que el motor en vivo no seguia - un
+pico a mitad de vela podia disparar una entrada "extrema" que ningun
+backtest vio jamas, justo cuando los spreads se ensanchan. Ahora
+`core/engine.py` evalua entradas SOLO sobre las velas cerradas (la vela
+en formacion se excluye de la ventana), exactamente la vista que el
+backtest valido. La GESTION de posiciones abiertas (SL/TP/trailing/kill
+switch) sigue siendo tick a tick a proposito - proteger una posicion no
+puede esperar al cierre de vela. Test de regresion incluido: una señal
+que solo existe en la vela en formacion no abre nada.
+
 ## Credenciales
 
 Nunca van al repositorio. `install.sh` las guarda en `.env` (con permisos

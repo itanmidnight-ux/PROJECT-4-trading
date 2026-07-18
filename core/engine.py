@@ -223,7 +223,17 @@ class TradingEngine:
             return
 
         lot_hint = self._spec.volume_min
-        signal = self._strategy.generate_signal(candles, tick.spread_price, lot_hint)
+        # Entries are evaluated on the CLOSED bars only - the forming last
+        # bar is excluded. This is exactly the view core/backtest.py
+        # validated (its window always ends at a completed bar): every
+        # number in the README was measured deciding on closed bars, so
+        # deciding live on a half-formed bar whose close is still moving
+        # was an unmeasured divergence - e.g. a mid-bar spike could
+        # trigger an "extreme" entry that no backtest ever saw, at the
+        # exact moment spreads widen. Position MANAGEMENT (SL/TP/trailing,
+        # a few lines up) deliberately stays tick-level - protecting an
+        # open position must not wait for a bar boundary.
+        signal = self._strategy.generate_signal(candles.iloc[:-1], tick.spread_price, lot_hint)
         if signal.side is None:
             return
 
