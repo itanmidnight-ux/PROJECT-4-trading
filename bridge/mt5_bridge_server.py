@@ -49,6 +49,7 @@ _lock = threading.RLock()
 _connected = False
 _last_credentials: dict | None = None  # kept in memory only, to allow auto re-login
 _expected_token: str | None = None  # set from --token; None means auth is disabled
+_symbol_cache: dict[str, str] = {}  # requested name -> broker's actual name (see _resolve_symbol)
 
 logger = logging.getLogger("mt5_bridge")
 
@@ -58,6 +59,83 @@ TIMEFRAME_MAP = {
     "M15": mt5.TIMEFRAME_M15,
     "H1": mt5.TIMEFRAME_H1,
 }
+
+# Where install.sh puts the terminal inside the Wine prefix, as seen from
+# the WINDOWS side (this process runs under Wine's python.exe). Passed to
+# mt5.initialize() as a fallback when the no-args form can't find/launch
+# the terminal on its own - a common Wine-specific failure mode.
+TERMINAL_PATH = r"C:\Program Files\MetaTrader 5\terminal64.exe"
+
+# Human translations for the order_send retcodes that actually happen in
+# practice - a raw "order_send failed: 10019" in the dashboard's event log
+# tells the operator nothing actionable; these do.
+RETCODE_HINTS = {
+    10004: "requote (el precio se movio) - reintentable",
+    10006: "orden rechazada por el broker",
+    10013: "request invalido (parametros malformados)",
+    10014: "volumen invalido para este simbolo (revisa volume_min/step del broker)",
+    10015: "precio invalido",
+    10016: "stops invalidos (SL demasiado cerca del precio para este broker)",
+    10017: "trading deshabilitado para esta cuenta",
+    10018: "mercado cerrado (fin de semana/feriado o fuera de horario del simbolo)",
+    10019: "fondos insuficientes (margen) para este volumen",
+    10026: "autotrading deshabilitado por el SERVIDOR del broker",
+    10027: "autotrading deshabilitado en el TERMINAL - abrilo en MT5 (boton AutoTrading/Algo Trading)",
+    10030: "filling mode no soportado por el simbolo",
+    10031: "sin conexion con el servidor de trading",
+}
+
+
+def _retcode_msg(code) -> str:
+    hint = RETCODE_HINTS.get(code if isinstance(code, int) else None)
+    return f"{code} ({hint})" if hint else str(code)
+
+
+def _initialize_mt5() -> bool:
+    """mt5.initialize() with the no-args form first (finds an already-
+    running terminal), then with the explicit install path (launches it if
+    needed) - under Wine the no-args discovery is the flakier of the two."""
+    if mt5.initialize():
+        return True
+    logger.warning("mt5.initialize() sin ruta fallo (%s), reintentando con %s",
+                    mt5.last_error(), TERMINAL_PATH)
+    return bool(mt5.initialize(path=TERMINAL_PATH))
+
+
+def _resolve_symbol(requested: str):
+    """Maps the configured symbol name to whatever THIS broker/account
+    actually calls it, or None if nothing matches.
+
+    Why: brokers rename symbols per account type - FBS specifically
+    appends suffixes on some account tiers (XAUUSD becomes XAUUSDm on
+    Micro, XAUUSDc on Cent, etc.), so a bot configured with the standard
+    name gets `symbol_select("XAUUSD") failed` on those accounts and dies
+    with no trade ever placed, even though gold IS tradable there under
+    its suffixed name. Resolution order: exact name; prefix matches
+    (XAUUSD*); containing matches (*XAUUSD*). Among candidates, symbols
+    whose trading is disabled are skipped and the SHORTEST name wins (the
+    closest real variant, not some exotic cross that merely contains the
+    string). Cached per requested name for the life of the process."""
+    cached = _symbol_cache.get(requested)
+    if cached is not None:
+        return cached
+    if mt5.symbol_select(requested, True):
+        _symbol_cache[requested] = requested
+        return requested
+    for pattern in (f"{requested}*", f"*{requested}*"):
+        candidates = mt5.symbols_get(pattern) or ()
+        tradable = [s for s in candidates
+                    if getattr(s, "trade_mode", None) != getattr(mt5, "SYMBOL_TRADE_MODE_DISABLED", 0)]
+        if not tradable:
+            continue
+        best = min(tradable, key=lambda s: len(s.name))
+        if mt5.symbol_select(best.name, True):
+            logger.info("Simbolo %s no existe con ese nombre exacto en este broker/cuenta - "
+                         "usando %s (variante del mismo instrumento; tipico de cuentas "
+                         "FBS Micro/Cent con sufijo).", requested, best.name)
+            _symbol_cache[requested] = best.name
+            return best.name
+    return None
 
 
 def _setup_logging() -> None:
@@ -140,7 +218,7 @@ def _try_reconnect() -> bool:
     if _last_credentials is None:
         return False
     logger.warning("Connection appears down, attempting silent reconnect...")
-    if not mt5.initialize():
+    if not _initialize_mt5():
         logger.error("reconnect: mt5.initialize() failed: %s", mt5.last_error())
         return False
     ok = mt5.login(**_last_credentials)
@@ -166,11 +244,15 @@ def login():
     password = data["password"]
     server = data["server"]
 
-    if not mt5.initialize():
-        return _err(f"mt5.initialize() failed: {mt5.last_error()}", 500)
+    if not _initialize_mt5():
+        return _err(f"mt5.initialize() failed: {mt5.last_error()} - el terminal MT5 no arranco. "
+                     f"Revisa que exista {TERMINAL_PATH} (corre ./install.sh si no).", 500)
     ok = mt5.login(login_id, password=password, server=server)
     if not ok:
-        return _err(f"mt5.login() failed: {mt5.last_error()}", 401)
+        return _err(f"mt5.login() failed: {mt5.last_error()}. Causas tipicas: password incorrecto "
+                     "(el de la cuenta DEMO de FBS expira a los pocos dias - regeneralo en el area "
+                     "de cliente), o el nombre de servidor no es exactamente el de tu cuenta "
+                     "(ej. FBS-Demo vs FBS-Real; copialo tal cual del mail/area de FBS).", 401)
     _connected = True
     _last_credentials = {"login": login_id, "password": password, "server": server}
     logger.info("Logged in to %s on %s", login_id, server)
@@ -201,8 +283,11 @@ def account():
 @app.route("/symbol/<symbol>")
 @synchronized
 def symbol_info(symbol: str):
-    if not mt5.symbol_select(symbol, True):
-        return _err(f"symbol_select({symbol}) failed: {mt5.last_error()}", 404)
+    resolved = _resolve_symbol(symbol)
+    if resolved is None:
+        return _err(f"el simbolo {symbol} no existe en este broker/cuenta (se probaron tambien "
+                     f"variantes {symbol}* y *{symbol}*): {mt5.last_error()}", 404)
+    symbol = resolved
     info = mt5.symbol_info(symbol)
     if info is None:
         return _err(f"symbol_info({symbol}) not available", 404)
@@ -224,6 +309,7 @@ def symbol_info(symbol: str):
 
     return jsonify({
         "ok": True,
+        "symbol": symbol,  # the broker's ACTUAL name (may differ from the requested one - FBS suffixes)
         "contract_size": info.trade_contract_size,
         "volume_min": info.volume_min,
         "volume_max": info.volume_max,
@@ -240,9 +326,12 @@ def symbol_info(symbol: str):
 @app.route("/price/<symbol>")
 @synchronized
 def price(symbol: str):
-    tick = mt5.symbol_info_tick(symbol)
+    resolved = _resolve_symbol(symbol)
+    if resolved is None:
+        return _err(f"el simbolo {symbol} no existe en este broker/cuenta: {mt5.last_error()}", 404)
+    tick = mt5.symbol_info_tick(resolved)
     if tick is None:
-        return _err(f"symbol_info_tick({symbol}) failed: {mt5.last_error()}", 404)
+        return _err(f"symbol_info_tick({resolved}) failed: {mt5.last_error()}", 404)
     return jsonify({
         "ok": True,
         "bid": tick.bid,
@@ -260,6 +349,10 @@ def candles(symbol: str):
     mt5_tf = TIMEFRAME_MAP.get(tf)
     if mt5_tf is None:
         return _err(f"unsupported timeframe {tf}")
+    resolved = _resolve_symbol(symbol)
+    if resolved is None:
+        return _err(f"el simbolo {symbol} no existe en este broker/cuenta: {mt5.last_error()}", 404)
+    symbol = resolved
     rates = mt5.copy_rates_from_pos(symbol, mt5_tf, 0, count)
     if rates is None:
         return _err(f"copy_rates_from_pos failed: {mt5.last_error()}", 500)
@@ -281,6 +374,11 @@ def candles(symbol: str):
 @synchronized
 def positions():
     symbol = request.args.get("symbol")
+    if symbol:
+        # Filter by the broker's REAL name - with an FBS suffix account,
+        # positions live under e.g. XAUUSDm, so filtering by the requested
+        # XAUUSD would silently return [] and break restart-recovery.
+        symbol = _resolve_symbol(symbol) or symbol
     pos = mt5.positions_get(symbol=symbol) if symbol else mt5.positions_get()
     if pos is None:
         pos = []
@@ -312,6 +410,10 @@ def order_open():
     lot = float(data["lot"])
     sl_price = data.get("sl_price")
 
+    resolved = _resolve_symbol(symbol)
+    if resolved is None:
+        return _err(f"el simbolo {symbol} no existe en este broker/cuenta: {mt5.last_error()}", 404)
+    symbol = resolved
     tick = mt5.symbol_info_tick(symbol)
     if tick is None:
         return _err(f"no tick for {symbol}", 404)
@@ -337,7 +439,7 @@ def order_open():
     result = mt5.order_send(request_dict)
     if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
         code = result.retcode if result else mt5.last_error()
-        return _err(f"order_send failed: {code}", 500)
+        return _err(f"order_send failed: {_retcode_msg(code)}", 500)
 
     logger.info("OPEN %s %.4f %s @ %.3f", side, lot, symbol, result.price)
     return jsonify({
@@ -384,7 +486,7 @@ def order_close():
     result = mt5.order_send(request_dict)
     if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
         code = result.retcode if result else mt5.last_error()
-        return _err(f"order_send (close) failed: {code}", 500)
+        return _err(f"order_send (close) failed: {_retcode_msg(code)}", 500)
 
     logger.info("CLOSE %.4f of ticket %s @ %.3f", result.volume, ticket, result.price)
     return jsonify({
@@ -417,7 +519,7 @@ def order_modify():
     result = mt5.order_send(request_dict)
     if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
         code = result.retcode if result else mt5.last_error()
-        return _err(f"order_send (modify) failed: {code}", 500)
+        return _err(f"order_send (modify) failed: {_retcode_msg(code)}", 500)
     return jsonify({"ok": True})
 
 
