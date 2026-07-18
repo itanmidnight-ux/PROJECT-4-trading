@@ -75,6 +75,63 @@ detect_platform() {
     echo "unknown"
 }
 
+# ------------------------------------------------- MT5 install detection
+# Finds a usable MetaTrader 5 installation and echoes two TAB-separated
+# unix paths: "<wine_prefix>\t<terminal64.exe>". Priority order:
+#   1. Explicit overrides in .env (MT5_WINEPREFIX / MT5_TERMINAL_PATH) -
+#      always win when set and valid.
+#   2. The project's own prefix ($PROJECT_ROOT/.wine, what install.sh sets
+#      up from scratch).
+#   3. A SYSTEM MT5 install the user already has - e.g. one launched with
+#      a `metatrader` command (MetaQuotes' own Linux installer and several
+#      distro packages create such a launcher). The launcher script is
+#      grepped for its WINEPREFIX; common home prefixes are checked too.
+# Reusing an existing install matters beyond convenience: the MetaTrader5
+# pip package talks to the terminal over IPC WITHIN one Wine prefix, so
+# the bridge MUST run in the same prefix as the terminal that has the
+# account logged in - pointing the bot at its own empty prefix while the
+# user's real MT5 lives elsewhere would never connect to that session.
+detect_mt5_install() {
+    local p t
+    p="$(grep -E '^MT5_WINEPREFIX=' "$PROJECT_ROOT/.env" 2>/dev/null | head -1 | cut -d= -f2-)"
+    t="$(grep -E '^MT5_TERMINAL_PATH=' "$PROJECT_ROOT/.env" 2>/dev/null | head -1 | cut -d= -f2-)"
+    p="${p/#\~/$HOME}"; t="${t/#\~/$HOME}"
+    if [ -n "$p" ] && [ -n "$t" ] && [ -f "$t" ]; then
+        printf '%s\t%s\n' "$p" "$t"; return 0
+    fi
+    if [ -n "$p" ] && [ -f "$p/drive_c/Program Files/MetaTrader 5/terminal64.exe" ]; then
+        printf '%s\t%s\n' "$p" "$p/drive_c/Program Files/MetaTrader 5/terminal64.exe"; return 0
+    fi
+
+    local candidates=("$WINEPREFIX_DIR")
+    if command -v metatrader >/dev/null 2>&1; then
+        local launcher lp
+        launcher="$(command -v metatrader)"
+        # Launcher scripts habitually contain `WINEPREFIX=/path wine ...` or
+        # `export WINEPREFIX=...` - pull the path out if it's a text script.
+        lp="$(grep -oE 'WINEPREFIX="?[^" ]+' "$launcher" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"')"
+        [ -n "$lp" ] && candidates+=("${lp/#\~/$HOME}")
+    fi
+    candidates+=("$HOME/.mt5" "$HOME/.wine")
+
+    for p in "${candidates[@]}"; do
+        t="$p/drive_c/Program Files/MetaTrader 5/terminal64.exe"
+        if [ -f "$t" ]; then
+            printf '%s\t%s\n' "$p" "$t"; return 0
+        fi
+    done
+    return 1
+}
+
+# Converts a unix path INSIDE a wine prefix's drive_c to the Windows-style
+# path the Wine-side python needs (e.g. .../prefix/drive_c/Program Files/x
+# -> C:\Program Files\x).
+wine_path_to_windows() {
+    local prefix="$1" unix_path="$2"
+    local rel="${unix_path#"$prefix"/drive_c/}"
+    printf 'C:\\%s' "${rel//\//\\}"
+}
+
 # Stops whatever PID is in a pidfile, from OUTSIDE the process that
 # started it (used by --stop, which runs as a fresh invocation of this
 # script, not inside the backgrounded --start process - that one uses its
@@ -378,24 +435,24 @@ cmd_doctor() {
             bad "wine no esta instalado - corre ./install.sh"
         fi
 
-        if [ -d "$WINEPREFIX_DIR" ]; then
-            ok "prefijo de Wine existe en $WINEPREFIX_DIR"
+        local mt5_install doctor_prefix
+        if mt5_install="$(detect_mt5_install)"; then
+            doctor_prefix="$(printf '%s' "$mt5_install" | cut -f1)"
+            if [ "$doctor_prefix" = "$WINEPREFIX_DIR" ]; then
+                ok "terminal MetaTrader 5 instalado (prefijo del proyecto: $WINEPREFIX_DIR)"
+            else
+                ok "terminal MetaTrader 5 instalado (instalacion del sistema detectada: $(printf '%s' "$mt5_install" | cut -f2))"
+            fi
         else
-            bad "no existe el prefijo de Wine ($WINEPREFIX_DIR) - corre ./install.sh"
-        fi
-
-        local mt5_marker="$WINEPREFIX_DIR/drive_c/Program Files/MetaTrader 5/terminal64.exe"
-        if [ -f "$mt5_marker" ]; then
-            ok "terminal MetaTrader 5 instalado"
-        else
-            bad "no se encontro terminal64.exe - corre ./install.sh"
+            doctor_prefix="$WINEPREFIX_DIR"
+            bad "no se encontro ninguna instalacion de MetaTrader 5 (ni $WINEPREFIX_DIR, ni el comando 'metatrader', ni ~/.wine|~/.mt5) - corre ./install.sh, o fija MT5_WINEPREFIX/MT5_TERMINAL_PATH en .env si esta en otra ruta"
         fi
 
         local win_python
-        win_python="$WINEPREFIX_DIR/drive_c/users/$(whoami)/AppData/Local/Programs/Python/Python311/python.exe"
+        win_python="$doctor_prefix/drive_c/users/$(whoami)/AppData/Local/Programs/Python/Python311/python.exe"
         if [ -f "$win_python" ]; then
-            ok "python de Windows (para el bridge) instalado"
-            export WINEPREFIX="$WINEPREFIX_DIR"
+            ok "python de Windows (para el bridge) instalado en el prefijo del MT5"
+            export WINEPREFIX="$doctor_prefix"
             export WINEDEBUG=-all
             if wine "$win_python" -c "import MetaTrader5" >/dev/null 2>&1; then
                 ok "paquete MetaTrader5 importable dentro de Wine"
@@ -762,8 +819,20 @@ cmd_start_foreground() {
         # Direct REST broker: no bridge process exists in this mode, on any
         # platform - the engine talks HTTPS to OANDA by itself (core/oanda.py).
         log "BROKER_KIND=oanda: sin bridge MT5 que levantar (conexion directa por HTTPS) - arrancando solo el dashboard."
-    elif [ -d "$WINEPREFIX_DIR" ]; then
-        # ---- local bridge: this machine has a Wine prefix (Kali/Ubuntu install) ----
+    elif MT5_INSTALL="$(detect_mt5_install)"; then
+        # ---- local bridge: an MT5 install exists on this machine - the
+        # project's own prefix OR a system one (e.g. the `metatrader`
+        # launcher). The bridge MUST run in the SAME prefix as the terminal
+        # (the MetaTrader5 package talks to it over intra-prefix IPC), so
+        # everything below uses the DETECTED prefix, not a hardcoded one.
+        MT5_PREFIX="$(printf '%s' "$MT5_INSTALL" | cut -f1)"
+        MT5_TERMINAL_UNIX="$(printf '%s' "$MT5_INSTALL" | cut -f2)"
+        MT5_TERMINAL_WIN="$(wine_path_to_windows "$MT5_PREFIX" "$MT5_TERMINAL_UNIX")"
+        if [ "$MT5_PREFIX" != "$WINEPREFIX_DIR" ]; then
+            log "Usando la instalacion MT5 existente del sistema: $MT5_TERMINAL_UNIX"
+            log "(prefijo Wine: $MT5_PREFIX - detectado automaticamente; anulable con MT5_WINEPREFIX/MT5_TERMINAL_PATH en .env)"
+        fi
+
         if [ -z "${DISPLAY:-}" ] && command -v Xvfb >/dev/null 2>&1; then
             log "No hay DISPLAY, iniciando Xvfb en :99"
             Xvfb :99 -screen 0 1024x768x16 >"$LOG_DIR/xvfb.log" 2>&1 &
@@ -772,11 +841,12 @@ cmd_start_foreground() {
             sleep 2
         fi
 
-        WIN_PYTHON="$WINEPREFIX_DIR/drive_c/users/$(whoami)/AppData/Local/Programs/Python/Python311/python.exe"
+        WIN_PYTHON="$MT5_PREFIX/drive_c/users/$(whoami)/AppData/Local/Programs/Python/Python311/python.exe"
         if [ ! -f "$WIN_PYTHON" ]; then
-            err "No se encontro python de Windows en $WIN_PYTHON. Corre ./install.sh. Sigo arrancando el dashboard igual."
+            err "No se encontro python de Windows en $WIN_PYTHON (dentro del prefijo del MT5 detectado)."
+            err "Corre ./install.sh - instala el Python de Windows y el paquete MetaTrader5 en ESE prefijo. Sigo arrancando el dashboard igual."
         else
-            export WINEPREFIX="$WINEPREFIX_DIR"
+            export WINEPREFIX="$MT5_PREFIX"
             export WINEDEBUG=-all
 
             BRIDGE_AUTH_TOKEN="$(grep -E '^BRIDGE_AUTH_TOKEN=' "$PROJECT_ROOT/.env" 2>/dev/null | head -1 | cut -d= -f2-)"
@@ -798,7 +868,7 @@ cmd_start_foreground() {
             fi
 
             supervise "bridge MT5" "$RUN_DIR/bridge.pid" "$LOG_DIR/bridge.log" \
-                wine "$WIN_PYTHON" "$PROJECT_ROOT/bridge/mt5_bridge_server.py" --port 5001 --host "$BRIDGE_BIND_HOST" --token "$BRIDGE_AUTH_TOKEN" &
+                wine "$WIN_PYTHON" "$PROJECT_ROOT/bridge/mt5_bridge_server.py" --port 5001 --host "$BRIDGE_BIND_HOST" --token "$BRIDGE_AUTH_TOKEN" --terminal-path "$MT5_TERMINAL_WIN" &
             disown
 
             # Health-check target: with 0.0.0.0 (all interfaces) or the
@@ -826,10 +896,10 @@ cmd_start_foreground() {
             fi
         fi
     else
-        # ---- no local Wine prefix (e.g. Termux): assume a remote bridge ----
+        # ---- no MT5 install anywhere on this machine (e.g. Termux): remote bridge ----
         MT5_BRIDGE_URL="$(grep -E '^MT5_BRIDGE_URL=' "$PROJECT_ROOT/.env" 2>/dev/null | head -1 | cut -d= -f2-)"
         MT5_BRIDGE_URL="${MT5_BRIDGE_URL:-http://127.0.0.1:5001}"
-        log "No hay un prefijo de Wine local ($WINEPREFIX_DIR) - asumiendo bridge remoto en $MT5_BRIDGE_URL"
+        log "No se encontro ninguna instalacion MT5 local (ni $WINEPREFIX_DIR, ni comando 'metatrader', ni ~/.wine|~/.mt5) - asumiendo bridge remoto en $MT5_BRIDGE_URL"
         if curl -fsS "${MT5_BRIDGE_URL}/health" >/dev/null 2>&1; then
             log "Bridge remoto responde."
         else
