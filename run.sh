@@ -420,6 +420,24 @@ cmd_doctor() {
         health_json=$(curl -fsS "http://127.0.0.1:5001/health" 2>/dev/null)
         if echo "$health_json" | grep -q '"connected": *true'; then
             ok "bridge corriendo (local) y con sesion MT5 activa"
+            # With a live MT5 session, confirm the configured symbol actually
+            # resolves on THIS account - FBS Micro/Cent accounts rename it
+            # with a suffix (XAUUSDm/XAUUSDc); the bridge auto-resolves that,
+            # and this surfaces the mapping (or a real failure) at diagnosis
+            # time instead of at the first trade attempt.
+            local sym_json resolved_sym
+            sym_json=$(curl -fsS --max-time 10 -H "X-Bridge-Token: ${BRIDGE_AUTH_TOKEN:-}" \
+                "http://127.0.0.1:5001/symbol/${SYMBOL:-XAUUSD}" 2>/dev/null) || sym_json=""
+            if echo "$sym_json" | grep -q '"ok": *true'; then
+                resolved_sym=$(echo "$sym_json" | grep -o '"symbol": *"[^"]*"' | cut -d'"' -f4)
+                if [ -n "$resolved_sym" ] && [ "$resolved_sym" != "${SYMBOL:-XAUUSD}" ]; then
+                    ok "simbolo ${SYMBOL:-XAUUSD} disponible en esta cuenta como '$resolved_sym' (sufijo del broker, resuelto automaticamente)"
+                else
+                    ok "simbolo ${SYMBOL:-XAUUSD} disponible en esta cuenta"
+                fi
+            elif [ -n "$sym_json" ]; then
+                warn_msg "el simbolo ${SYMBOL:-XAUUSD} NO resuelve en esta cuenta (ni con variantes) - revisa el simbolo exacto en tu MT5/FBS y ajusta SYMBOL en .env"
+            fi
         else
             warn_msg "bridge corriendo (local) pero SIN sesion MT5 activa (falta /login o credenciales invalidas)"
         fi
