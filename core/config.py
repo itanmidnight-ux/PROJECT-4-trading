@@ -86,6 +86,19 @@ class Settings:
     # if .env was hand-written instead of created by install.sh.
     bridge_auth_token: str = ""
 
+    # Which broker adapter the engine connects through (see core/broker.py's
+    # BrokerExecutor seam):
+    #   "mt5_bridge" (default) - the Wine/MT5 bridge; covers any MT5 broker
+    #       (FBS included - FBS has no public REST API, so this is the only
+    #       honest way to reach an FBS account).
+    #   "oanda" - direct OANDA v20 REST (core/oanda.py): NO MetaTrader, no
+    #       Wine, no bridge process anywhere - pure HTTPS, works the same
+    #       on Termux/Kali/Ubuntu. Needs the OANDA_* values below.
+    broker_kind: str = "mt5_bridge"
+    oanda_api_token: str = ""
+    oanda_account_id: str = ""
+    oanda_environment: str = "practice"  # "practice" (demo) or "live"
+
     # Manual kill switch: if this file exists, the engine force-closes any
     # open position at market on its next poll and halts (see core/engine.py,
     # main.py). Checked every step independent of core/engine_supervisor.py's
@@ -205,6 +218,10 @@ def load_settings() -> Settings:
         mt5_is_demo=_bool("MT5_IS_DEMO", True),
         bridge_url=os.getenv("MT5_BRIDGE_URL", "http://127.0.0.1:5001"),
         bridge_timeout_ms=_int("MT5_BRIDGE_TIMEOUT_MS", 8000),
+        broker_kind=os.getenv("BROKER_KIND", "mt5_bridge").strip().lower(),
+        oanda_api_token=os.getenv("OANDA_API_TOKEN", ""),
+        oanda_account_id=os.getenv("OANDA_ACCOUNT_ID", ""),
+        oanda_environment=os.getenv("OANDA_ENV", "practice").strip().lower(),
         symbol=os.getenv("SYMBOL", "XAUUSD"),
         timeframe=os.getenv("TIMEFRAME", "M1"),
         risk_per_trade_usd=_float("RISK_PER_TRADE_USD", 3.0),  # see .env.example / README "Ronda 6" for why 3.0, not 1.0

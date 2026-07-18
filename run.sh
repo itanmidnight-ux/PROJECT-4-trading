@@ -277,7 +277,13 @@ cmd_doctor() {
         # shellcheck disable=SC1091
         source .env
         set +a
-        if [ -n "${MT5_LOGIN:-}" ] && [ -n "${MT5_PASSWORD:-}" ]; then
+        if [ "${BROKER_KIND:-mt5_bridge}" = "oanda" ]; then
+            if [ -n "${OANDA_API_TOKEN:-}" ] && [ -n "${OANDA_ACCOUNT_ID:-}" ]; then
+                ok "BROKER_KIND=oanda con OANDA_API_TOKEN y OANDA_ACCOUNT_ID configurados"
+            else
+                warn_msg "BROKER_KIND=oanda pero faltan OANDA_API_TOKEN y/o OANDA_ACCOUNT_ID en .env - el motor no va a poder conectar hasta completarlos (cuenta practice gratis en oanda.com)."
+            fi
+        elif [ -n "${MT5_LOGIN:-}" ] && [ -n "${MT5_PASSWORD:-}" ]; then
             ok "MT5_LOGIN y MT5_PASSWORD estan configurados"
         else
             # Not a hard failure on purpose: an install is fully functional
@@ -323,7 +329,20 @@ cmd_doctor() {
         bad "no existe .env - corre ./install.sh"
     fi
 
-    if [ "$platform" = "termux" ]; then
+    if [ "${BROKER_KIND:-mt5_bridge}" = "oanda" ]; then
+        section "3. Conexion directa OANDA (BROKER_KIND=oanda - sin MT5, sin Wine, sin bridge)"
+        ok "este modo no necesita Wine/MT5/bridge en NINGUNA maquina - HTTPS directo"
+        if [ -n "${OANDA_API_TOKEN:-}" ] && [ -n "${OANDA_ACCOUNT_ID:-}" ]; then
+            local oanda_base="https://api-fxpractice.oanda.com"
+            [ "${OANDA_ENV:-practice}" = "live" ] && oanda_base="https://api-fxtrade.oanda.com"
+            if curl -fsS --max-time 10 -H "Authorization: Bearer ${OANDA_API_TOKEN}" \
+                    "${oanda_base}/v3/accounts/${OANDA_ACCOUNT_ID}/summary" >/dev/null 2>&1; then
+                ok "OANDA (${OANDA_ENV:-practice}) responde y acepta las credenciales"
+            else
+                warn_msg "OANDA no respondio o rechazo las credenciales - revisa OANDA_API_TOKEN/OANDA_ACCOUNT_ID/OANDA_ENV y la conexion a internet."
+            fi
+        fi
+    elif [ "$platform" = "termux" ]; then
         section "3. Bridge remoto (Termux no corre Wine/MT5 local)"
         local bridge_url="${MT5_BRIDGE_URL:-http://127.0.0.1:5001}"
         case "$bridge_url" in
@@ -720,7 +739,12 @@ cmd_start_foreground() {
     source "$VENV_DIR/bin/activate"
     trap cleanup INT TERM EXIT
 
-    if [ -d "$WINEPREFIX_DIR" ]; then
+    BROKER_KIND="$(grep -E '^BROKER_KIND=' "$PROJECT_ROOT/.env" 2>/dev/null | head -1 | cut -d= -f2-)"
+    if [ "${BROKER_KIND:-mt5_bridge}" = "oanda" ]; then
+        # Direct REST broker: no bridge process exists in this mode, on any
+        # platform - the engine talks HTTPS to OANDA by itself (core/oanda.py).
+        log "BROKER_KIND=oanda: sin bridge MT5 que levantar (conexion directa por HTTPS) - arrancando solo el dashboard."
+    elif [ -d "$WINEPREFIX_DIR" ]; then
         # ---- local bridge: this machine has a Wine prefix (Kali/Ubuntu install) ----
         if [ -z "${DISPLAY:-}" ] && command -v Xvfb >/dev/null 2>&1; then
             log "No hay DISPLAY, iniciando Xvfb en :99"
