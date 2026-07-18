@@ -4,7 +4,12 @@ This is the only way the Linux-side engine talks to the broker.
 Resilient to two real-world failure modes: the bridge process being
 mid-restart (connection refused - retried with backoff) and the bridge
 having lost its MT5 session (reports "not logged in" - the client
-transparently re-sends the last known credentials and retries once)."""
+transparently re-sends the last known credentials and retries once).
+
+One deliberate asymmetry: READ calls (price, candles, account, positions)
+retry network failures with backoff, but MUTATING calls (open/close/
+modify) do NOT - see _call's docstring for why (a timed-out order may
+have executed anyway; re-sending it blindly can place a real duplicate)."""
 from __future__ import annotations
 
 import logging
@@ -36,7 +41,15 @@ class Mt5BridgeClient:
     def __init__(self, base_url: str, timeout_ms: int = 8000, max_retries: int = 3,
                  auth_token: str = "") -> None:
         self.base_url = base_url.rstrip("/")
-        self.timeout = timeout_ms / 1000
+        # (connect, read) instead of one number: over a phone's Wi-Fi to a
+        # remote bridge (the Termux setup), a DEAD bridge should be detected
+        # by the connect phase in a few seconds, while a bridge that is
+        # merely SLOW to answer (Wine under load) still gets the full
+        # configured window to reply. One combined timeout can't do both -
+        # it either makes dead-host detection as slow as the whole budget,
+        # or cuts legitimate slow reads short.
+        read_timeout = timeout_ms / 1000
+        self.timeout = (min(5.0, read_timeout), read_timeout)
         self.max_retries = max_retries
         self._credentials: Optional[dict] = None
         self._headers = {"X-Bridge-Token": auth_token} if auth_token else {}
@@ -61,12 +74,29 @@ class Mt5BridgeClient:
                                    headers=self._headers)
         return resp.json()
 
-    def _call(self, raw_fn, *args, allow_relogin: bool = True, **kwargs) -> dict:
+    def _call(self, raw_fn, *args, allow_relogin: bool = True,
+              retry_network: bool = True, **kwargs) -> dict:
+        """retry_network=False is for MUTATING calls (open/close/modify):
+        a network-level failure there (timeout, connection reset) is
+        AMBIGUOUS - the request may have reached MT5 and executed even
+        though the response never came back. Blindly re-sending it could
+        place a real duplicate order, so those raise immediately and let
+        core/engine.py's reconcile-against-the-broker logic (which exists
+        exactly for this case) decide what actually happened. A clean
+        JSON error from the bridge is NOT ambiguous (the bridge refused
+        the request, nothing executed), so bridge-level errors and the
+        relogin-and-retry path stay available to mutating calls too."""
         last_exc: Exception | None = None
         for attempt in range(self.max_retries):
             try:
                 data = raw_fn(*args, **kwargs)
             except requests.RequestException as exc:
+                if not retry_network:
+                    raise BridgeError(
+                        f"fallo de red en una llamada que muta estado ({exc}) - NO se reintenta "
+                        f"automaticamente porque la orden pudo haber llegado igual al broker; "
+                        f"el motor reconciliara contra las posiciones reales."
+                    ) from exc
                 last_exc = exc
                 wait = min(2 ** attempt, 8)
                 logger.warning("Bridge unreachable (%s), retrying in %ss...", exc, wait)
@@ -82,6 +112,16 @@ class Mt5BridgeClient:
                 try:
                     self._raw_post("/login", self._credentials)
                 except requests.RequestException as exc:
+                    # The relogin itself failing at network level is not
+                    # ambiguous for the ORIGINAL call (the bridge cleanly
+                    # refused it with "not logged in", so nothing executed) -
+                    # but without a session the retry can't succeed either
+                    # way, so mutating calls give up here instead of looping.
+                    if not retry_network:
+                        raise BridgeError(
+                            f"la sesion MT5 se cayo y el re-login fallo por red ({exc}) - "
+                            f"la orden original NO se ejecuto (el bridge la rechazo limpiamente)."
+                        ) from exc
                     last_exc = exc
                     time.sleep(min(2 ** attempt, 8))
                     continue
@@ -94,8 +134,8 @@ class Mt5BridgeClient:
     def _get(self, path: str, **params) -> dict:
         return self._call(self._raw_get, path, **params)
 
-    def _post(self, path: str, payload: dict) -> dict:
-        return self._call(self._raw_post, path, payload)
+    def _post_mutating(self, path: str, payload: dict) -> dict:
+        return self._call(self._raw_post, path, payload, retry_network=False)
 
     def health(self) -> bool:
         try:
@@ -142,13 +182,13 @@ class Mt5BridgeClient:
         payload = {"symbol": symbol, "side": side, "lot": lot}
         if sl_price:
             payload["sl_price"] = sl_price
-        return self._post("/order/open", payload)
+        return self._post_mutating("/order/open", payload)
 
     def close_order(self, ticket: str, lot: float) -> dict:
-        return self._post("/order/close", {"ticket": ticket, "lot": lot})
+        return self._post_mutating("/order/close", {"ticket": ticket, "lot": lot})
 
     def modify_sl(self, ticket: str, sl_price: float) -> dict:
-        return self._post("/order/modify", {"ticket": ticket, "sl_price": sl_price})
+        return self._post_mutating("/order/modify", {"ticket": ticket, "sl_price": sl_price})
 
     def positions(self, symbol: Optional[str] = None) -> list[dict]:
         d = self._get("/positions", **({"symbol": symbol} if symbol else {}))
