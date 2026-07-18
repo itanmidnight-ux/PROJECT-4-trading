@@ -59,6 +59,11 @@ def main() -> None:
     parser.add_argument("--min-tp-usd", type=float, default=0.28)
     parser.add_argument("--tp-levels", type=int, default=5)
     parser.add_argument("--spread", type=float, default=0.25)
+    # 0 = off (the default, and the measured recommendation - Ronda 8 in
+    # the README found no value that improved BOTH train/test halves).
+    # Kept as an experiment knob: closes any position that hasn't reached
+    # TP1 within N closed bars instead of waiting for the wide ATR stop.
+    parser.add_argument("--max-hold-bars", type=int, default=0)
     parser.add_argument("--composite", action="store_true",
                          help="Use the composite strategy (mean reversion + the extra M1 signals in "
                               "core/signals.py, per STRAT_ENABLE_* in .env/defaults) instead of just "
@@ -81,6 +86,7 @@ def main() -> None:
         candles=candles, spec=spec, starting_balance=args.balance, leverage=args.leverage,
         risk_per_trade_usd=args.risk_usd, min_tp_usd=args.min_tp_usd, tp_levels=args.tp_levels,
         assumed_spread_price=args.spread, strategy=strategy,
+        max_hold_bars=args.max_hold_bars,
     )
 
     days = max(len(candles) / 1440, 1e-9)  # 1440 M1 bars/day - approximate, doesn't account for market closures

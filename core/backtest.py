@@ -40,6 +40,7 @@ def run_backtest(
     strategy_overrides: dict | None = None,
     strategy: object | None = None,
     max_lookback_bars: int = 600,
+    max_hold_bars: int = 0,
 ) -> BacktestResult:
     """candles: columns open, high, low, close, time (oldest -> newest).
     strategy_overrides passes extra kwargs straight to ScalpStrategy (e.g.
@@ -56,7 +57,16 @@ def run_backtest(
     gets recomputed on a window that grows every single bar for the whole
     replay, which is O(n^2) and turns a multi-thousand-bar backtest into a
     multi-minute one for no accuracy benefit (600 bars is already more than
-    enough for every indicator used here, including the slowest, EMA50)."""
+    enough for every indicator used here, including the slowest, EMA50).
+
+    max_hold_bars (0 = off): time-stop for the pre-TP1 phase only. If a
+    position has not reached its FIRST take-profit within this many closed
+    bars, the mean-reversion thesis is considered expired and the whole
+    position is closed at that bar's close (spread-adjusted) instead of
+    waiting for the wide ATR-based stop. Targets exactly the documented
+    loss profile (see README Rondas 2-6): the few large losers are trades
+    that never revert and ride the full 4xATR distance down. Once TP1 has
+    hit, the trailing stop already manages the exit and this does nothing."""
     value_per_point_per_lot = spec.trade_tick_value / spec.point
     if strategy is None:
         strategy = ScalpStrategy(min_tp_usd=min_tp_usd, tp_levels=tp_levels,
@@ -154,6 +164,25 @@ def run_backtest(
                         if candidate_sl < open_pos["sl"]:
                             open_pos["sl"] = candidate_sl
 
+                # Time-stop (see docstring): only pre-TP1, only after SL/TP
+                # for this bar are fully resolved (an actual hit this bar
+                # takes precedence over expiring the thesis).
+                if open_pos is not None:
+                    open_pos["bars_held"] += 1
+                    if (max_hold_bars > 0 and open_pos["next_idx"] == 0
+                            and open_pos["bars_held"] >= max_hold_bars):
+                        exit_price = (bar["close"] - assumed_spread_price / 2 if direction == 1
+                                      else bar["close"] + assumed_spread_price / 2)
+                        pnl = direction * (exit_price - open_pos["entry"]) * value_per_point_per_lot * open_pos["remaining_lot"]
+                        balance += pnl
+                        total_pnl += pnl
+                        open_pos["realized_pnl"] += pnl
+                        trades += 1
+                        wins += open_pos["realized_pnl"] > 0
+                        losses += open_pos["realized_pnl"] <= 0
+                        risk.register_trade_closed(pnl, balance)
+                        open_pos = None
+
         peak = max(peak, balance)
         max_dd = max(max_dd, (peak - balance) / peak * 100 if peak else 0)
 
@@ -171,7 +200,7 @@ def run_backtest(
                     open_pos = {"side": signal.side, "entry": entry, "sl": sl, "tp_levels": tp_levels,
                                 "next_idx": 0, "remaining_lot": sizing.lot, "orig_lot": sizing.lot,
                                 "realized_pnl": 0.0, "trail_distance": tp_levels[0].distance_price,
-                                "trail_active": False, "best_since_be": 0.0}
+                                "trail_active": False, "best_since_be": 0.0, "bars_held": 0}
                     strategy.on_trade_opened()
 
     return BacktestResult(trades=trades, wins=wins, losses=losses, total_pnl=total_pnl,
