@@ -91,11 +91,35 @@ def make_settings(**overrides) -> Settings:
 
 def oversold_entry_state():
     closes = _ranging_base(29)
-    closes.append(closes[-1] - 3.0)
+    closes.append(closes[-1] - 3.0)  # the signal bar (last CLOSED bar)
+    # One more bar on top: the FORMING bar, which MT5/OANDA always include
+    # as the last row of a candle fetch. The engine excludes it when
+    # evaluating entries (closed-bars-only, matching the backtest), so the
+    # signal must live on the second-to-last row - exactly like live data.
+    closes.append(closes[-1])
     candles = build_candles(closes)
     last_close = closes[-1]
     tick = Tick(bid=last_close - 0.1, ask=last_close + 0.1, spread_price=0.2, time=1_700_002_000)
     return LiveState(tick=tick, candles=candles), last_close
+
+
+def test_engine_ignores_a_signal_that_only_exists_on_the_forming_bar(tmp_path):
+    """Regression for the closed-bars-only entry rule: a sharp drop on the
+    FORMING (still-open) bar - which used to trigger an immediate,
+    never-backtested mid-bar entry - must be ignored until that bar
+    actually closes. Only the backtest-validated view (completed bars)
+    may produce entries."""
+    closes = _ranging_base(29)
+    closes.append(closes[-1])         # last CLOSED bar: nothing special
+    closes.append(closes[-1] - 3.0)   # forming bar: the "signal" lives ONLY here
+    candles = build_candles(closes)
+    tick = Tick(bid=closes[-1] - 0.1, ask=closes[-1] + 0.1, spread_price=0.2, time=1_700_002_000)
+    market_data = ScriptedMarketData([LiveState(tick=tick, candles=candles)])
+    broker = SimulatedBroker(starting_balance=50_000.0, leverage=100, spec=SPEC)
+    engine = TradingEngine(make_settings(), market_data, broker, Database(str(tmp_path / "forming.db")), poll_seconds=0)
+
+    engine.step()
+    assert len(engine._open_positions) == 0  # no entry off the half-formed bar
 
 
 def test_engine_opens_and_fully_closes_a_winning_trade_on_a_big_favorable_move(tmp_path):
