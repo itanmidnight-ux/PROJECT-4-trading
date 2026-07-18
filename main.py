@@ -74,6 +74,38 @@ def main() -> None:
         spec = SymbolSpec(contract_size=100.0, volume_min=0.01, volume_max=1.0,
                            volume_step=0.01, point=0.01, trade_tick_value=1.0)
         broker = SimulatedBroker(starting_balance=starting_balance, leverage=1, spec=spec)
+    elif settings.broker_kind == "oanda":
+        # Direct REST connection - no MT5 terminal, no Wine, no bridge
+        # process anywhere. Works identically on Termux/Kali/Ubuntu.
+        from core.oanda import OandaClient, OandaError
+        if not settings.oanda_api_token or not settings.oanda_account_id:
+            logger.error("BROKER_KIND=oanda pero faltan OANDA_API_TOKEN y/o OANDA_ACCOUNT_ID en .env.")
+            logger.error("Crea una cuenta practice gratis en oanda.com, genera un token de API en el")
+            logger.error("panel 'Manage API Access', y copia token + account ID a .env.")
+            sys.exit(1)
+        client = OandaClient(settings.oanda_api_token, settings.oanda_account_id,
+                              environment=settings.oanda_environment,
+                              timeout_ms=settings.bridge_timeout_ms)
+        try:
+            account = client.account()  # first real call = connectivity + credentials check
+        except OandaError as exc:
+            logger.error("No se pudo conectar a OANDA (%s, cuenta %s): %s",
+                         settings.oanda_environment, settings.oanda_account_id, exc)
+            logger.error("Revisa OANDA_API_TOKEN/OANDA_ACCOUNT_ID/OANDA_ENV en .env y la conexion a internet.")
+            sys.exit(1)
+        logger.info("Conectado a OANDA %s - balance %.2f, apalancamiento 1:%d",
+                     settings.oanda_environment, account.balance, account.leverage)
+        # BridgeMarketData's incremental candle cache is client-agnostic
+        # (anything with price()/candles()) - reused as-is over OANDA.
+        market_data = BridgeMarketData(client)
+        if settings.dry_run:
+            logger.warning("DRY_RUN=true: leyendo precios REALES de OANDA pero simulando ordenes.")
+            spec = client.symbol_spec(settings.symbol)
+            broker = SimulatedBroker(starting_balance=account.balance, leverage=account.leverage, spec=spec)
+        else:
+            logger.warning("DRY_RUN=false: ORDENES REALES iran a la cuenta OANDA %s (%s).",
+                            settings.oanda_account_id, settings.oanda_environment)
+            broker = client
     else:
         client = Mt5BridgeClient(settings.bridge_url, settings.bridge_timeout_ms,
                                   auth_token=settings.bridge_auth_token)
