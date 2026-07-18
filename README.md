@@ -135,6 +135,21 @@ los fallos tipicos de FBS:
   margen real via `order_calc_margin` (FBS fija metales a 1:500
   independiente del apalancamiento de la cuenta), reconexion silenciosa
   con re-login, y el cliente Linux que jamas reenvia una orden ambigua.
+- **Si ya tenes MT5 instalado en tu Linux (ej. el lanzador `metatrader`
+  del instalador oficial de MetaQuotes), el bot lo detecta y lo REUTILIZA**
+  en vez de instalar un segundo terminal: `install.sh` instala el Python
+  de Windows dentro de ESE prefijo Wine, y `run.sh` arranca el bridge ahi
+  y le pasa la ruta real de `terminal64.exe`. No es solo ahorro de disco -
+  el paquete MetaTrader5 habla con el terminal por IPC DENTRO de un mismo
+  prefijo Wine, asi que el bridge tiene que vivir donde vive tu MT5 real
+  (el que tiene tu cuenta FBS logueada). Deteccion: overrides
+  `MT5_WINEPREFIX`/`MT5_TERMINAL_PATH` en `.env` -> prefijo del proyecto
+  (`.wine`) -> lanzador `metatrader` (se lee su WINEPREFIX) -> `~/.mt5` ->
+  `~/.wine`. `./run.sh doctor` muestra cual encontro. Nota sobre cuentas
+  SIN sufijo (como la tuya, XAUUSD a secas): la resolucion de simbolos
+  prueba SIEMPRE el nombre exacto primero - el fallback de sufijos solo
+  actua si el nombre exacto no existe, asi que en cuentas estandar no
+  cambia absolutamente nada.
 
 ### Conexion SIN MetaTrader: `BROKER_KIND=oanda`
 
