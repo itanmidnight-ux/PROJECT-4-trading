@@ -37,15 +37,20 @@ set -euo pipefail
 
 SKIP_PANDAS=0
 RETRY_PANDAS=0
+NO_WINE=0
 for arg in "$@"; do
     case "$arg" in
         --skip-pandas) SKIP_PANDAS=1 ;;
         --retry-pandas) RETRY_PANDAS=1 ;;
+        --no-wine) NO_WINE=1 ;;
         -h|--help)
-            echo "Uso: ./install.sh [--skip-pandas | --retry-pandas]"
+            echo "Uso: ./install.sh [--skip-pandas | --retry-pandas] [--no-wine]"
             echo "  --skip-pandas    No intentar instalar numpy/pandas (Termux) - el dashboard"
             echo "                   funciona igual, el motor y los backtests no."
             echo "  --retry-pandas   Reintentar numpy/pandas aunque haya fallado antes (Termux)."
+            echo "  --no-wine        (Kali/Ubuntu) No instalar Wine ni el terminal MT5 - para"
+            echo "                   usar el bot con BROKER_KIND=oanda (conexion REST directa,"
+            echo "                   sin MetaTrader en ninguna maquina). Ahorra varios GB."
             exit 0
             ;;
         *)
@@ -404,7 +409,9 @@ install_debian_like() {
         fi
     fi
     export DEBIAN_FRONTEND=noninteractive
-    $SUDO dpkg --add-architecture i386 2>/dev/null || true
+    if [ "$NO_WINE" -eq 0 ]; then
+        $SUDO dpkg --add-architecture i386 2>/dev/null || true
+    fi
     # apt can hang indefinitely waiting on another apt/dpkg process holding
     # the lock (e.g. unattended-upgrades) - bounded here too rather than
     # blocking forever with no indication why.
@@ -413,17 +420,21 @@ install_debian_like() {
         err "apt-get update fallo o se paso de 20 minutos - revisa la conexion, o si otro proceso (unattended-upgrades) tiene el lock de apt/dpkg."
         exit 1
     fi
-    # shellcheck disable=SC2086
-    if ! timeout 1800 $SUDO apt-get install -y --no-install-recommends \
-        python3 python3-venv python3-pip \
-        wine wine64 winbind \
-        xvfb xdotool cabextract wget curl unzip ca-certificates; then
+    local apt_packages="python3 python3-venv python3-pip wget curl unzip ca-certificates"
+    if [ "$NO_WINE" -eq 0 ]; then
+        apt_packages="$apt_packages wine wine64 winbind xvfb xdotool cabextract"
+    else
+        log "--no-wine: sin Wine/MT5 - para BROKER_KIND=oanda (REST directo). Configura OANDA_* en .env despues."
+    fi
+    # shellcheck disable=SC2086  # $apt_packages es una lista de paquetes a proposito
+    if ! timeout 1800 $SUDO apt-get install -y --no-install-recommends $apt_packages; then
         err "apt-get install fallo o se paso de 30 minutos."
         exit 1
     fi
 
-    if ! require_cmd wine; then
+    if [ "$NO_WINE" -eq 0 ] && ! require_cmd wine; then
         err "wine no esta disponible despues de instalar. No puedo continuar - el terminal MT5 lo necesita."
+        err "(Si vas a usar OANDA en vez de un broker MT5, corre ./install.sh --no-wine.)"
         exit 1
     fi
 
@@ -437,6 +448,14 @@ install_debian_like() {
     log "venv de Linux listo en $VENV_DIR"
 
     log "Paso 3/5: prefijo de Wine + terminal MetaTrader5 + Python de Windows"
+    if [ "$NO_WINE" -eq 1 ]; then
+        log "  Pasos 3 y 4 omitidos (--no-wine): este equipo se conectara por BROKER_KIND=oanda"
+        log "  (REST directo, sin MetaTrader en ninguna maquina). Completa OANDA_API_TOKEN y"
+        log "  OANDA_ACCOUNT_ID en .env - ver .env.example."
+    else
+    # (bloque Wine/MT5 sin re-indentar a proposito - bash no lo necesita y
+    # mantiene el diff chico; el `else` de arriba y el `fi` antes del Paso
+    # 5/5 son el unico cambio de estructura)
     export WINEPREFIX="$WINEPREFIX_DIR"
     export WINEARCH=win64
     export WINEDEBUG=-all
@@ -504,9 +523,22 @@ install_debian_like() {
         err "El bridge (bridge/mt5_bridge_server.py) no va a poder correr sin el."
         err "Podes reintentar este paso solo, corriendo install.sh de nuevo."
     fi
+    fi  # NO_WINE
 
     log "Paso 5/5: configuracion (.env)"
     setup_env_file
+    if [ "$NO_WINE" -eq 1 ]; then
+        # Sin Wine no hay camino mt5_bridge posible en esta maquina - dejar
+        # .env apuntando al broker REST para que el motor Y la
+        # re-verificacion final (run.sh doctor, que gatea sus chequeos de
+        # Wine por BROKER_KIND) sean coherentes con lo que se instalo.
+        if grep -qE '^BROKER_KIND=' "$PROJECT_ROOT/.env" 2>/dev/null; then
+            sed -i 's|^BROKER_KIND=.*|BROKER_KIND=oanda|' "$PROJECT_ROOT/.env"
+        else
+            echo "BROKER_KIND=oanda" >> "$PROJECT_ROOT/.env"
+        fi
+        log "BROKER_KIND=oanda dejado en .env (instalacion --no-wine)."
+    fi
 
     cat <<'EOF'
 

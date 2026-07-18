@@ -107,6 +107,36 @@ sistema (Python normal de Linux) consume por HTTP. Esta separacion es lo
 que permite que el motor, el dashboard y el risk manager sean Python
 comun y silvestre, sin depender de Wine para nada mas que hablar con MT5.
 
+### Conexion SIN MetaTrader: `BROKER_KIND=oanda`
+
+El motor no esta casado con MT5: habla con el broker a traves de una capa
+abstracta (`core/broker.py::BrokerExecutor` + `core/market_data.py`), y hay
+dos implementaciones reales:
+
+- **`BROKER_KIND=mt5_bridge`** (default): el bridge Wine/MT5 de arriba.
+  Cubre **cualquier broker MT5** (FBS incluido - FBS no publica una API
+  REST, asi que para una cuenta FBS este es el unico camino honesto).
+- **`BROKER_KIND=oanda`**: conexion **directa por HTTPS** a la API REST v20
+  de OANDA (`core/oanda.py`) - **sin MetaTrader, sin Wine, sin bridge, sin
+  segunda maquina**, identica en Termux/Kali/Ubuntu (solo usa `requests`).
+  Pasos: cuenta *practice* gratis en oanda.com -> token en "Manage API
+  Access" -> completar `OANDA_API_TOKEN`, `OANDA_ACCOUNT_ID` y `OANDA_ENV`
+  en `.env`. En Kali/Ubuntu podes instalar sin Wine directamente:
+  `./install.sh --no-wine` (ahorra varios GB; deja `BROKER_KIND=oanda` en
+  `.env` solo). `run.sh doctor` ajusta sus chequeos: en este modo no pide
+  Wine/MT5/bridge en ninguna maquina y en su lugar verifica las
+  credenciales OANDA contra la API real.
+
+  Dos notas honestas: (1) "cualquier broker" no existe como protocolo -
+  cada broker expone su propia API o ninguna; lo que este proyecto ofrece
+  es la costura limpia para agregar mas adaptadores (uno por API) sin
+  tocar el motor. (2) En OANDA el oro se opera en **unidades de 1 oz**
+  (equivalente exacto a 0.01 lotes MT5; la matematica de riesgo del motor
+  es identica), pero el margen del lote minimo a ~20:1 ronda los $200 -
+  una cuenta practice arranca con $100,000 asi que sobra, pero una cuenta
+  chica de $50 NO puede operar oro en OANDA; el RiskManager lo va a
+  rechazar con el mensaje de margen de siempre en vez de forzar la orden.
+
 ### Plataformas soportadas (auto-detectadas)
 
 `install.sh` y `run.sh` detectan solos en que sistema estan corriendo
@@ -773,6 +803,44 @@ pendiente el mismo trabajo real de las rondas anteriores: mas historial
 (semanas/meses del feed real de FBS, no dias de un proxy COMEX) antes de
 confiar en que $3.0 - o cualquier otro numero - sea el nivel correcto para
 una cuenta real.
+
+**Ronda 7: se midio el "superscalping" de maxima frecuencia (objetivo
+pedido: minimo 400 trades/dia) con la misma vara de siempre.** Se corrio
+la configuracion mas agresiva que este bot puede montar - cooldown 0, las
+5 señales extra ACTIVADAS a la vez, tope de 1000 trades/dia, riesgo $3,
+ladder adaptativo de 5 niveles - sobre 7 dias reales de oro 1m frescos
+(terminados el mismo dia de la corrida), split train/test 60/40:
+
+| Tramo | Trades | Trades/dia | Win rate | PnL | Drawdown max | Balance final |
+|---|---|---|---|---|---|---|
+| TRAIN | 204 | ~62 | 72.1% | -$37.11 | 77.7% | $12.89 de $50 |
+| TEST | 162 | ~74 | 73.5% | -$37.99 | 78.1% | $12.01 de $50 |
+
+Dos conclusiones, ambas contundentes y consistentes entre mitades:
+
+1. **400 trades/dia no existen en los datos.** Con TODO activado y sin
+   cooldown, el maximo real de señales que el mercado de oro 1m produce
+   con estas 6 estrategias es ~62-74/dia. Llegar a 400 exigiria operar
+   practicamente cada vela SIN señal alguna - y eso tiene una matematica
+   inapelable: con el spread tipico de ~$0.25 en oro, 400 operaciones/dia
+   al lote minimo (1 oz) cuestan ~$100/dia SOLO de spread, sobre una
+   cuenta de $50. Ninguna estrategia lo sobrevive; un "trade por vela"
+   es una maquina de transferirle la cuenta al broker.
+2. **La frecuencia maxima alcanzable pierde, y fuerte.** ~72-73% de
+   operaciones ganadas y aun asi -$37 a -$38 de $50 en cada mitad (78% de
+   drawdown): las ganancias chicas de muchos trades no compensan las
+   perdidas mas grandes de los pocos que fallan - el mismo desbalance ya
+   documentado en las Rondas 4-5, ahora confirmado en datos nuevos.
+
+**Por eso los defaults NO cambian**: reversion a la media sola, cooldown
+2, señales extra apagadas. El modo de alta frecuencia queda disponible
+para quien quiera experimentar (es todo configurable por .env:
+`STRAT_COOLDOWN_BARS=0`, `STRAT_ENABLE_*=true`, `MAX_TRADES_PER_DAY`),
+pero activarlo tal cual hoy es, con la evidencia disponible, perder
+dinero mas rapido. Si el objetivo de muchas operaciones diarias importa
+mas que el resultado, ese es un trade-off que debe elegirse sabiendo
+estos numeros - no algo que este README vaya a presentar como "ganancias
+pequeñas por vela".
 
 ## Credenciales
 
