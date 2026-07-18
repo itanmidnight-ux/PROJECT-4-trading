@@ -175,6 +175,41 @@ detect_platform() {
     echo "unknown"
 }
 
+# Same detection run.sh uses (duplicated on purpose - each script stays
+# standalone): finds an EXISTING MetaTrader 5 install to reuse instead of
+# downloading a second copy into the project's own prefix. Echoes
+# "<prefix>\t<terminal64.exe>". The bridge must live in the SAME Wine
+# prefix as the terminal (intra-prefix IPC), so reusing the user's real
+# MT5 (e.g. one launched with the `metatrader` command) is not just a
+# disk-space nicety - it's what makes the bot talk to THAT terminal.
+detect_mt5_install() {
+    local p t
+    p="$(grep -E '^MT5_WINEPREFIX=' "$PROJECT_ROOT/.env" 2>/dev/null | head -1 | cut -d= -f2-)"
+    t="$(grep -E '^MT5_TERMINAL_PATH=' "$PROJECT_ROOT/.env" 2>/dev/null | head -1 | cut -d= -f2-)"
+    p="${p/#\~/$HOME}"; t="${t/#\~/$HOME}"
+    if [ -n "$p" ] && [ -n "$t" ] && [ -f "$t" ]; then
+        printf '%s\t%s\n' "$p" "$t"; return 0
+    fi
+    if [ -n "$p" ] && [ -f "$p/drive_c/Program Files/MetaTrader 5/terminal64.exe" ]; then
+        printf '%s\t%s\n' "$p" "$p/drive_c/Program Files/MetaTrader 5/terminal64.exe"; return 0
+    fi
+    local candidates=("$WINEPREFIX_DIR")
+    if command -v metatrader >/dev/null 2>&1; then
+        local launcher lp
+        launcher="$(command -v metatrader)"
+        lp="$(grep -oE 'WINEPREFIX="?[^" ]+' "$launcher" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"')"
+        [ -n "$lp" ] && candidates+=("${lp/#\~/$HOME}")
+    fi
+    candidates+=("$HOME/.mt5" "$HOME/.wine")
+    for p in "${candidates[@]}"; do
+        t="$p/drive_c/Program Files/MetaTrader 5/terminal64.exe"
+        if [ -f "$t" ]; then
+            printf '%s\t%s\n' "$p" "$t"; return 0
+        fi
+    done
+    return 1
+}
+
 PLATFORM="$(detect_platform)"
 log "Plataforma detectada: $PLATFORM"
 
@@ -456,6 +491,20 @@ install_debian_like() {
     # (bloque Wine/MT5 sin re-indentar a proposito - bash no lo necesita y
     # mantiene el diff chico; el `else` de arriba y el `fi` antes del Paso
     # 5/5 son el unico cambio de estructura)
+
+    # Antes de crear un prefijo propio y bajar el terminal: si esta maquina
+    # YA tiene un MT5 instalado (ej. el lanzador `metatrader` del instalador
+    # oficial de MetaQuotes para Linux), reutilizarlo. El bridge tiene que
+    # correr en el MISMO prefijo Wine que el terminal (IPC intra-prefijo),
+    # asi que usar el MT5 real del usuario - donde su cuenta ya esta
+    # logueada - es lo correcto, no solo un ahorro de varios GB.
+    EXISTING_MT5=""
+    if EXISTING_MT5="$(detect_mt5_install)" && [ "$(printf '%s' "$EXISTING_MT5" | cut -f1)" != "$WINEPREFIX_DIR" ]; then
+        WINEPREFIX_DIR="$(printf '%s' "$EXISTING_MT5" | cut -f1)"
+        log "MetaTrader 5 ya esta instalado en esta maquina: $(printf '%s' "$EXISTING_MT5" | cut -f2)"
+        log "Reutilizando ese prefijo Wine ($WINEPREFIX_DIR) en vez de instalar un segundo MT5 -"
+        log "el Python de Windows y el paquete MetaTrader5 se instalan AHI para poder hablarle."
+    fi
     export WINEPREFIX="$WINEPREFIX_DIR"
     export WINEARCH=win64
     export WINEDEBUG=-all
