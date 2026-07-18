@@ -66,6 +66,36 @@ def test_backtest_counts_partial_tp_then_breakeven_stop_as_a_win():
     assert result.losses == 0
 
 
+def test_backtest_time_stop_closes_a_stalled_position_before_the_wide_sl():
+    """max_hold_bars: a trade that neither reverts to TP1 nor falls to the
+    (wide, 4xATR) stop must be force-closed after N closed bars - and
+    counted with its real (small) loss, not the full stop-distance loss."""
+    base = oversold_candles()
+    probe = ScalpStrategy(min_tp_usd=0.28, tp_levels=3,
+                           value_per_point_per_lot=SPEC.trade_tick_value / SPEC.point)
+    signal = probe.generate_signal(base, SPREAD, SPEC.volume_min)
+    assert signal.side == "BUY"
+
+    entry_price = base.iloc[-1]["close"] + SPREAD / 2
+    # Drift very slightly down and STAY there: never reaches TP1, never
+    # reaches the ATR stop - without a time-stop this position would sit
+    # open to the end of the data.
+    stalled = entry_price - 0.4
+    candles = _extend(base, [stalled] * 12)
+
+    with_stop = run_backtest(candles=candles, spec=SPEC, starting_balance=50_000.0, leverage=100,
+                              risk_per_trade_usd=1.0, min_tp_usd=0.28, tp_levels=3,
+                              assumed_spread_price=SPREAD, max_hold_bars=5)
+    without = run_backtest(candles=candles, spec=SPEC, starting_balance=50_000.0, leverage=100,
+                            risk_per_trade_usd=1.0, min_tp_usd=0.28, tp_levels=3,
+                            assumed_spread_price=SPREAD, max_hold_bars=0)
+
+    assert with_stop.trades == 1          # time-stop realized the exit
+    assert with_stop.losses == 1
+    assert -1.5 < with_stop.total_pnl < 0  # small drift loss, NOT a full stop-out
+    assert without.trades == 0            # default off: position still open at data end
+
+
 def test_backtest_runs_clean_on_real_style_data_without_crashing():
     """Not a profitability assertion - just proves the backtester handles
     a longer, more realistic price path without blowing up (NaNs, index
