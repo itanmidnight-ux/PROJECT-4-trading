@@ -107,6 +107,35 @@ sistema (Python normal de Linux) consume por HTTP. Esta separacion es lo
 que permite que el motor, el dashboard y el risk manager sean Python
 comun y silvestre, sin depender de Wine para nada mas que hablar con MT5.
 
+### FBS como broker principal (via el bridge MT5) - robustez especifica
+
+FBS es un broker MT5 puro (sin API REST publica), asi que su unico camino
+es el bridge Wine/MT5 - y ese camino esta endurecido especificamente para
+los fallos tipicos de FBS:
+
+- **Sufijos de simbolo por tipo de cuenta**: en cuentas FBS Micro/Cent el
+  oro NO se llama `XAUUSD` sino `XAUUSDm`/`XAUUSDc` - antes eso mataba al
+  bot con `symbol_select(XAUUSD) failed` sin operar jamas. El bridge ahora
+  **resuelve la variante automaticamente** (exacta -> `XAUUSD*` ->
+  `*XAUUSD*`, saltando variantes con trading deshabilitado, eligiendo el
+  nombre mas corto) y lo reporta en el log y en `./run.sh doctor` ("simbolo
+  XAUUSD disponible en esta cuenta como 'XAUUSDm'").
+- **Errores de orden traducidos**: `order_send failed: 10019` ahora dice
+  "fondos insuficientes (margen)"; `10018` "mercado cerrado"; `10027`
+  "autotrading deshabilitado en el TERMINAL (boton AutoTrading)" - los
+  codigos que de verdad aparecen operando con FBS, accionables desde el
+  event log del dashboard.
+- **Login con pistas reales**: el fallo de login recuerda que el password
+  de la cuenta DEMO de FBS expira a los pocos dias y que el nombre de
+  servidor debe copiarse exacto (FBS-Demo vs FBS-Real).
+- **Arranque del terminal robusto**: `mt5.initialize()` reintenta con la
+  ruta explicita de `terminal64.exe` dentro del prefijo Wine si la
+  deteccion automatica falla (modo de fallo tipico bajo Wine).
+- Ya cubiertos antes: filling mode consultado al broker (no asumido),
+  margen real via `order_calc_margin` (FBS fija metales a 1:500
+  independiente del apalancamiento de la cuenta), reconexion silenciosa
+  con re-login, y el cliente Linux que jamas reenvia una orden ambigua.
+
 ### Conexion SIN MetaTrader: `BROKER_KIND=oanda`
 
 El motor no esta casado con MT5: habla con el broker a traves de una capa
