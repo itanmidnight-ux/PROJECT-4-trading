@@ -141,6 +141,25 @@ instalan/ejecutan - no hace falta pasarles ningun flag de plataforma.
   fallo se recuerda para no reintentar un compilado de hasta 90 minutos
   en cada corrida - `./install.sh --skip-pandas` lo salta directamente,
   `./install.sh --retry-pandas` fuerza un nuevo intento.
+
+  Dos detalles practicos mas del camino Termux:
+  - **Pantalla apagada / bateria**: Android suspende o mata procesos de
+    fondo agresivamente (Doze, "phantom process killer"). `./run.sh
+    --start` en Termux adquiere solo un **wake lock** (`termux-wake-lock`,
+    incluido en Termux) para que el servidor sobreviva con la pantalla
+    apagada, y `--stop` lo libera. Para maxima estabilidad, exclui ademas
+    la app Termux de la optimizacion de bateria de Android (Ajustes ->
+    Apps -> Termux -> Bateria -> Sin restricciones).
+  - **Seguridad del enlace al bridge remoto**: el login MT5 viaja del
+    telefono al bridge por HTTP - si `MT5_BRIDGE_URL` es `http://` hacia
+    otra maquina, esas credenciales van **sin cifrar** por esa red (el
+    token `BRIDGE_AUTH_TOKEN` autentica, pero no cifra). En tu propia red
+    local puede ser un riesgo aceptable; si no lo es, monta el enlace
+    sobre un canal cifrado: un tunel SSH (`ssh -L 5001:127.0.0.1:5001
+    usuario@ip-del-bridge` y `MT5_BRIDGE_URL=http://127.0.0.1:5001`) o
+    una VPN tipo Tailscale/WireGuard entre el telefono y la maquina del
+    bridge. `./run.sh doctor` avisa cuando detecta un bridge remoto en
+    `http://` plano.
 - **Otras distros Linux con `apt-get`** (Debian, Mint, etc.): deberian
   funcionar por el mismo camino que Kali/Ubuntu, sin garantia especifica.
 - **Cualquier otra cosa** (Fedora, Arch, sin `apt-get` y no Termux):
