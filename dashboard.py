@@ -394,6 +394,29 @@ def api_engine_stop():
 
 
 WEB_DEFAULT_PORT = 9000
+DASHBOARD_PORT_FILE = RUN_DIR / "dashboard.port"
+
+
+def _find_free_port(host: str, start_port: int, max_tries: int = 200) -> int:
+    """Probes real bind()s starting at start_port, returning the first that
+    succeeds - not a guess based on "is something answering on it" (a
+    filtered/closed-but-reserved port would look free to a connect probe and
+    still fail to bind). This is what actually stops the crash-restart loop
+    run.sh's supervise() used to hit: previously a busy start_port made
+    Flask's app.run() raise "Address already in use" and exit 1 immediately,
+    over and over, every retry picking the exact same busy port again."""
+    import socket
+
+    port = start_port
+    for _ in range(max_tries):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                probe.bind((host, port))
+                return port
+            except OSError:
+                port += 1
+    raise OSError(f"No se encontro un puerto libre entre {start_port} y {port - 1} en {host}")
 
 
 def run_server(host: str, port: int) -> None:
@@ -410,7 +433,7 @@ def _run_native() -> None:
     that case, regardless of which mode was wanted."""
     import webview
 
-    internal_port = 8765
+    internal_port = _find_free_port("127.0.0.1", 8765)
     thread = threading.Thread(target=run_server, args=("127.0.0.1", internal_port), daemon=True)
     thread.start()
     time.sleep(0.6)
@@ -434,6 +457,16 @@ def _run_web(host: str, port: int) -> None:
     data is real, and the Settings/pause-resume routes can change stored
     broker credentials or trading state - 0.0.0.0 exposes all of that to
     anyone on the network, mitigated by DASHBOARD_AUTH_TOKEN if set."""
+    requested_port = port
+    port = _find_free_port(host, port)
+    try:
+        RUN_DIR.mkdir(parents=True, exist_ok=True)
+        DASHBOARD_PORT_FILE.write_text(str(port))
+    except OSError:
+        pass  # best-effort: run.sh falls back to its own default if this can't be written
+    if port != requested_port:
+        print(f"AVISO: el puerto {requested_port} estaba ocupado - usando {port} en su lugar.")
+
     extra = f" (o http://<tu-ip-local>:{port} desde otro dispositivo)" if host == "0.0.0.0" else ""
     print(f"Dashboard web en: http://{host}:{port}{extra}")
     if host == "0.0.0.0":

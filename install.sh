@@ -461,6 +461,29 @@ install_debian_like() {
     else
         log "--no-wine: sin Wine/MT5 - para BROKER_KIND=oanda (REST directo). Configura OANDA_* en .env despues."
     fi
+    # pywebview (ventana nativa del dashboard, dashboard.py sin --web) usa el
+    # backend GTK/WebKit en Linux via PyGObject (el modulo 'gi') - eso NO es
+    # instalable con pip (son bindings sobre libs C del sistema), tiene que
+    # venir de apt. Sin esto el dashboard nativo no tiene ningun backend
+    # disponible y falla al abrir ventana; --web sigue andando igual.
+    apt_packages="$apt_packages python3-gi python3-gi-cairo gir1.2-gtk-3.0"
+    # El nombre del paquete GIR de WebKit2 cambio entre versiones de Debian/
+    # Ubuntu (4.0 en releases mas viejos, 4.1 en Kali/Debian actual) - un
+    # nombre que no exista rompe TODO el apt-get install de abajo (falla en
+    # bloque), asi que se elige el que realmente existe en este repo apt en
+    # vez de asumir uno fijo.
+    local webkit_gir_pkg=""
+    for cand in gir1.2-webkit2-4.1 gir1.2-webkit2-4.0; do
+        if apt-cache show "$cand" >/dev/null 2>&1; then
+            webkit_gir_pkg="$cand"
+            break
+        fi
+    done
+    if [ -n "$webkit_gir_pkg" ]; then
+        apt_packages="$apt_packages $webkit_gir_pkg"
+    else
+        warn "Ningun paquete gir1.2-webkit2-4.x disponible en este repo apt - el dashboard nativo puede no tener backend WebKit. Usa --web como alternativa."
+    fi
     # shellcheck disable=SC2086  # $apt_packages es una lista de paquetes a proposito
     if ! timeout 1800 $SUDO apt-get install -y --no-install-recommends $apt_packages; then
         err "apt-get install fallo o se paso de 30 minutos."
@@ -474,7 +497,21 @@ install_debian_like() {
     fi
 
     log "Paso 2/5: venv de Python (Linux) - motor + dashboard"
-    ensure_venv || exit 1
+    # --system-site-packages: sin esto el venv queda aislado de python3-gi
+    # (recien instalado por apt arriba) y el dashboard nativo no puede
+    # importar 'gi' desde adentro del venv aunque este instalado en el
+    # sistema - confirmado en vivo (ImportError: No module named 'gi').
+    # PyGObject no es pip-installable de forma confiable (necesita headers
+    # de GTK/glib para compilar), asi que heredar del sistema es el camino
+    # real, no un pip install mas. Un venv de una corrida anterior de
+    # install.sh (antes de este fix) no tiene esa flag y nunca la va a
+    # tener sin recrearlo - detectado y recreado aca, igual que el camino
+    # de Termux ya hace para --system-site-packages.
+    if [ -d "$VENV_DIR" ] && ! grep -q 'include-system-site-packages = true' "$VENV_DIR/pyvenv.cfg" 2>/dev/null; then
+        warn "El venv existente no tiene --system-site-packages - recreandolo para que el dashboard nativo vea python3-gi del sistema."
+        rm -rf "$VENV_DIR"
+    fi
+    ensure_venv --system-site-packages || exit 1
     if ! run_pip_install 1200 -r requirements.txt; then
         deactivate
         exit 1
