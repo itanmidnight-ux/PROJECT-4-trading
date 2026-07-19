@@ -52,6 +52,23 @@ DASHBOARD_PORT="9000"
 log()  { printf '\033[1;36m[run]\033[0m %s\n' "$*"; }
 err()  { printf '\033[1;31m[run][error]\033[0m %s\n' "$*" >&2; }
 
+# dashboard.py picks its own port (see _find_free_port there): if
+# DASHBOARD_PORT (default 9000, what we ASK it to try first) is already
+# taken - e.g. by a leftover process from a previous crashed/root-owned
+# run, exactly what broke here before - it silently moves to the next free
+# one and records the REAL port in data/run/dashboard.port. Every place
+# below that displays or health-checks the dashboard reads that file fresh
+# (not a cached variable) so it never points at a stale/wrong port; falls
+# back to the requested default if the dashboard hasn't started yet.
+dashboard_port() {
+    local p
+    p="$(cat "$RUN_DIR/dashboard.port" 2>/dev/null)"
+    case "$p" in
+        ''|*[!0-9]*) echo "$DASHBOARD_PORT" ;;
+        *) echo "$p" ;;
+    esac
+}
+
 # ------------------------------------------------------- platform detection
 # Same detection install.sh uses (duplicated on purpose, not sourced from
 # there - each script stays runnable on its own). See install.sh for the
@@ -502,17 +519,17 @@ cmd_doctor() {
         warn_msg "bridge no responde en 127.0.0.1:5001 (normal si ./run.sh --start no esta corriendo, o si el bridge es remoto)"
     fi
 
-    if curl -fsS "http://${DASHBOARD_HOST}:${DASHBOARD_PORT}/api/status" >/dev/null 2>&1; then
+    if curl -fsS "http://${DASHBOARD_HOST}:$(dashboard_port)/api/status" >/dev/null 2>&1; then
         local status_json
-        status_json=$(curl -fsS "http://${DASHBOARD_HOST}:${DASHBOARD_PORT}/api/status" 2>/dev/null)
-        ok "dashboard corriendo en http://${DASHBOARD_HOST}:${DASHBOARD_PORT}"
+        status_json=$(curl -fsS "http://${DASHBOARD_HOST}:$(dashboard_port)/api/status" 2>/dev/null)
+        ok "dashboard corriendo en http://${DASHBOARD_HOST}:$(dashboard_port)"
         if echo "$status_json" | grep -q '"engine_running": *true'; then
             ok "motor de trading CORRIENDO (iniciado desde el dashboard)"
         else
             warn_msg "motor de trading detenido - iniciarlo desde el dashboard cuando estes listo"
         fi
     else
-        warn_msg "dashboard no responde en http://${DASHBOARD_HOST}:${DASHBOARD_PORT} (normal si ./run.sh --start no esta corriendo)"
+        warn_msg "dashboard no responde en http://${DASHBOARD_HOST}:$(dashboard_port) (normal si ./run.sh --start no esta corriendo)"
         if [ -f "$RUN_DIR/engine.pid" ] && kill -0 "$(cat "$RUN_DIR/engine.pid" 2>/dev/null)" 2>/dev/null; then
             warn_msg "hay un motor de trading corriendo (PID $(cat "$RUN_DIR/engine.pid")) pero el dashboard que lo controla no responde"
         fi
@@ -648,10 +665,10 @@ cmd_status() {
     fi
 
     # ---- dashboard + engine + account (via the dashboard's own API) ----
-    if curl -fsS "http://${DASHBOARD_HOST}:${DASHBOARD_PORT}/api/status" >/dev/null 2>&1; then
+    if curl -fsS "http://${DASHBOARD_HOST}:$(dashboard_port)/api/status" >/dev/null 2>&1; then
         local status_json
-        status_json=$(curl -fsS "http://${DASHBOARD_HOST}:${DASHBOARD_PORT}/api/status" 2>/dev/null)
-        row "Dashboard" "${GREEN}●${RESET} activo -- http://${DASHBOARD_HOST}:${DASHBOARD_PORT}"
+        status_json=$(curl -fsS "http://${DASHBOARD_HOST}:$(dashboard_port)/api/status" 2>/dev/null)
+        row "Dashboard" "${GREEN}●${RESET} activo -- http://${DASHBOARD_HOST}:$(dashboard_port)"
 
         if echo "$status_json" | grep -q '"engine_running": *true'; then
             local mode paused
@@ -686,8 +703,8 @@ cmd_status() {
     printf "%b" "$RESET"
     echo "  ./run.sh --stop        detener todo (motor + dashboard + bridge)"
     echo "  ./run.sh doctor        diagnostico completo"
-    if curl -fsS "http://${DASHBOARD_HOST}:${DASHBOARD_PORT}/api/status" >/dev/null 2>&1; then
-        echo "  Dashboard (control del bot): http://${DASHBOARD_HOST}:${DASHBOARD_PORT}"
+    if curl -fsS "http://${DASHBOARD_HOST}:$(dashboard_port)/api/status" >/dev/null 2>&1; then
+        echo "  Dashboard (control del bot): http://${DASHBOARD_HOST}:$(dashboard_port)"
     fi
     printf "%b" "$BOLD"
     echo "========================================================"
@@ -736,7 +753,7 @@ cmd_start() {
 
     if kill -0 "$(cat "$RUN_DIR/supervisor.pid" 2>/dev/null)" 2>/dev/null; then
         log "Arrancado. PID del supervisor: $(cat "$RUN_DIR/supervisor.pid")"
-        log "Dashboard: http://${DASHBOARD_HOST}:${DASHBOARD_PORT} -- iniciá el motor desde ahí cuando estés listo."
+        log "Dashboard: http://${DASHBOARD_HOST}:$(dashboard_port) -- iniciá el motor desde ahí cuando estés listo."
         log "Corré ./run.sh --status en unos segundos para confirmar que todo esta arriba."
     else
         err "El supervisor no siguio corriendo. Revisa $LOG_DIR/run.log"
