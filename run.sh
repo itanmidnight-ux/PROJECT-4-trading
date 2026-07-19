@@ -724,7 +724,12 @@ cmd_start() {
     fi
 
     log "Arrancando el servidor (bridge + dashboard) en segundo plano..."
-    RUN_SH_FOREGROUND=1 nohup "$0" --start >>"$LOG_DIR/run.log" 2>&1 &
+    # $0 en vez de una ruta absoluta rompe aca si el script se invoco sin
+    # "./" (ej. `bash run.sh --start`) o via un symlink/PATH lookup: $0 queda
+    # como "run.sh" a secas y nohup lo busca en $PATH en vez de en
+    # PROJECT_ROOT, fallando con "No existe el fichero o el directorio".
+    # PROJECT_ROOT/run.sh es siempre valido, sin importar como se llamo.
+    RUN_SH_FOREGROUND=1 nohup "$PROJECT_ROOT/run.sh" --start >>"$LOG_DIR/run.log" 2>&1 &
     disown
     echo $! > "$RUN_DIR/supervisor.pid"
     sleep 2
