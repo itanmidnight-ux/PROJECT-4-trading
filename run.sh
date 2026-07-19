@@ -41,6 +41,16 @@ set -uo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_ROOT" || exit 1
 
+# Corriendo como root deja archivos/procesos root-owned que el usuario normal
+# despues no puede tocar (permisos denegados en data/logs, data/run, puertos
+# que un supervisor root retiene para siempre) - un lio real, reproducido en
+# vivo. Nada aca necesita privilegios de root (install.sh es el unico que
+# los pide, solo para apt).
+if [ "$(id -u)" -eq 0 ]; then
+    printf '\033[1;31m[run][error]\033[0m %s\n' "No corras run.sh como root (ni con sudo) - deja archivos y procesos root-owned que despues bloquean al usuario normal. Corre como tu usuario normal: ./run.sh ${1:-}" >&2
+    exit 1
+fi
+
 VENV_DIR="$PROJECT_ROOT/.venv"
 WINEPREFIX_DIR="$PROJECT_ROOT/.wine"
 LOG_DIR="$PROJECT_ROOT/data/logs"
