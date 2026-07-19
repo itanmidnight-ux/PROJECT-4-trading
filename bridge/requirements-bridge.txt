@@ -1,5 +1,12 @@
 # Wine side ONLY. Installed by install.sh using the Windows python.exe
 # running inside the Wine prefix (MetaTrader5 package needs the real
 # Windows terminal DLLs, it cannot run under native Linux python).
+#
+# numpy pinned <2: numpy>=2 uses complex-math intrinsics (e.g. crealf) that
+# Wine's ucrtbase.dll does not implement, so `import MetaTrader5` (which
+# pulls numpy transitively) crashes under Wine with "unimplemented function
+# ucrtbase.dll.crealf" - confirmed live on wine-10.0. numpy 1.26.4 does not
+# hit this path.
+numpy==1.26.4
 MetaTrader5==5.0.45
 Flask==3.0.3
