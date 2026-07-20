@@ -14,6 +14,7 @@ from core.signals import (
     CompositeStrategy,
     CooldownGate,
     DirectionalCandleStrategy,
+    M15TrendStrategy,
     MomentumCrossStrategy,
     RsiHysteresisStrategy,
     SessionOpenStrategy,
@@ -355,6 +356,145 @@ def test_asian_breakout_range_persists_across_incremental_calls():
 
     assert s._range_high == 101.0
     assert s._range_low == 99.0
+
+
+# -------------------------------------------------------------- M15Trend
+def m15_strategy(**kwargs) -> M15TrendStrategy:
+    defaults = {"cooldown_bars": 2, "max_spread_price": 0.5, "min_atr_price": 0.05,
+                "sl_atr_multiple": 2.0, "min_body_range_ratio": 0.1}
+    defaults.update(kwargs)
+    return M15TrendStrategy(**defaults)
+
+
+def _m15_block_start(anchor: int = BASE_TIME) -> int:
+    return anchor - (anchor % (15 * 60))
+
+
+def _m1_rows_for_block(block_start: int, opens_closes: list[tuple[float, float]]) -> list[dict]:
+    """Exactly 15 (open, close) pairs -> the 15 M1 bars of one M15 block,
+    clock-aligned to block_start so resample_m1_to_tf buckets them together."""
+    assert len(opens_closes) == 15
+    rows = []
+    t = block_start
+    for o, c in opens_closes:
+        rows.append({"time": t, "open": o, "high": max(o, c) + 0.02, "low": min(o, c) - 0.02, "close": c})
+        t += 60
+    return rows
+
+
+def _bullish_block_rows(block_start: int) -> list[dict]:
+    closes = [100.0 + (i + 1) * 0.1 for i in range(15)]  # steady climb 100.1 -> 101.5
+    opens = [100.0] + closes[:-1]
+    return _m1_rows_for_block(block_start, list(zip(opens, closes, strict=True)))
+
+
+def _bearish_block_rows(block_start: int) -> list[dict]:
+    closes = [100.0 - (i + 1) * 0.1 for i in range(15)]  # steady drop 99.9 -> 98.5
+    opens = [100.0] + closes[:-1]
+    return _m1_rows_for_block(block_start, list(zip(opens, closes, strict=True)))
+
+
+def _doji_block_rows(block_start: int) -> list[dict]:
+    # Wide intrabar swing (high~100.52, low~99.48) but the block's own
+    # open (100.0, first bar's open) and close (100.005, last bar's close)
+    # end up almost identical - a real doji, tiny body vs a wide range.
+    closes = [100.5, 99.5] + [100.0] * 12 + [100.005]
+    opens = [100.0] + closes[:-1]
+    return _m1_rows_for_block(block_start, list(zip(opens, closes, strict=True)))
+
+
+def test_m15_trend_fires_buy_on_bullish_closed_m15_candle():
+    s = m15_strategy()
+    block_start = _m15_block_start()
+    df = pd.DataFrame(_bullish_block_rows(block_start))  # exactly 15 bars: block closes exactly on the last one
+    ind = flat_ind(len(df), atr=0.3)
+    sig = s.check(df, ind, spread_price=0.2)
+    assert sig.side == "BUY"
+    assert sig.sl_distance_price == 0.3 * 2.0
+    assert "m15_trend" in sig.reason
+
+
+def test_m15_trend_fires_sell_on_bearish_closed_m15_candle():
+    s = m15_strategy()
+    block_start = _m15_block_start()
+    df = pd.DataFrame(_bearish_block_rows(block_start))
+    ind = flat_ind(len(df), atr=0.3)
+    sig = s.check(df, ind, spread_price=0.2)
+    assert sig.side == "SELL"
+
+
+def test_m15_trend_no_signal_on_doji_m15_candle():
+    s = m15_strategy()
+    block_start = _m15_block_start()
+    df = pd.DataFrame(_doji_block_rows(block_start))
+    ind = flat_ind(len(df), atr=0.3)
+    sig = s.check(df, ind, spread_price=0.2)
+    assert sig.side is None
+    assert "doji" in sig.reason or "flat" in sig.reason
+
+
+def test_m15_trend_no_signal_with_no_closed_m15_block_yet():
+    s = m15_strategy()
+    block_start = _m15_block_start()
+    # Only 5 minutes into the current M15 block - nothing has closed yet.
+    df = pd.DataFrame(_bullish_block_rows(block_start)[:5])
+    ind = flat_ind(len(df), atr=0.3)
+    sig = s.check(df, ind, spread_price=0.2)
+    assert sig.side is None
+
+
+def test_m15_trend_does_not_repaint_on_the_still_forming_next_block():
+    """The last closed M15 block is bullish; a strongly bearish partial
+    NEXT block (still forming) must NOT flip or cancel the signal - only
+    fully closed M15 candles are ever read, same principle as Ronda 8's
+    M1 fix."""
+    s = m15_strategy()
+    block_start = _m15_block_start()
+    rows = _bullish_block_rows(block_start)  # closed block: bullish
+    # Append a few minutes of a sharply bearish NEXT block, still forming.
+    next_start = block_start + 15 * 60
+    t = next_start
+    price = 101.5
+    for _ in range(4):
+        rows.append({"time": t, "open": price, "high": price + 0.02, "low": price - 0.52,
+                      "close": price - 0.5})
+        price -= 0.5
+        t += 60
+    df = pd.DataFrame(rows)
+    ind = flat_ind(len(df), atr=0.3)
+    sig = s.check(df, ind, spread_price=0.2)
+    assert sig.side == "BUY"  # still reads the closed bullish block, ignores the forming bearish one
+
+
+def test_m15_trend_respects_cooldown():
+    s = m15_strategy()
+    s.on_trade_opened()
+    block_start = _m15_block_start()
+    df = pd.DataFrame(_bullish_block_rows(block_start))
+    ind = flat_ind(len(df), atr=0.3)
+    sig = s.check(df, ind, spread_price=0.2)
+    assert sig.side is None
+    assert sig.reason == "cooldown"
+
+
+def test_m15_trend_blocked_by_wide_spread():
+    s = m15_strategy()
+    block_start = _m15_block_start()
+    df = pd.DataFrame(_bullish_block_rows(block_start))
+    ind = flat_ind(len(df), atr=0.3)
+    sig = s.check(df, ind, spread_price=5.0)
+    assert sig.side is None
+    assert "spread" in sig.reason
+
+
+def test_m15_trend_blocked_by_low_volatility():
+    s = m15_strategy()
+    block_start = _m15_block_start()
+    df = pd.DataFrame(_bullish_block_rows(block_start))
+    ind = flat_ind(len(df), atr=0.01)  # below min_atr_price=0.05
+    sig = s.check(df, ind, spread_price=0.2)
+    assert sig.side is None
+    assert "volatility" in sig.reason
 
 
 # ------------------------------------------------------------- Composite

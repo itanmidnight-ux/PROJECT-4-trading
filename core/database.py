@@ -2,8 +2,9 @@
 queries the dashboard reads from."""
 from __future__ import annotations
 
+import os
 import sqlite3
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -96,6 +97,14 @@ class Database:
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.executescript(SCHEMA)
+        # bot_settings stores mt5_password in the clear (see api_save_settings
+        # in dashboard.py) - sqlite3.connect() creates the file at the
+        # process umask (typically 644, world-readable) unlike .env, which
+        # install.sh explicitly locks to 600. Matching that here so the
+        # password isn't more exposed just because it came from the
+        # Settings tab instead of install.sh's prompt.
+        with suppress(OSError):
+            os.chmod(self.db_path, 0o600)
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
