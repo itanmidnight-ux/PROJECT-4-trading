@@ -251,7 +251,7 @@ def load_settings() -> Settings:
         oanda_environment=os.getenv("OANDA_ENV", "practice").strip().lower(),
         symbol=os.getenv("SYMBOL", "XAUUSD"),
         timeframe=os.getenv("TIMEFRAME", "M1"),
-        risk_per_trade_usd=_float("RISK_PER_TRADE_USD", 3.0),  # see .env.example / README "Ronda 6" for why 3.0, not 1.0
+        risk_per_trade_usd=_float("RISK_PER_TRADE_USD", 6.0),  # see .env.example / README "Ronda 12" for why 6.0, not 3.0
         max_daily_loss_usd=_float("MAX_DAILY_LOSS_USD", 8.0),
         max_daily_drawdown_pct=_float("MAX_DAILY_DRAWDOWN_PCT", 20.0),
         max_trades_per_day=_int("MAX_TRADES_PER_DAY", 1000),

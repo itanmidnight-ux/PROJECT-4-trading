@@ -1153,6 +1153,59 @@ mas honesto disponible hoy; no se recomienda M1 para uso real sin mas
 validacion (mas historial, mas dias, ideal con tick data real de FBS en
 vez del proxy GC=F).
 
+**Ronda 12: se pidio explicitamente maximizar ganancia CON el maximo
+numero de trades/dia posible, en cualquier timeframe entre M1 y M15
+(el bridge MT5 real solo soporta M1, M5 o M15 - no hay M3/M10 del
+broker). Se conecto en vivo a la cuenta demo real de FBS para datos
+frescos y se corrio un barrido completo timeframe x RISK_PER_TRADE_USD
+con split TRAIN/TEST 60/40 sobre datos reales de cada timeframe** (M1:
+7839 velas/7 dias: GC=F; M5: 13507 velas/73.7 dias; M15: 4486 velas/73.5
+dias), delegado a un agente con verificacion cruzada propia despues (dos
+metodos de backtest independientes con el mismo resultado, mas 1-2
+corridas de control directas contra `core/backtest.py` sin modificar).
+
+| Timeframe | Mejor risk encontrado | TRAIN PnL / dd | TEST PnL / dd | Trades/dia (TEST) |
+|---|---|---|---|---|
+| **M1** | **6** | +$3.31 / 28.4% | **+$22.52** / 11.9% | **~32** |
+| M5 | ninguno estable | siempre negativo o dd 74-95% | igual | 0.1-5.75 |
+| M15 | 20 (no confiable) | +$9.55 / 0% (11 trades) | +$10.91 / 0% (12 trades) | 0.43 |
+
+**M1 gana, claro y sin ambiguedad.** Es el unico timeframe con PnL
+positivo y drawdown controlado en AMBAS mitades para un rango entero de
+valores de riesgo (5, 6, 7 - no un solo punto de suerte). Dentro de M1,
+`RISK_PER_TRADE_USD=6` supera al `3.0` que traia el proyecto desde la
+Ronda 6 (que nunca fue una afirmacion de rentabilidad, solo "el piso
+donde el bot opera en absoluto"): TEST +$22.52 con 11.9% de drawdown,
+~30-32 trades/dia en ambas mitades. En `RISK_PER_TRADE_USD=8` el sistema
+se rompe (TRAIN -$5.89, 47.5% drawdown) - ese es el borde real medido,
+no una suposicion.
+
+M5 no tiene ningun punto bueno: por debajo de risk=7 no opera (el ATR en
+dolares de M5 es demasiado alto para el lote minimo al riesgo bajo, mismo
+mecanismo que ya freno a M15 en risk bajo), y apenas empieza a operar el
+drawdown se dispara a 74-95% con PnL mayormente negativo en ambas
+mitades - no es falta de barrido, es un resultado genuinamente negativo.
+M15 solo tiene un punto limpio en risk=20, pero con 11-12 operaciones por
+mitad es una muestra demasiado chica para confiar (exactamente el "piso
+de diagnostico" ya descartado en la Ronda 10) - un escalon mas arriba
+(risk=25) el TEST colapsa a -$57.40 con 113.2% de drawdown, confirmando
+que es un filo de navaja, no una zona estable. La frecuencia estructural
+tambien juega en contra de M5/M15: menos velas/dia que M1 (5x y 15x menos
+respectivamente) significa estructuralmente menos oportunidades/dia, sin
+importar que tan bien calibrado este el riesgo.
+
+Se probo ademas si `tick_volume` (dato real que el bridge MT5 ya entrega
+en cada vela, sin necesidad de librerias externas) ayuda como filtro de
+entrada - el prototipo mostro mejora en una muestra de 8 horas reales de
+la cuenta demo, pero es una muestra demasiado chica (1-14 operaciones)
+para ser una conclusion; se necesitan varios dias de datos reales con
+volumen antes de decidir sobre esto.
+
+**`RISK_PER_TRADE_USD` default paso de `3.0` a `6.0`** (ver `.env.example`
+y `core/config.py`) como consecuencia directa de este hallazgo, y se
+aplico tambien a la cuenta demo conectada (DRY_RUN sigue en `true`, sin
+riesgo real).
+
 ## Credenciales
 
 Nunca van al repositorio. `install.sh` las guarda en `.env` (con permisos
