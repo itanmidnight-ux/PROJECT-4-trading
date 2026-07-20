@@ -231,6 +231,10 @@ class Settings:
     strat_ma_grid_entry_wait_bars: int = 2
     strat_ma_grid_rsi_overbought: float = 70.0
     strat_ma_grid_rsi_oversold: float = 30.0
+    # 20.0 = the honestly-measured risk-reducing value from README "Ronda
+    # 11" (5-6x smaller loss/drawdown on real M1 data), NOT a value proven
+    # to make this signal profitable - see MACrossGridStrategy's docstring.
+    strat_ma_grid_min_adx: float = 20.0
 
 
 def load_settings() -> Settings:
@@ -308,6 +312,7 @@ def load_settings() -> Settings:
         strat_ma_grid_entry_wait_bars=_int("STRAT_MA_GRID_ENTRY_WAIT_BARS", 2),
         strat_ma_grid_rsi_overbought=_float("STRAT_MA_GRID_RSI_OVERBOUGHT", 70.0),
         strat_ma_grid_rsi_oversold=_float("STRAT_MA_GRID_RSI_OVERSOLD", 30.0),
+        strat_ma_grid_min_adx=_float("STRAT_MA_GRID_MIN_ADX", 20.0),
     )
 
 
