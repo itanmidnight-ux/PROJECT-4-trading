@@ -986,6 +986,120 @@ activarla tal cual hoy, con la evidencia de este backtest, es priorizar
 frecuencia de trades a costa de perder la mayor parte de la cuenta, no
 una mejora real.
 
+**Ronda 10: se porto la logica de señal de un EA MQL5 pedido explicitamente
+("ScalpMaster Pro v1.0"), en M15 en vez de M1 - con un hallazgo de
+seguridad serio en el original y otro hallazgo estructural, ninguno de los
+dos negociable, encontrados ANTES de siquiera llegar al backtest.**
+
+*El hallazgo de seguridad (en el codigo fuente del EA, no en este repo).*
+El EA abre toda posicion con `Trade.Buy(lot, _Symbol, 0, 0, 0, ...)` - los
+parametros de stop-loss y take-profit van en `0`, es decir **la posicion
+se abre sin stop-loss real**. Su unica proteccion es un trailing stop que
+recien se activa despues de que el precio toca el primer nivel de un grid
+de 6 take-profits; si el precio nunca llega ahi y sigue en contra, la
+posicion queda expuesta sin limite. El pedido original afirmaba que un
+backtest adjunto (que nunca llego al mensaje - ni reporte, ni numeros, solo
+la afirmacion) le habia dado "ganancias realmente altas". Un backtest sin
+SL que se ve bien no es evidencia confiable de nada: solo significa que la
+ventana de tiempo usada no incluyo la cola de riesgo que el diseño deja
+abierta - el mismo sesgo de muestra ya documentado en este README (Ronda 1:
+5 dias que no alcanzaron a mostrar el bug que la Ronda 2, con mas dias,
+si mostro). Por eso **no se porto el SL=0**: `MACrossGridStrategy`
+(`core/signals.py`) porta la logica de señal (cruce SMA9/SMA26 confirmado
+un bar despues, espera fija de 2 velas, filtro RSI permisivo 70/30) pero
+siempre devuelve una distancia de stop real basada en ATR y pasa por el
+mismo `RiskManager` que toda otra señal de este proyecto - sin excepciones,
+igual que las 6 señales de las Rondas 4 y 9.
+
+*El hallazgo estructural (este si, nuevo de esta ronda).* El pedido era
+M15, no M1 - a diferencia de `M15TrendStrategy` (Ronda 9), que lee UNA
+vela M15 como contexto para entradas M1, esta señal opera directamente
+sobre velas M15 nativas (sin resample interno), igual que pide el EA
+original. Se descargaron 4486 velas M15 reales de oro COMEX
+(`scripts/fetch_market_data.py --interval 15m --range 60d`, 73.5 dias
+corridos, 2026-05-08 a 2026-07-20 UTC - mucho mas historial que los ~5-8
+dias que alcanzaba 1m) y se corrio el mismo split cronologico 60/40 de
+siempre (TRAIN 2691 velas / 45.2 dias, TEST 1795 velas / 28.2 dias). Con
+el `RISK_PER_TRADE_USD=3.0` que este proyecto ya tiene como default (Ronda
+6): **0 operaciones en TRAIN y 0 en TEST**, tanto para la reversion a la
+media sola como para el composite con `MACrossGridStrategy` activada. No
+es que la señal no dispare - es un problema de escala: el ATR tipico de
+una vela M15 de oro ronda los $9-10 (vs ~$0.3 en M1), asi que hasta el
+stop mas angosto de esta señal (`3xATR ~ $28`) ya arriesga, al lote minimo
+del broker (0.01), mas de lo que `RiskManager.MAX_RISK_OVERSHOOT_FACTOR`
+(1.5x) tolera sobre un presupuesto de $3 - la MISMA proteccion que evito
+que la Ronda 2 volara la cuenta, aca simplemente rechazando cada señal en
+vez de operar con riesgo real disparado. **En M15, con este tamaño de
+cuenta y el lote minimo del broker, el default actual del proyecto deja
+el bot inerte para CUALQUIER estrategia con SL basado en ATR, no solo esta
+- no es un bug de esta señal, es una consecuencia aritmetica de escalar
+de M1 a M15 sin subir tambien el presupuesto de riesgo.**
+
+Para poder leer la CALIDAD de la señal (no solo confirmar que esta inerte),
+se repitio el backtest con `RISK_PER_TRADE_USD=20` **unicamente como piso
+de diagnostico** - deja pasar el lote minimo en la mayoria de las velas M15,
+pero significa arriesgar ~40% de una cuenta de $50 en una sola operacion,
+algo que este README no recomienda ni recomendaria nunca como default real:
+
+| Tramo | Estrategia | Trades | Trades/dia (dias reales) | Win rate | PnL | $/dia | Drawdown max |
+|---|---|---|---|---|---|---|---|
+| TRAIN (45.2 dias) | Solo reversion a la media | 11 | 0.24 | 100.0% | +$9.55 | +$0.21 | 0.0% |
+| TRAIN (45.2 dias) | + MACrossGridStrategy activada | 68 | 1.50 | 100.0% | +$58.79 | +$1.30 | 0.0% |
+| TEST (28.2 dias) | Solo reversion a la media | 12 | 0.43 | 100.0% | +$10.91 | +$0.39 | 0.0% |
+| TEST (28.2 dias) | + MACrossGridStrategy activada | 58 | 2.06 | 96.6% | +$3.85 | +$0.14 | **43.1%** |
+
+(Trades/dia calculado sobre los dias CALENDARIO reales que cubre cada CSV,
+no con la formula bars/1440 que imprime `scripts/run_backtest.py` por
+defecto - esa formula asume velas M1 y subestima brutalmente los dias de
+un dataset M15, exactamente el mismo tipo de error silencioso que la Ronda
+6 encontro con el apalancamiento.)
+
+**Lectura honesta, no la optimista:** en TRAIN, el composite con la señal
+nueva activada se ve espectacular - 68 operaciones, 100% de aciertos, 0%
+de drawdown. Pero en TEST, la MISMA configuracion tiene 2 perdidas y un
+drawdown de **43.1%** - y termina con MENOS ganancia total (+$3.85) que la
+reversion a la media SOLA en ese mismo tramo (+$10.91). Es exactamente el
+patron que este README ya señalo como no confiable en la Ronda 1 (5 dias
+que se veian bien) y en la Ronda 6 (`RISK_PER_TRADE_USD=5.0`: +$11.30 en
+test contra 54.9% de drawdown en train) - un resultado que luce perfecto
+en una mitad y se desestabiliza en la otra no es una ventaja real, es una
+muestra chica (68 operaciones en 45 dias) que no vio su propia cola de
+riesgo todavia. Sumale que el "0.24-0.43 trades/dia" de la reversion a la
+media sola en M15 confirma algo esperable por construccion: M15 tiene 15x
+menos barras por dia que M1, asi que CUALQUIER señal en M15 va a generar
+menos oportunidades/dia que en M1 solo por el cambio de escala temporal -
+no es comparable en frecuencia contra el baseline de M1 (14 trades,
+~2.94/dia, 85.7% ganadas, +$1.46, 7% drawdown, Ronda 9) sin tener en
+cuenta esa diferencia estructural de timeframe.
+
+**Por eso `STRAT_ENABLE_MA_GRID` queda en `false` por defecto**, con dos
+motivos independientes, cualquiera de los dos ya alcanzaria solo: (1) al
+`RISK_PER_TRADE_USD` real de este proyecto la señal no genera ninguna
+operacion en absoluto sobre M15 - activarla hoy, tal cual esta configurado
+el resto del bot, no cambia nada; y (2) incluso forzando un presupuesto de
+riesgo artificialmente alto solo para poder leer la calidad de la señal,
+el resultado es inestable entre TRAIN y TEST, con un drawdown de 43.1% en
+la mitad de prueba - el mismo perfil de "se ve bien hasta que no" que este
+proyecto ya rechazo como default en rondas anteriores. La clase, su ATR-SL
+agregado (la parte que si vale la pena conservar del EA original), su test
+suite (`tests/test_signals.py`) y su wireado en `build_strategy_from_settings`
+quedan en el codigo, documentados, para quien quiera experimentar con un
+`RISK_PER_TRADE_USD` mayor (sabiendo que implica arriesgar una fraccion
+grande de una cuenta chica por operacion) o con mas historial M15 antes de
+reconsiderar el default.
+
+*Nota tecnica adicional, para quien reactive esta señal junto con otras:*
+`CompositeStrategy` prueba primero la reversion a la media y, si esta
+dispara una señal pero `RiskManager` la rechaza por tamaño de lote (como
+puede pasar en M15 con su SL mas ancho, 4xATR), esa vela se pierde sin
+darle nunca la oportunidad a `MACrossGridStrategy` de disparar en el mismo
+bar - es el orden de prioridad ya documentado en `CompositeStrategy`
+(reversion a la media primero, siempre), no algo especifico de esta señal,
+pero vale tenerlo presente al leer los numeros de la tabla de arriba: el
+composite no aisla la señal nueva al 100%, la mide igual que las Rondas 4,
+7 y 9 midieron las suyas (reversion a la media + la señal, la primera que
+dispare gana).
+
 ## Credenciales
 
 Nunca van al repositorio. `install.sh` las guarda en `.env` (con permisos

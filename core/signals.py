@@ -471,6 +471,159 @@ class M15TrendStrategy(CooldownGate):
                           reason="m15_trend: last closed M15 candle bearish (close < open)")
 
 
+class MACrossGridStrategy(CooldownGate):
+    """Adapted from a user-submitted MQL5 EA ("ScalpMaster Pro v1.0"),
+    requested to be ported "as is" to M15. Its entry logic (ProcessBar's
+    STATE_IDLE/STATE_MA_CROSS/STATE_WAIT_EMA/STATE_IN_TRADE machine) is:
+    SMA(9) crossing SMA(26), confirmed one CLOSED bar later (never the
+    still-forming bar - same anti-repaint principle as `_ema_cross` above
+    and Ronda 8's M1 fix), then a fixed 2-bar wait before entering, with a
+    permissive RSI filter on the bar right before entry (blocks BUY only
+    if RSI >= 70, blocks SELL only if RSI <= 30 - rejects the extreme
+    case, doesn't gate anything else).
+
+    One thing from that EA was deliberately NOT ported, and this is the
+    important part: **its orders open with NO stop-loss at all** -
+    `Trade.Buy(lot, _Symbol, 0, 0, 0, ...)` passes 0 for both sl and tp: a
+    market order with zero risk protection. The only defense is a
+    trailing stop that activates AFTER price first reaches the first
+    level of a 6-level take-profit grid - if price never gets there and
+    keeps moving the wrong way instead, the position rides unprotected
+    with no limit. That is incompatible with core/risk_manager.py, which
+    needs a real SL *distance* up front to size a position against
+    RISK_PER_TRADE_USD in the first place, and it is exactly the failure
+    mode this project already found the hard way (README, "Ronda 2": a
+    position sized without a real dollar-risk cap wiped a demo account in
+    hours). A "backtest with high profits" run on a no-SL EA is not
+    trustworthy evidence on its own - it only means the sampled window
+    didn't happen to contain the one adverse move that would have
+    uncovered the missing floor; that is sample bias, not an edge. So,
+    same as every other strategy in this file: this class always returns
+    a real ATR-based SL distance and goes through the exact same
+    RiskManager path as mean-reversion - no exceptions.
+
+    Also simplified, and noted rather than silently dropped: the source
+    EA tracks an EMA(9)/EMA(26) cross during the 2-bar wait purely to
+    adjust WHEN a time-based exit starts counting - it does not gate or
+    trigger the entry itself. This project already measured a generic
+    pre-TP1 time-based exit (README "Ronda 8", `max_hold_bars`) and found
+    it does not help on real data in either direction tested, so that
+    EMA-driven timing nuance is not reimplemented as a separate mechanism
+    here - `--max-hold-bars` in scripts/run_backtest.py is already
+    available (off by default, per that finding) for anyone who wants to
+    experiment with time-based exits generally.
+
+    Timeframe: unlike M15TrendStrategy above (which deliberately reads
+    M15 CONTEXT into an M1-native entry via resample_m1_to_tf), this
+    class does no internal resampling - it trades at whatever native bar
+    granularity the `df`/`ind` it's given already are, matching the
+    source EA's own M15 ProcessBar cadence directly. That means it is
+    meant to be backtested against native M15 OHLC (see
+    scripts/fetch_market_data.py --interval 15m) and, if ever run live,
+    needs the engine's own TIMEFRAME=M15 (core/config.py) - core/engine.py
+    already fetches candles at whatever timeframe is configured, so no
+    special-casing is needed there, but note that running this alongside
+    the M1-tuned extras above at TIMEFRAME=M15 would change THEIR bar
+    meaning too (an informed tradeoff for whoever enables that
+    combination, not something this class works around).
+
+    State is deduplicated by the last CLOSED bar's timestamp (same
+    pattern as AsianRangeBreakoutStrategy's `_last_seen_bar_time` above)
+    so repeated polls within the same still-forming bar don't advance the
+    wait counter more than once per real bar close. If the 2-bar wait
+    completes but the entry is blocked (cooldown, spread, ATR, or RSI),
+    the setup is dropped rather than retried on a later bar - a missed
+    opportunity is simply missed, not queued.
+    """
+
+    def __init__(self, cooldown_bars: int, max_spread_price: float, min_atr_price: float,
+                 sl_atr_multiple: float = 3.0, ma_fast_period: int = 9, ma_slow_period: int = 26,
+                 entry_wait_bars: int = 2, rsi_overbought: float = 70.0, rsi_oversold: float = 30.0) -> None:
+        super().__init__(cooldown_bars)
+        self.max_spread_price = max_spread_price
+        self.min_atr_price = min_atr_price
+        self.sl_atr_multiple = sl_atr_multiple
+        self.ma_fast_period = ma_fast_period
+        self.ma_slow_period = ma_slow_period
+        self.entry_wait_bars = entry_wait_bars
+        self.rsi_overbought = rsi_overbought
+        self.rsi_oversold = rsi_oversold
+
+        self._last_seen_bar_time: Optional[int] = None
+        self._pending_side: Optional[Side] = None
+        self._bars_since_cross = 0
+
+    def _advance_state(self, df: pd.DataFrame) -> Optional[Side]:
+        """Called once per newly closed bar only (see check()'s dedup).
+        Returns the side to enter THIS bar if the wait just completed,
+        else None. A fresh MA cross always (re)arms the wait, even over an
+        already-pending one - matches the source EA's state machine,
+        where a new MA_CROSS event always resets STATE_MA_CROSS."""
+        sma_fast = df["close"].rolling(self.ma_fast_period).mean()
+        sma_slow = df["close"].rolling(self.ma_slow_period).mean()
+        if len(sma_fast) < 3 or pd.isna(sma_fast.iloc[-3]) or pd.isna(sma_slow.iloc[-3]):
+            return None
+
+        prev_fast, prev_slow = sma_fast.iloc[-3], sma_slow.iloc[-3]
+        last_fast, last_slow = sma_fast.iloc[-2], sma_slow.iloc[-2]
+
+        cross: Optional[Side] = None
+        if prev_fast < prev_slow and last_fast >= last_slow:
+            cross = "BUY"
+        elif prev_fast > prev_slow and last_fast <= last_slow:
+            cross = "SELL"
+
+        if cross is not None:
+            self._pending_side = cross
+            self._bars_since_cross = 0
+            return None
+
+        if self._pending_side is None:
+            return None
+
+        self._bars_since_cross += 1
+        if self._bars_since_cross == self.entry_wait_bars:
+            side = self._pending_side
+            self._pending_side = None
+            return side
+        return None
+
+    def check(self, df: pd.DataFrame, ind: pd.DataFrame, spread_price: float) -> SubSignal:
+        if len(df) < self.ma_slow_period + 5:
+            return SubSignal(side=None, reason="not enough history")
+
+        last_closed_time = int(df.iloc[-2]["time"])
+        fire_side: Optional[Side] = None
+        if last_closed_time != self._last_seen_bar_time:
+            self._last_seen_bar_time = last_closed_time
+            fire_side = self._advance_state(df)
+
+        if not self._cooled_down:
+            return SubSignal(side=None, reason="cooldown")
+        if spread_price > self.max_spread_price:
+            return SubSignal(side=None, reason="spread too wide")
+
+        last = ind.iloc[-1]
+        if pd.isna(last["atr"]) or last["atr"] < self.min_atr_price:
+            return SubSignal(side=None, reason="volatility too low")
+
+        if fire_side is None:
+            return SubSignal(side=None, reason="no ma_grid setup ready")
+
+        rsi_prev = ind.iloc[-2]["rsi"]  # RSI of the bar right before entry - source EA's RSI(1)
+        if pd.isna(rsi_prev):
+            return SubSignal(side=None, reason="rsi warming up")
+        if fire_side == "BUY" and rsi_prev >= self.rsi_overbought:
+            return SubSignal(side=None, reason=f"ma_grid: RSI overbought ({rsi_prev:.1f}), skipping BUY")
+        if fire_side == "SELL" and rsi_prev <= self.rsi_oversold:
+            return SubSignal(side=None, reason=f"ma_grid: RSI oversold ({rsi_prev:.1f}), skipping SELL")
+
+        sl_distance = last["atr"] * self.sl_atr_multiple
+        return SubSignal(side=fire_side, sl_distance_price=sl_distance,
+                          reason=f"ma_grid: SMA{self.ma_fast_period}/{self.ma_slow_period} cross "
+                                 f"+ {self.entry_wait_bars}-bar wait, RSI {rsi_prev:.1f}")
+
+
 class CompositeStrategy:
     """Orchestrates the validated mean-reversion strategy plus zero or more
     of the extra signals above, sharing one interface with plain
@@ -621,6 +774,16 @@ def build_strategy_from_settings(settings, value_per_point_per_lot: float) -> Co
             cooldown_bars=cooldown, max_spread_price=spread, min_atr_price=min_atr,
             sl_atr_multiple=settings.strat_m15_trend_sl_atr_multiple,
             min_body_range_ratio=settings.strat_m15_trend_min_body_range_ratio,
+        )))
+    if settings.strat_enable_ma_grid:
+        extra.append(("ma_grid", MACrossGridStrategy(
+            cooldown_bars=cooldown, max_spread_price=spread, min_atr_price=min_atr,
+            sl_atr_multiple=settings.strat_ma_grid_sl_atr_multiple,
+            ma_fast_period=settings.strat_ma_grid_fast_period,
+            ma_slow_period=settings.strat_ma_grid_slow_period,
+            entry_wait_bars=settings.strat_ma_grid_entry_wait_bars,
+            rsi_overbought=settings.strat_ma_grid_rsi_overbought,
+            rsi_oversold=settings.strat_ma_grid_rsi_oversold,
         )))
 
     return CompositeStrategy(

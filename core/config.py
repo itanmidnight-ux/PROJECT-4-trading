@@ -217,6 +217,21 @@ class Settings:
     strat_m15_trend_sl_atr_multiple: float = 2.0
     strat_m15_trend_min_body_range_ratio: float = 0.1
 
+    # Seventh extra signal - ported from a user-submitted MQL5 EA
+    # ("ScalpMaster Pro v1.0"), SMA(9)/SMA(26) cross + fixed 2-bar wait +
+    # permissive RSI(70/30) filter, WITH a real ATR-based stop-loss added
+    # (the original opens with SL=0 - see core/signals.py::MACrossGridStrategy
+    # docstring for why that was rejected). Meant for native M15 bars, not
+    # M1 - see README "Ronda 10" for the real backtest result on this
+    # dataset before flipping this to true.
+    strat_enable_ma_grid: bool = False
+    strat_ma_grid_sl_atr_multiple: float = 3.0
+    strat_ma_grid_fast_period: int = 9
+    strat_ma_grid_slow_period: int = 26
+    strat_ma_grid_entry_wait_bars: int = 2
+    strat_ma_grid_rsi_overbought: float = 70.0
+    strat_ma_grid_rsi_oversold: float = 30.0
+
 
 def load_settings() -> Settings:
     return Settings(
@@ -286,6 +301,13 @@ def load_settings() -> Settings:
         strat_asian_breakout_buffer_pct=_float("STRAT_ASIAN_BREAKOUT_BUFFER_PCT", 0.05),
         strat_m15_trend_sl_atr_multiple=_float("STRAT_M15_TREND_SL_ATR_MULTIPLE", 2.0),
         strat_m15_trend_min_body_range_ratio=_float("STRAT_M15_TREND_MIN_BODY_RANGE_RATIO", 0.1),
+        strat_enable_ma_grid=_bool("STRAT_ENABLE_MA_GRID", False),
+        strat_ma_grid_sl_atr_multiple=_float("STRAT_MA_GRID_SL_ATR_MULTIPLE", 3.0),
+        strat_ma_grid_fast_period=_int("STRAT_MA_GRID_FAST_PERIOD", 9),
+        strat_ma_grid_slow_period=_int("STRAT_MA_GRID_SLOW_PERIOD", 26),
+        strat_ma_grid_entry_wait_bars=_int("STRAT_MA_GRID_ENTRY_WAIT_BARS", 2),
+        strat_ma_grid_rsi_overbought=_float("STRAT_MA_GRID_RSI_OVERBOUGHT", 70.0),
+        strat_ma_grid_rsi_oversold=_float("STRAT_MA_GRID_RSI_OVERSOLD", 30.0),
     )
 
 

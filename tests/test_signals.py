@@ -15,6 +15,7 @@ from core.signals import (
     CooldownGate,
     DirectionalCandleStrategy,
     M15TrendStrategy,
+    MACrossGridStrategy,
     MomentumCrossStrategy,
     RsiHysteresisStrategy,
     SessionOpenStrategy,
@@ -495,6 +496,171 @@ def test_m15_trend_blocked_by_low_volatility():
     sig = s.check(df, ind, spread_price=0.2)
     assert sig.side is None
     assert "volatility" in sig.reason
+
+
+# ----------------------------------------------------------- MACrossGrid
+def ma_grid_strategy(**kwargs) -> MACrossGridStrategy:
+    defaults = {"cooldown_bars": 2, "max_spread_price": 0.5, "min_atr_price": 0.05,
+                "sl_atr_multiple": 3.0, "ma_fast_period": 9, "ma_slow_period": 26,
+                "entry_wait_bars": 2, "rsi_overbought": 70.0, "rsi_oversold": 30.0}
+    defaults.update(kwargs)
+    return MACrossGridStrategy(**defaults)
+
+
+def _ma_grid_closes(direction: str) -> list[float]:
+    """30 flat bars (lets SMA9/SMA26 both settle at exactly 100, so the
+    first comparison after this is a clean strict inequality, never a tie)
+    followed by a dip-then-recovery (BUY) or rally-then-pullback (SELL) -
+    the short SMA(9) window overreacts to the swing before the long
+    SMA(26) does, producing a real strict-less-than -> greater-or-equal
+    (or mirrored) transition, i.e. a genuine confirmed cross rather than
+    an artifact of two windows starting from an identical flat baseline.
+    Verified numerically: the confirmed cross always lands with the
+    SMA(9)/SMA(26) comparison flipping between index 48 (prev) and index
+    49 (last) of this 54-point series - see the call sites below for how
+    that maps to df length at each polling step."""
+    flat = [100.0] * 30
+    if direction == "BUY":
+        swing = [100.0 - 0.4 * i for i in range(1, 11)]  # dip to 96.0
+        recover = [swing[-1] + 0.5 * i for i in range(1, 15)]
+    else:
+        swing = [100.0 + 0.4 * i for i in range(1, 11)]  # rally to 104.0
+        recover = [swing[-1] - 0.5 * i for i in range(1, 15)]
+    return flat + swing + recover
+
+
+def _ma_grid_df(direction: str) -> pd.DataFrame:
+    return make_df(_ma_grid_closes(direction), step=900)  # step=900s -> M15-spaced timestamps
+
+
+def _drive_to_entry(s: MACrossGridStrategy, df: pd.DataFrame, rsi: float = 50.0):
+    """Feeds the strategy the three closed-bar steps a real MA cross + the
+    2-bar wait takes: (1) the bar the cross confirms on, (2) one bar of
+    waiting, (3) the bar the wait completes on - returns the final
+    (should-be-firing) SubSignal. Mirrors how check() gets called once per
+    newly closed bar in both live polling and the backtest loop."""
+    sig = None
+    for n_rows in (51, 52, 53):
+        ind = flat_ind(n_rows, atr=0.3, rsi=rsi)
+        sig = s.check(df.iloc[:n_rows], ind, spread_price=0.2)
+    return sig
+
+
+def test_ma_grid_fires_buy_after_confirmed_cross_and_two_bar_wait():
+    s = ma_grid_strategy()
+    df = _ma_grid_df("BUY")
+    sig = _drive_to_entry(s, df, rsi=50.0)
+    assert sig.side == "BUY"
+    assert sig.sl_distance_price == 0.3 * 3.0
+    assert "ma_grid" in sig.reason
+
+
+def test_ma_grid_fires_sell_after_confirmed_cross_and_two_bar_wait():
+    s = ma_grid_strategy()
+    df = _ma_grid_df("SELL")
+    sig = _drive_to_entry(s, df, rsi=50.0)
+    assert sig.side == "SELL"
+
+
+def test_ma_grid_does_not_fire_before_the_wait_completes():
+    s = ma_grid_strategy()
+    df = _ma_grid_df("BUY")
+    # Only the cross-confirming bar and one bar of the wait - one short of
+    # the required 2-bar wait.
+    sig = None
+    for n_rows in (51, 52):
+        ind = flat_ind(n_rows, atr=0.3, rsi=50.0)
+        sig = s.check(df.iloc[:n_rows], ind, spread_price=0.2)
+    assert sig.side is None
+
+
+def test_ma_grid_does_not_repaint_on_repeated_polls_of_the_same_forming_bar():
+    """Several polls with the SAME closed-bar count (only the still-forming
+    last row changes) must not advance the wait counter more than once per
+    real bar close and must not fire twice for the same setup - same
+    'closed bars only' principle Ronda 8 applied to M1."""
+    s = ma_grid_strategy()
+    df = _ma_grid_df("BUY")
+    ind51 = flat_ind(51, atr=0.3, rsi=50.0)
+    sig_a = s.check(df.iloc[:51], ind51, spread_price=0.2)
+    # Re-poll the exact same window (as if 2s passed with no new bar close).
+    sig_b = s.check(df.iloc[:51], ind51, spread_price=0.2)
+    assert sig_a.side is None and sig_b.side is None
+    assert s._bars_since_cross == 0  # not double-counted by the repeated poll
+
+    ind52 = flat_ind(52, atr=0.3, rsi=50.0)
+    s.check(df.iloc[:52], ind52, spread_price=0.2)
+    s.check(df.iloc[:52], ind52, spread_price=0.2)  # repeat poll, same closed bar
+    assert s._bars_since_cross == 1  # advanced once, not twice
+
+    sig_c = s.check(df.iloc[:53], flat_ind(53, atr=0.3, rsi=50.0), spread_price=0.2)
+    assert sig_c.side == "BUY"
+    # One more poll of the SAME window after firing: the setup was already
+    # consumed, so it must not fire again.
+    sig_d = s.check(df.iloc[:53], flat_ind(53, atr=0.3, rsi=50.0), spread_price=0.2)
+    assert sig_d.side is None
+
+
+def test_ma_grid_rsi_blocks_buy_when_overbought():
+    s = ma_grid_strategy()
+    df = _ma_grid_df("BUY")
+    sig = _drive_to_entry(s, df, rsi=75.0)  # >= 70 threshold
+    assert sig.side is None
+    assert "overbought" in sig.reason
+
+
+def test_ma_grid_rsi_blocks_sell_when_oversold():
+    s = ma_grid_strategy()
+    df = _ma_grid_df("SELL")
+    sig = _drive_to_entry(s, df, rsi=20.0)  # <= 30 threshold
+    assert sig.side is None
+    assert "oversold" in sig.reason
+
+
+def test_ma_grid_rsi_at_midpoint_does_not_block_either_side():
+    s = ma_grid_strategy()
+    df = _ma_grid_df("BUY")
+    sig = _drive_to_entry(s, df, rsi=50.0)
+    assert sig.side == "BUY"
+
+
+def test_ma_grid_respects_cooldown():
+    s = ma_grid_strategy()
+    s.on_trade_opened()
+    df = _ma_grid_df("BUY")
+    sig = _drive_to_entry(s, df, rsi=50.0)
+    assert sig.side is None
+    assert sig.reason == "cooldown"
+
+
+def test_ma_grid_blocked_by_wide_spread():
+    s = ma_grid_strategy()
+    df = _ma_grid_df("BUY")
+    sig = None
+    for n_rows in (51, 52, 53):
+        ind = flat_ind(n_rows, atr=0.3, rsi=50.0)
+        sig = s.check(df.iloc[:n_rows], ind, spread_price=5.0)
+    assert sig.side is None
+    assert "spread" in sig.reason
+
+
+def test_ma_grid_blocked_by_low_volatility():
+    s = ma_grid_strategy()
+    df = _ma_grid_df("BUY")
+    sig = None
+    for n_rows in (51, 52, 53):
+        ind = flat_ind(n_rows, atr=0.01, rsi=50.0)  # below min_atr_price=0.05
+        sig = s.check(df.iloc[:n_rows], ind, spread_price=0.2)
+    assert sig.side is None
+    assert "volatility" in sig.reason
+
+
+def test_ma_grid_not_enough_history():
+    s = ma_grid_strategy()
+    df = _ma_grid_df("BUY")
+    sig = s.check(df.iloc[:20], flat_ind(20, atr=0.3, rsi=50.0), spread_price=0.2)
+    assert sig.side is None
+    assert "history" in sig.reason
 
 
 # ------------------------------------------------------------- Composite
