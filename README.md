@@ -924,6 +924,68 @@ switch) sigue siendo tick a tick a proposito - proteger una posicion no
 puede esperar al cierre de vela. Test de regresion incluido: una señal
 que solo existe en la vela en formacion no abre nada.
 
+**Ronda 9: sexta señal extra pedida explicitamente para maximizar
+frecuencia de trades (contexto de tendencia M15), medida con la misma
+vara de siempre - y descartada por el mismo motivo que las Rondas 4 y
+7.** La idea: mirar la ULTIMA vela M15 ya CERRADA (resample de M1, nunca
+la vela M15 en formacion - mismo principio de "solo velas cerradas" que
+la Ronda 8 aplico a M1) y usar su cierre vs apertura como contexto
+direccional para M1 (`M15TrendStrategy` en `core/signals.py`, flag
+`STRAT_ENABLE_M15_TREND`). El pedido explicito era priorizar frecuencia
+sobre tamaño de ganancia por trade, aceptando ganancias chicas a cambio
+de mas operaciones - la pregunta que este backtest tenia que contestar es
+si esa frecuencia extra viene con perdida neta o no, sin repetir a
+ciegas el error ya documentado.
+
+Sobre los mismos 7 dias reales de oro COMEX 1m de `data/gold_history.csv`
+(6857 velas, ~4.8 dias), split train/test 60/40 cronologico, cada tramo
+corrido de forma independiente (balance $50 fresco en cada corrida, para
+que el tramo TEST no arranque ya con la cuenta reventada por TRAIN):
+
+| Tramo | Estrategia | Trades | Trades/dia | Win rate | PnL | Drawdown max | Balance final |
+|---|---|---|---|---|---|---|---|
+| Dataset completo | Solo reversion a la media (baseline) | 14 | ~2.94 | 85.7% | +$1.46 | 7.0% | $51.46 |
+| Dataset completo | + M15TrendStrategy activada | 144 | ~30.24 | 78.5% | **-$37.86** | **78.3%** | $12.14 |
+| TRAIN | Solo reversion a la media (baseline) | 4 | ~1.40 | 100.0% | +$2.65 | 0.0% | $52.65 |
+| TRAIN | + M15TrendStrategy activada | 144 | ~50.40 | 78.5% | **-$37.86** | **78.3%** | $12.14 |
+| TEST | Solo reversion a la media (baseline) | 10 | ~5.25 | 80.0% | -$1.33 | 7.4% | $48.67 |
+| TEST | + M15TrendStrategy activada | 69 | ~36.22 | 68.1% | **-$39.52** | **81.1%** | $10.48 |
+
+Tres cosas a notar, todas consistentes entre TRAIN y TEST (no es
+sobreajuste de un solo tramo, es el mismo patron en los dos):
+
+1. **Si cumple el objetivo pedido de frecuencia** - de ~1.4-5.25
+   trades/dia (reversion sola) a ~36-50 trades/dia con la señal activada,
+   con margen de sobra.
+2. **Pero el resultado en dolares es una perdida grande y consistente**,
+   no una mejora chica: -$37.86 en TRAIN y -$39.52 en TEST, con drawdown
+   de 78.3% y 81.1% respectivamente - practicamente la cuenta completa.
+   Los numeros del dataset completo coinciden exactamente con los de
+   TRAIN (144 trades, -$37.86) porque, dentro de una corrida continua, la
+   cuenta ya queda tan reducida al terminar el tramo TRAIN que el motor
+   deja de poder abrir posiciones nuevas durante el tramo TEST - el
+   mismo mecanismo de "cuenta muerta" que Ronda 7 ya diagnostico con el
+   "superscalping" al 76% de drawdown.
+3. **Es el mismo desbalance de siempre, ahora en una señal de tendencia
+   M15 en vez de M1**: un contexto de tendencia de 15 minutos leido de
+   forma tan simple (solo cierre vs apertura, sin EMA ni ADX, a proposito
+   para maximizar cuantas veces dispara) entra en el M1 sin ninguna
+   confirmacion adicional, y el stop-loss (2x ATR de M1 por defecto) es
+   proporcionalmente angosto frente al ruido real que esa entrada
+   encuentra - exactamente el mismo perfil de "muchas ganancias chicas,
+   pocas perdidas grandes que se comen todo" que las Rondas 4 y 7 ya
+   documentaron para otras seis señales.
+
+**Por eso `STRAT_ENABLE_M15_TREND` queda en `false` por defecto**, igual
+que las otras cinco señales extra. La señal, su test suite
+(`tests/test_signals.py`) y su wireado en `build_strategy_from_settings`
+quedan en el codigo, probados y documentados, para quien quiera
+experimentar con un stop mas ancho, un filtro de cuerpo/rango mas estricto
+u otra confirmacion adicional antes de reconsiderar el default - pero
+activarla tal cual hoy, con la evidencia de este backtest, es priorizar
+frecuencia de trades a costa de perder la mayor parte de la cuenta, no
+una mejora real.
+
 ## Credenciales
 
 Nunca van al repositorio. `install.sh` las guarda en `.env` (con permisos

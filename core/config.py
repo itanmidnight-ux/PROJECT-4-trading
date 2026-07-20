@@ -180,6 +180,11 @@ class Settings:
     strat_enable_directional_candle: bool = False
     strat_enable_session_open: bool = False
     strat_enable_asian_breakout: bool = False
+    # M15 trend context (last CLOSED M15 candle's close vs open) as an M1
+    # entry filter - user-requested, aimed at maximum trade FREQUENCY over
+    # per-trade size. See README "Ronda 9" for the real backtest result on
+    # this dataset before flipping this to true.
+    strat_enable_m15_trend: bool = False
 
     # Indicators shared by the extra signals above (RSI/ATR periods) -
     # deliberately separate from strat_rsi_period/strat_atr_period, which
@@ -208,6 +213,9 @@ class Settings:
     strat_asian_breakout_start_hour: int = 7
     strat_asian_breakout_end_hour: int = 10
     strat_asian_breakout_buffer_pct: float = 0.05
+
+    strat_m15_trend_sl_atr_multiple: float = 2.0
+    strat_m15_trend_min_body_range_ratio: float = 0.1
 
 
 def load_settings() -> Settings:
@@ -257,6 +265,7 @@ def load_settings() -> Settings:
         strat_enable_directional_candle=_bool("STRAT_ENABLE_DIRECTIONAL_CANDLE", False),
         strat_enable_session_open=_bool("STRAT_ENABLE_SESSION_OPEN", False),
         strat_enable_asian_breakout=_bool("STRAT_ENABLE_ASIAN_BREAKOUT", False),
+        strat_enable_m15_trend=_bool("STRAT_ENABLE_M15_TREND", False),
         strat_composite_rsi_period=_int("STRAT_COMPOSITE_RSI_PERIOD", 14),
         strat_composite_atr_period=_int("STRAT_COMPOSITE_ATR_PERIOD", 14),
         strat_momentum_sl_atr_multiple=_float("STRAT_MOMENTUM_SL_ATR_MULTIPLE", 2.0),
@@ -275,6 +284,8 @@ def load_settings() -> Settings:
         strat_asian_breakout_start_hour=_int("STRAT_ASIAN_BREAKOUT_START_HOUR", 7),
         strat_asian_breakout_end_hour=_int("STRAT_ASIAN_BREAKOUT_END_HOUR", 10),
         strat_asian_breakout_buffer_pct=_float("STRAT_ASIAN_BREAKOUT_BUFFER_PCT", 0.05),
+        strat_m15_trend_sl_atr_multiple=_float("STRAT_M15_TREND_SL_ATR_MULTIPLE", 2.0),
+        strat_m15_trend_min_body_range_ratio=_float("STRAT_M15_TREND_MIN_BODY_RANGE_RATIO", 0.1),
     )
 
 

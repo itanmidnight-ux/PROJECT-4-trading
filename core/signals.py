@@ -385,6 +385,92 @@ class AsianRangeBreakoutStrategy(CooldownGate):
         return SubSignal(side=None, reason="inside the Asian range")
 
 
+def _last_closed_m15_bar(df: pd.DataFrame) -> Optional[pd.Series]:
+    """Returns the most recent M15 OHLC bar that is FULLY closed - i.e. the
+    M1 window in `df` covers all 15 of its minutes - or None if there
+    isn't one yet. This is deliberately NOT "just take resample_m1_to_tf's
+    last row": that function aggregates whatever M1 bars happen to fall in
+    the current 15-minute bucket, closed or not, so its last row is very
+    often a PARTIAL M15 candle whose close keeps moving every time a new
+    M1 bar arrives - exactly the "repaint" Ronda 8 eliminated for M1
+    entries (a signal that appears and disappears mid-bar). Same principle
+    here, one timeframe band up: a bucket only counts once the M1 bar that
+    is its 15th minute (minute_in_block == 14) has itself closed.
+    """
+    if len(df) < 1:
+        return None
+    m15 = resample_m1_to_tf(df, 15)
+    if m15.empty:
+        return None
+
+    last_m1_time = int(df.iloc[-1]["time"])
+    minute_in_block = (last_m1_time % (15 * 60)) // 60
+    if minute_in_block == 14:
+        return m15.iloc[-1]  # the M1 bar we just got IS that bucket's last minute - it's closed
+    if len(m15) >= 2:
+        return m15.iloc[-2]  # current bucket still forming - fall back to the previous, closed one
+    return None
+
+
+class M15TrendStrategy(CooldownGate):
+    """Not adapted from the reference EA (see module docstring) - a
+    user-requested M15 context filter for M1 entries, added to chase raw
+    trade FREQUENCY over per-trade size (explicit tradeoff the user asked
+    for), while staying inside this project's one non-negotiable rule
+    (see core/strategy.py): every signal still gets a real, sized
+    stop-loss through the same RiskManager path as everything else here.
+
+    Logic: look at the last CLOSED M15 candle only (see
+    _last_closed_m15_bar - never the M15 bucket still being built from the
+    current M1 window, same "closed bars only" principle Ronda 8 already
+    applied to M1 entries). A bearish M15 close (close < open) is read as
+    a sell context, a bullish M15 close (close > open) as a buy context -
+    the simplest possible directional read on purpose, so it fires on
+    almost every M15 close that isn't flat, maximizing how often this
+    signal can contribute a trade. A small body-vs-range floor excludes
+    genuine doji/flat M15 candles, which carry no directional information
+    to hand to M1.
+
+    Because this reads M15 context but still enters on the current M1
+    bar's terms, it is a coarser, noisier read than the other M1-native
+    signals in this file - see README "Ronda 9" for whether it actually
+    helps net PnL on real data or just adds trades, the same honest test
+    every other signal here already went through.
+    """
+
+    def __init__(self, cooldown_bars: int, max_spread_price: float, min_atr_price: float,
+                 sl_atr_multiple: float = 2.0, min_body_range_ratio: float = 0.1) -> None:
+        super().__init__(cooldown_bars)
+        self.max_spread_price = max_spread_price
+        self.min_atr_price = min_atr_price
+        self.sl_atr_multiple = sl_atr_multiple
+        self.min_body_range_ratio = min_body_range_ratio
+
+    def check(self, df: pd.DataFrame, ind: pd.DataFrame, spread_price: float) -> SubSignal:
+        if not self._cooled_down:
+            return SubSignal(side=None, reason="cooldown")
+        if spread_price > self.max_spread_price:
+            return SubSignal(side=None, reason="spread too wide")
+        last = ind.iloc[-1]
+        if pd.isna(last["atr"]) or last["atr"] < self.min_atr_price:
+            return SubSignal(side=None, reason="volatility too low")
+
+        bar = _last_closed_m15_bar(df)
+        if bar is None:
+            return SubSignal(side=None, reason="not enough M15 history yet")
+
+        rng = bar["high"] - bar["low"]
+        body = bar["close"] - bar["open"]
+        if rng <= 0 or abs(body) < rng * self.min_body_range_ratio:
+            return SubSignal(side=None, reason="M15 candle too flat/doji")
+
+        if body > 0:
+            return SubSignal(side="BUY", sl_distance_price=last["atr"] * self.sl_atr_multiple,
+                              reason="m15_trend: last closed M15 candle bullish (close > open)")
+        return SubSignal(side="SELL", sl_distance_price=last["atr"] * self.sl_atr_multiple,
+                          reason="m15_trend: last closed M15 candle bearish (close < open)")
+
+
 class CompositeStrategy:
     """Orchestrates the validated mean-reversion strategy plus zero or more
     of the extra signals above, sharing one interface with plain
@@ -529,6 +615,12 @@ def build_strategy_from_settings(settings, value_per_point_per_lot: float) -> Co
             breakout_start_hour=settings.strat_asian_breakout_start_hour,
             breakout_end_hour=settings.strat_asian_breakout_end_hour,
             buffer_pct=settings.strat_asian_breakout_buffer_pct,
+        )))
+    if settings.strat_enable_m15_trend:
+        extra.append(("m15_trend", M15TrendStrategy(
+            cooldown_bars=cooldown, max_spread_price=spread, min_atr_price=min_atr,
+            sl_atr_multiple=settings.strat_m15_trend_sl_atr_multiple,
+            min_body_range_ratio=settings.strat_m15_trend_min_body_range_ratio,
         )))
 
     return CompositeStrategy(
