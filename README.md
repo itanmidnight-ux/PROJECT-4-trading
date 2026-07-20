@@ -1100,6 +1100,59 @@ composite no aisla la señal nueva al 100%, la mide igual que las Rondas 4,
 7 y 9 midieron las suyas (reversion a la media + la señal, la primera que
 dispare gana).
 
+**Ronda 11: se probo `MACrossGridStrategy` en M1 (timeframe nativo del bot,
+no M15 como la Ronda 10) sobre datos reales de la propia cuenta demo FBS
+conectada en vivo (login MT5 real, no solo el proxy GC=F de Yahoo) mas
+7839 velas M1 reales de GC=F (7 dias). El pedido explicito era pasarla a
+M1 y entender por que "llega a quiebra inmediata".** Diagnostico con
+numeros reales, aislando la señal (reversion a la media desactivada para
+medir solo esta):
+
+| Config | Trades | Win rate | PnL total | Drawdown max |
+|---|---|---|---|---|
+| Sin filtro ADX | 111 | 78.4% | **-$29.24** | 70.1% |
+
+Causa raiz encontrada (no "ruido" en abstracto - la matematica exacta):
+promedio de ganancia por operacion **+$0.14** (la primera pata chica del
+grid de TP) contra promedio de perdida **-$3.54** (el stop ATR completo) -
+una relacion riesgo/beneficio de ~25:1 en contra, que ni un 78% de acierto
+alcanza a compensar. La razon de fondo: un cruce de SMA(9)/SMA(26) es una
+señal de TENDENCIA, y en M1 la mayoria de esos cruces ocurren en tramos
+laterales/ruidosos (sin tendencia real), generando whipsaws - exactamente
+el perfil que este proyecto ya identifico como fatal en las Rondas 4 y 7
+(mas frecuencia sin mas calidad de señal = perdidas).
+
+Se probo agregar un filtro de fuerza de tendencia real: ADX(14) (ya
+calculado en `compute_indicators` para el lado de reversion a la media,
+solo reutilizado aqui) exigido por encima de un minimo antes de permitir
+la entrada. Barrido sobre las mismas 7839 velas, con validacion TRAIN/TEST
+(60/40 cronologico, misma disciplina de siempre):
+
+| ADX minimo | TRAIN trades | TRAIN PnL | TEST trades | TEST PnL | TEST drawdown |
+|---|---|---|---|---|---|
+| 0 (sin filtro) | 65 | +$0.02 | 46 | **-$29.26** | 62.1% |
+| 20 | 19 | +$7.53 | 10 | **-$5.27** | 13.5% |
+| 25 | 5 | +$3.11 | 2 | +$0.97 | 0.0% |
+
+**Veredicto honesto: el filtro ADX ayuda de verdad, pero no arregla M1 por
+completo.** En `ADX>=20` (el unico umbral con suficientes operaciones en
+TEST como para confiar en el numero, 10 trades) la perdida se reduce
+~5.5x y el drawdown ~4.6x - una mejora real y medida, no cosmetica - pero
+el resultado en TEST sigue siendo negativo. `ADX>=25` se ve rentable en
+ambas mitades, pero con 5 y 2 operaciones respectivamente es una muestra
+demasiado chica para distinguir de pura suerte - exactamente el tipo de
+sobreajuste que este proyecto rechaza reportar como si fuera una edge real.
+
+Se implemento el filtro como `min_adx` en `MACrossGridStrategy` (default
+de clase `0.0` = apagado, para no romper compatibilidad con quien ya
+usaba la clase) y `STRAT_MA_GRID_MIN_ADX=20.0` como default recomendado en
+`core/config.py` una vez que se active `STRAT_ENABLE_MA_GRID` (que sigue
+en `false` por defecto - esto no cambia esa decision). Si se quiere
+experimentar con esta señal en M1 real, `ADX>=20` es el punto de partida
+mas honesto disponible hoy; no se recomienda M1 para uso real sin mas
+validacion (mas historial, mas dias, ideal con tick data real de FBS en
+vez del proxy GC=F).
+
 ## Credenciales
 
 Nunca van al repositorio. `install.sh` las guarda en `.env` (con permisos

@@ -37,11 +37,13 @@ def make_df(closes: list[float], start_time: int = BASE_TIME, step: int = 60) ->
     return pd.DataFrame(rows)
 
 
-def flat_ind(n: int, atr: float = 0.3, rsi: float = 50.0) -> pd.DataFrame:
+def flat_ind(n: int, atr: float = 0.3, rsi: float = 50.0, adx: float = 50.0) -> pd.DataFrame:
     """A minimal hand-built indicator frame for strategies that only read
     specific columns - avoids depending on real Bollinger/EMA warm-up for
-    tests that aren't exercising that machinery."""
-    return pd.DataFrame({"atr": [atr] * n, "rsi": [rsi] * n,
+    tests that aren't exercising that machinery. adx defaults to 50.0 (well
+    above any min_adx used in tests) so it never blocks a caller that
+    doesn't care about it."""
+    return pd.DataFrame({"atr": [atr] * n, "rsi": [rsi] * n, "adx": [adx] * n,
                           "ema9": [0.0] * n, "ema21": [0.0] * n, "ema50": [0.0] * n})
 
 
@@ -661,6 +663,40 @@ def test_ma_grid_not_enough_history():
     sig = s.check(df.iloc[:20], flat_ind(20, atr=0.3, rsi=50.0), spread_price=0.2)
     assert sig.side is None
     assert "history" in sig.reason
+
+
+def test_ma_grid_min_adx_off_by_default_does_not_block():
+    """Class-level default is 0.0 (off) - see docstring/README Ronda 11 for
+    why config.py's recommended value (20.0) lives there instead."""
+    s = ma_grid_strategy()
+    assert s.min_adx == 0.0
+    df = _ma_grid_df("BUY")
+    sig = None
+    for n_rows in (51, 52, 53):
+        ind = flat_ind(n_rows, atr=0.3, rsi=50.0, adx=5.0)  # would block if the filter were on
+        sig = s.check(df.iloc[:n_rows], ind, spread_price=0.2)
+    assert sig.side == "BUY"
+
+
+def test_ma_grid_min_adx_blocks_entry_below_threshold():
+    s = ma_grid_strategy(min_adx=20.0)
+    df = _ma_grid_df("BUY")
+    sig = None
+    for n_rows in (51, 52, 53):
+        ind = flat_ind(n_rows, atr=0.3, rsi=50.0, adx=12.0)  # below min_adx=20
+        sig = s.check(df.iloc[:n_rows], ind, spread_price=0.2)
+    assert sig.side is None
+    assert "ADX" in sig.reason
+
+
+def test_ma_grid_min_adx_allows_entry_at_or_above_threshold():
+    s = ma_grid_strategy(min_adx=20.0)
+    df = _ma_grid_df("BUY")
+    sig = None
+    for n_rows in (51, 52, 53):
+        ind = flat_ind(n_rows, atr=0.3, rsi=50.0, adx=25.0)  # above min_adx=20
+        sig = s.check(df.iloc[:n_rows], ind, spread_price=0.2)
+    assert sig.side == "BUY"
 
 
 # ------------------------------------------------------------- Composite

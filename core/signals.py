@@ -531,14 +531,36 @@ class MACrossGridStrategy(CooldownGate):
     pattern as AsianRangeBreakoutStrategy's `_last_seen_bar_time` above)
     so repeated polls within the same still-forming bar don't advance the
     wait counter more than once per real bar close. If the 2-bar wait
-    completes but the entry is blocked (cooldown, spread, ATR, or RSI),
-    the setup is dropped rather than retried on a later bar - a missed
-    opportunity is simply missed, not queued.
+    completes but the entry is blocked (cooldown, spread, ATR, RSI, or
+    ADX), the setup is dropped rather than retried on a later bar - a
+    missed opportunity is simply missed, not queued.
+
+    min_adx (README "Ronda 11"): an SMA cross is a trend-FOLLOWING signal,
+    so it only means something when a real trend exists - on real M1
+    XAUUSD data this class fired 111 times in 5.4 days at 78.4% win rate
+    and still lost -$29.24 (avg win +$0.14 vs avg loss -$3.54: most fires
+    were during choppy/ranging bars where the "cross" was noise, not
+    trend, so a handful of full-ATR-stop losses wiped out a pile of tiny
+    grid-TP1 wins). ADX(14) (already computed by compute_indicators for
+    the mean-reversion side, reused here) measures trend STRENGTH - gating
+    entries on ADX >= min_adx cut both the loss and the drawdown by
+    roughly 5-6x on the same data (TEST half: -$29.26 -> -$5.27 at
+    min_adx=20, drawdown 62.1% -> 13.5%), a real, honestly-measured
+    improvement. It is NOT a full fix: at min_adx=20 (the only threshold
+    with an out-of-sample trade count large enough to trust, 10 TEST
+    trades) the result is still net negative on TEST; higher thresholds
+    "look" profitable both halves but on 2-5 trades each, too few to
+    distinguish from luck. 0.0 (off) is the class default so existing
+    callers/tests are unaffected; config.py's default once the parent
+    STRAT_ENABLE_MA_GRID flag is turned on is 20.0, chosen for that
+    honestly-measured risk reduction, not because it was shown to make
+    this signal profitable at M1.
     """
 
     def __init__(self, cooldown_bars: int, max_spread_price: float, min_atr_price: float,
                  sl_atr_multiple: float = 3.0, ma_fast_period: int = 9, ma_slow_period: int = 26,
-                 entry_wait_bars: int = 2, rsi_overbought: float = 70.0, rsi_oversold: float = 30.0) -> None:
+                 entry_wait_bars: int = 2, rsi_overbought: float = 70.0, rsi_oversold: float = 30.0,
+                 min_adx: float = 0.0) -> None:
         super().__init__(cooldown_bars)
         self.max_spread_price = max_spread_price
         self.min_atr_price = min_atr_price
@@ -548,6 +570,11 @@ class MACrossGridStrategy(CooldownGate):
         self.entry_wait_bars = entry_wait_bars
         self.rsi_overbought = rsi_overbought
         self.rsi_oversold = rsi_oversold
+        # 0.0 = off (backward-compatible default - see Ronda 11 in README
+        # for why this exists and why it is NOT on by default at the class
+        # level even though config.py's recommended value is 20.0 once
+        # explicitly enabled).
+        self.min_adx = min_adx
 
         self._last_seen_bar_time: Optional[int] = None
         self._pending_side: Optional[Side] = None
@@ -609,6 +636,11 @@ class MACrossGridStrategy(CooldownGate):
 
         if fire_side is None:
             return SubSignal(side=None, reason="no ma_grid setup ready")
+
+        if self.min_adx > 0:
+            adx = last["adx"]
+            if pd.isna(adx) or adx < self.min_adx:
+                return SubSignal(side=None, reason=f"ma_grid: ADX {adx:.1f} < {self.min_adx} (sin tendencia real, filtrado)")
 
         rsi_prev = ind.iloc[-2]["rsi"]  # RSI of the bar right before entry - source EA's RSI(1)
         if pd.isna(rsi_prev):
@@ -784,6 +816,7 @@ def build_strategy_from_settings(settings, value_per_point_per_lot: float) -> Co
             entry_wait_bars=settings.strat_ma_grid_entry_wait_bars,
             rsi_overbought=settings.strat_ma_grid_rsi_overbought,
             rsi_oversold=settings.strat_ma_grid_rsi_oversold,
+            min_adx=settings.strat_ma_grid_min_adx,
         )))
 
     return CompositeStrategy(
