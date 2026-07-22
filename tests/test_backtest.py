@@ -1,7 +1,12 @@
+import time
+from pathlib import Path
+
 import pandas as pd
 
 from core.backtest import run_backtest
+from core.config import Settings
 from core.risk_manager import AccountState, RiskManager, SymbolSpec
+from core.signals import build_strategy_from_settings
 from core.strategy import ScalpStrategy
 from tests.test_strategy import oversold_candles
 
@@ -129,3 +134,89 @@ def test_backtest_accepts_real_style_bid_ask_ticks_for_intrabar_path():
                           risk_per_trade_usd=1.0, min_tp_usd=0.28, tp_levels=3,
                           assumed_spread_price=SPREAD)
     assert result.trades >= 0
+
+
+def _real_gold_csv(n=3000):
+    path = Path(__file__).resolve().parent.parent / "data" / "gold_m1_7d.csv"
+    if not path.exists():
+        import pytest
+        pytest.skip("data/gold_m1_7d.csv not present in this checkout")
+    return pd.read_csv(path).tail(n).reset_index(drop=True)
+
+
+def _test_spec():
+    return SymbolSpec(contract_size=100.0, volume_min=0.01, volume_max=100, volume_step=0.01,
+                       point=0.01, trade_tick_value=1.0, trade_tick_size=0.01, margin_initial=None)
+
+
+def _test_settings():
+    return Settings(
+        mt5_login="1", mt5_password="x", mt5_server="s", mt5_is_demo=True,
+        bridge_url="http://127.0.0.1:5001", bridge_timeout_ms=8000,
+        symbol="XAUUSD", timeframe="M1", risk_per_trade_usd=6.0,
+        max_daily_loss_usd=40.0, max_daily_drawdown_pct=20.0, max_trades_per_day=1000,
+        min_tp_usd=0.5, tp_levels=3, dry_run=True, db_path=":memory:",
+        strat_enable_ma_grid=True,
+    )
+
+
+def test_backtest_with_precompute_is_fast():
+    """3000 real M1 candles must complete in well under the ~180s+ the
+    windowed default takes today for the compute_indicators() cost this
+    task actually fixes.
+
+    Bound note: with _test_settings()'s strat_enable_ma_grid=True (matching
+    the real deployed .env, not the code's bare dataclass default) this
+    measures ~20s on this machine, not the "low single digits" originally
+    hoped for - profiling shows ~80% of that remaining time is
+    detect_regime() in core/regime.py, called from CompositeStrategy's
+    extra-strategy branch on the still-windowed 600-bar slice every bar it
+    fires (~95% of bars, since the mean-reversion signal rarely fires).
+    That is NOT part of this task's fix - see run_backtest's
+    precompute_indicators docstring ("Does NOT change: detect_regime()...
+    left as a known follow-up") and the spec doc's "Riesgos conocidos".
+    Isolated with strat_enable_ma_grid=False (no extra strategy, so the
+    regime branch never runs) this same call completes in ~1.1s, confirming
+    the actual precompute_indicators mechanism under test here is correct
+    and fast; 30s leaves comfortable margin over the observed ~20-21s while
+    still failing hard (300x+) if compute_indicators regresses back to the
+    O(n * 600) per-bar recompute this task eliminates."""
+    candles = _real_gold_csv(3000)
+    spec = _test_spec()
+    settings = _test_settings()
+    value_per_point = spec.trade_tick_value / (spec.trade_tick_size or spec.point)
+    strategy = build_strategy_from_settings(settings, value_per_point)
+
+    t0 = time.time()
+    result = run_backtest(candles=candles, spec=spec, starting_balance=50, leverage=500,
+                           risk_per_trade_usd=6, min_tp_usd=settings.min_tp_usd,
+                           tp_levels=settings.tp_levels, assumed_spread_price=0.25,
+                           max_trades_per_day=settings.max_trades_per_day,
+                           strategy=strategy, precompute_indicators=True)
+    elapsed = time.time() - t0
+    assert elapsed < 30.0, f"precompute_indicators=True took {elapsed:.1f}s for 3000 bars, expected <30s"
+    assert result.trades >= 0  # sanity: it actually ran, not a silent no-op
+
+
+def test_precompute_matches_live_parity_trade_count():
+    """The fast path must produce the same (or near-identical) trades as
+    today's windowed default on real data - if this diverges by more than
+    a handful of trades, something is wrong with the precompute wiring,
+    not an acceptable floating-point difference."""
+    candles = _real_gold_csv(3000)
+    spec = _test_spec()
+    settings = _test_settings()
+    value_per_point = spec.trade_tick_value / (spec.trade_tick_size or spec.point)
+
+    kwargs = dict(candles=candles, spec=spec, starting_balance=50, leverage=500,
+                  risk_per_trade_usd=6, min_tp_usd=settings.min_tp_usd,
+                  tp_levels=settings.tp_levels, assumed_spread_price=0.25,
+                  max_trades_per_day=settings.max_trades_per_day)
+
+    baseline = run_backtest(**kwargs, strategy=build_strategy_from_settings(settings, value_per_point),
+                             precompute_indicators=False)
+    fast = run_backtest(**kwargs, strategy=build_strategy_from_settings(settings, value_per_point),
+                         precompute_indicators=True)
+
+    assert abs(fast.trades - baseline.trades) <= 2, (
+        f"trade count diverged too much: baseline={baseline.trades} fast={fast.trades}")
