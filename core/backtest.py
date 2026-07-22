@@ -79,12 +79,15 @@ def run_backtest(
     minutes. Mathematically safe for compute_indicators' rolling/ewm
     columns (ewm(adjust=False) is causal: value at i depends only on data
     <= i - verified with Codex, EMA50's memory of a seed 600 bars back is
-    ~1e-11, negligible). Does NOT change: detect_regime() (still
-    window-computed, ~11% of the original cost, left as a known follow-up
-    - see spec doc's "Riesgos conocidos"), or any extra strategy's own
-    internal M5/M15 resample logic (MACrossGridStrategy etc. still see the
-    same windowed `df` as before - this is what keeps this change free of
-    look-ahead risk on the resample-based strategies)."""
+    ~1e-11, negligible). When `strategy` has extra sub-strategies with the
+    regime filter enabled, also precomputes core/regime.py's
+    detect_regime() globally via detect_regime_series() (same O(n) vs
+    O(n * 600) argument - verified equivalent to the original windowed
+    detect_regime() by tests/test_regime.py's real-data divergence test).
+    Does NOT change any extra strategy's own internal M5/M15 resample logic
+    (MACrossGridStrategy etc. still see the same windowed `df` as before -
+    this is what keeps this change free of look-ahead risk on the
+    resample-based strategies)."""
     tick_size = spec.trade_tick_size or spec.point
     value_per_point_per_lot = spec.trade_tick_value / tick_size
     if strategy is None:
@@ -106,6 +109,11 @@ def run_backtest(
             precomputed_composite = compute_indicators(
                 candles, rsi_period=strategy._indicator_rsi_period,
                 atr_period=strategy._indicator_atr_period)
+        precomputed_regime_series = None
+        if extra and getattr(strategy, "_regime_filter_enabled", False):
+            from core.regime import detect_regime_series, Regime
+            regime_kwargs = getattr(strategy, "_regime_kwargs", {})
+            precomputed_regime_series = detect_regime_series(candles, **regime_kwargs)
 
     balance = starting_balance
     peak = starting_balance
@@ -245,9 +253,15 @@ def run_backtest(
                 mr_slice = precomputed_mr.iloc[max(0, i - 2): i + 1]
                 if precomputed_composite is not None:
                     composite_slice = precomputed_composite.iloc[max(0, i - 2): i + 1]
+                    regime_row = None
+                    if precomputed_regime_series is not None:
+                        r = precomputed_regime_series.iloc[i]
+                        from core.regime import Regime
+                        regime_row = Regime(name=r["name"], adx=float(r["adx"]), atr_ratio=float(r["atr_ratio"]), trend=r["trend"])
                     signal = strategy.generate_signal(window, assumed_spread_price, spec.volume_min,
                                                        precomputed_mr_indicators=mr_slice,
-                                                       precomputed_composite_indicators=composite_slice)
+                                                       precomputed_composite_indicators=composite_slice,
+                                                       precomputed_regime=regime_row)
                 elif hasattr(strategy, "_mean_reversion"):
                     signal = strategy.generate_signal(window, assumed_spread_price, spec.volume_min,
                                                        precomputed_mr_indicators=mr_slice)
