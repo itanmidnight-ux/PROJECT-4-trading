@@ -627,7 +627,9 @@ Change the `run_backtest(...)` call inside `api_backtest()` (currently lines 479
 Run: `./run.sh verify`
 Expected: `220 passed` (or more, with the new tests) `in ~90s`, plus the new `test_backtest_with_precompute_is_fast`/`test_precompute_matches_live_parity_trade_count` tests among them — note `test_precompute_matches_live_parity_trade_count` will add real time to the suite (it runs the slow baseline once); if this pushes total suite time uncomfortably high, that's expected and acceptable — it's exercising the actual old slow path once as a regression guard, not a bug.
 
-- [ ] **Step 6: Read-only smoke test against the live (already-running) dashboard**
+- [ ] **Step 6: Read-only smoke test against the worktree's throwaway dashboard**
+
+Start the throwaway dashboard per "Execution note" above if it isn't already running, then:
 
 ```bash
 PORT=$(cat data/run/dashboard.port)
@@ -637,7 +639,7 @@ time curl -s -X POST http://127.0.0.1:$PORT/api/backtest \
   | python3 -m json.tool
 ```
 
-Expected: responds in single-digit seconds (not minutes), `"ok": true`, with `trades`/`win_rate`/`total_pnl` fields populated. Do **not** retry this repeatedly against the live bridge if it's slow/fails — if it doesn't come back quickly, stop and re-check the CSV-based tests instead of hammering the live bridge (it shares the MT5 terminal with the live engine).
+This hits the real MT5 bridge (read-only, same bridge the live engine uses, `threaded=True` so concurrent requests are fine) through the worktree's own throwaway dashboard process — never the main checkout's live dashboard. Expected: responds in single-digit seconds (not minutes), `"ok": true`, with `trades`/`win_rate`/`total_pnl` fields populated. Do **not** retry this repeatedly if it's slow/fails — if it doesn't come back quickly, stop and re-check the CSV-based tests instead of hammering the shared bridge.
 
 - [ ] **Step 7: Commit the dashboard wiring**
 
@@ -647,6 +649,53 @@ git commit -m "fix: /api/backtest uses the fast precompute path (was 6+ min, now
 ```
 
 ---
+
+## Execution note: worktree + throwaway verification dashboard
+
+This plan executes in an isolated git worktree
+(`.worktrees/dashboard-backtesting-redesign`, branch
+`dashboard-backtesting-redesign`), not the main checkout — the main
+checkout has a LIVE dashboard/bridge/engine session running and
+`dashboard.py` unconditionally overwrites `data/run/dashboard.port` on
+every launch, so a second instance started from the same directory tree
+would corrupt the live session's port tracking (this happened once
+already this session). The worktree has its own `data/run/` (empty,
+created fresh — never shared with the main checkout), plus symlinked
+`.venv`/`.env`/`data/*.csv` and a **snapshot copy** (not a symlink) of
+`data/trades.db`, so a dashboard instance started from inside the
+worktree has real data and real bridge access, but can never write
+through to the live database or collide with the live session's files.
+
+**Every "read `data/run/dashboard.port`" / "against the live dashboard"
+step in Part 1 (Task 6) and Part 2 (Tasks 8-14) below means: from inside
+the worktree, start a throwaway `dashboard.py` instance first if one
+isn't already running there:**
+
+```bash
+cd .worktrees/dashboard-backtesting-redesign
+.venv/bin/python3 dashboard.py --web --host 127.0.0.1 --port 9100 > /tmp/worktree-dashboard.log 2>&1 &
+echo $! > /tmp/worktree-dashboard.pid
+timeout 20 bash -c 'until curl -sf http://127.0.0.1:9100/ >/dev/null 2>&1; do sleep 1; done'
+PORT=$(cat data/run/dashboard.port)  # confirms the actual bound port (9100 unless taken)
+```
+
+Leave it running across tasks within the same work session (don't
+restart it between every task — Python doesn't hot-reload code changes
+either way in this project, `debug=False, use_reloader=False`, so **kill
+and restart it after each task that changed `dashboard.py`/`core/*.py`**
+to pick up the new code before screenshotting/curling it:
+
+```bash
+kill "$(cat /tmp/worktree-dashboard.pid)" 2>/dev/null; sleep 1
+cd .worktrees/dashboard-backtesting-redesign && .venv/bin/python3 dashboard.py --web --host 127.0.0.1 --port 9100 > /tmp/worktree-dashboard.log 2>&1 &
+echo $! > /tmp/worktree-dashboard.pid
+timeout 20 bash -c 'until curl -sf http://127.0.0.1:9100/ >/dev/null 2>&1; do sleep 1; done'
+```
+
+At the end of the whole plan (Task 14), kill this throwaway process —
+it's isolated, safe to stop freely, and is **not** the live session
+(never run `./run.sh --stop` — that command must never be run from the
+worktree or the main checkout during this work).
 
 ## Part 2: Frontend — dashboard visual rebuild
 
