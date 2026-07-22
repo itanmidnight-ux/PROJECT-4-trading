@@ -750,7 +750,7 @@ class CompositeStrategy:
             return Signal(side=sub_signal.side, sl_distance_price=sl_distance, tp_levels=tp_levels,
                            reason=f"{name}: {sub_signal.reason}", vol_ratio=vol_ratio)
 
-        return self._mean_reversion.generate_signal(df, spread_price, lot_hint)
+        return mr_signal
 
 
 def build_strategy_from_settings(settings, value_per_point_per_lot: float) -> CompositeStrategy:
