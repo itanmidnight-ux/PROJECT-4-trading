@@ -72,6 +72,20 @@ class Settings:
 
     db_path: str
 
+    # Optional AI confirmation layer. It may only CONFIRM or VETO a signal
+    # already produced by the deterministic strategy; risk sizing, stops and
+    # circuit breakers remain outside its control.
+    ai_brain_enabled: bool = False
+    openrouter_api_key: str = ""
+    openrouter_model: str = "openrouter/free"
+    ai_brain_timeout_ms: int = 6000
+    ai_brain_max_calls_per_day: int = 40
+    ai_supervisor_enabled: bool = False
+    openrouter_supervisor_api_key: str = ""
+    openrouter_supervisor_model: str = "openrouter/free"
+    ai_supervisor_timeout_ms: int = 6000
+    ai_supervisor_max_calls_per_day: int = 24
+
     # How often the engine polls the bridge for a fresh price/candles and
     # re-checks open positions. Lower = reacts faster to price moves (matters
     # most for not giving back gains between TP levels), but every poll is a
@@ -93,7 +107,7 @@ class Settings:
     #       honest way to reach an FBS account).
     #   "oanda" - direct OANDA v20 REST (core/oanda.py): NO MetaTrader, no
     #       Wine, no bridge process anywhere - pure HTTPS, works the same
-    #       on Termux/Kali/Ubuntu. Needs the OANDA_* values below.
+    #       on any Linux install. Needs the OANDA_* values below.
     broker_kind: str = "mt5_bridge"
     oanda_api_token: str = ""
     oanda_account_id: str = ""
@@ -236,6 +250,26 @@ class Settings:
     # to make this signal profitable - see MACrossGridStrategy's docstring.
     strat_ma_grid_min_adx: float = 20.0
 
+    # Optional confluence/regime and bounded basket management. All are
+    # disabled by default; enabling them never bypasses RiskManager.
+    strat_enable_quantum_queen: bool = False
+    strat_quantum_primary: bool = False
+    strat_quantum_threshold: int = 2
+    strat_quantum_mask: int = 4095
+    regime_filter_enabled: bool = True
+    regime_adx_trend_threshold: float = 25.0
+    regime_atr_ratio_high: float = 1.35
+    regime_atr_ratio_low: float = 0.65
+    grid_enabled: bool = False
+    grid_max_positions: int = 3
+    grid_step_atr: float = 1.0
+    grid_lot_multiplier: float = 1.0
+    grid_max_lot: float = 0.09
+    recovery_enabled: bool = False
+    recovery_max_levels: int = 2
+    recovery_min_regime: str = "range"
+    dynamic_lot_cap: float = 0.09
+
 
 def load_settings() -> Settings:
     return Settings(
@@ -257,8 +291,21 @@ def load_settings() -> Settings:
         max_trades_per_day=_int("MAX_TRADES_PER_DAY", 1000),
         min_tp_usd=_float("MIN_TP_USD", 0.28),
         tp_levels=_int("TP_LEVELS", 5),  # see .env.example / README "Ronda 5" for why 5, not 3
+        # Keep the library fallback safe when called without a .env; the
+        # installer-created .env is explicitly DRY_RUN=false for this live
+        # deployment, while tests/synthetic runs pass their own Settings.
         dry_run=_bool("DRY_RUN", True),
         db_path=os.getenv("DASHBOARD_DB_PATH", "data/trades.db"),
+        ai_brain_enabled=_bool("AI_BRAIN_ENABLED", False),
+        openrouter_api_key=os.getenv("OPENROUTER_API_KEY", ""),
+        openrouter_model=os.getenv("OPENROUTER_MODEL", "openrouter/free").strip(),
+        ai_brain_timeout_ms=max(_int("AI_BRAIN_TIMEOUT_MS", 6000), 500),
+        ai_brain_max_calls_per_day=max(_int("AI_BRAIN_MAX_CALLS_PER_DAY", 40), 0),
+        ai_supervisor_enabled=_bool("AI_SUPERVISOR_ENABLED", False),
+        openrouter_supervisor_api_key=os.getenv("OPENROUTER_SUPERVISOR_API_KEY", ""),
+        openrouter_supervisor_model=os.getenv("OPENROUTER_SUPERVISOR_MODEL", "openrouter/free").strip(),
+        ai_supervisor_timeout_ms=max(_int("AI_SUPERVISOR_TIMEOUT_MS", 6000), 500),
+        ai_supervisor_max_calls_per_day=max(_int("AI_SUPERVISOR_MAX_CALLS_PER_DAY", 24), 0),
         snapshot_retention_days=_int("SNAPSHOT_RETENTION_DAYS", 30),
         strat_rsi_oversold=_float("STRAT_RSI_OVERSOLD", 25.0),
         strat_rsi_overbought=_float("STRAT_RSI_OVERBOUGHT", 75.0),
@@ -313,6 +360,23 @@ def load_settings() -> Settings:
         strat_ma_grid_rsi_overbought=_float("STRAT_MA_GRID_RSI_OVERBOUGHT", 70.0),
         strat_ma_grid_rsi_oversold=_float("STRAT_MA_GRID_RSI_OVERSOLD", 30.0),
         strat_ma_grid_min_adx=_float("STRAT_MA_GRID_MIN_ADX", 20.0),
+        strat_enable_quantum_queen=_bool("STRAT_ENABLE_QUANTUM_QUEEN", False),
+        strat_quantum_primary=_bool("STRAT_QUANTUM_PRIMARY", False),
+        strat_quantum_threshold=max(_int("STRAT_QUANTUM_THRESHOLD", 2), 1),
+        strat_quantum_mask=max(_int("STRAT_QUANTUM_MASK", 4095), 0),
+        regime_filter_enabled=_bool("REGIME_FILTER_ENABLED", True),
+        regime_adx_trend_threshold=_float("REGIME_ADX_TREND_THRESHOLD", 25.0),
+        regime_atr_ratio_high=_float("REGIME_ATR_RATIO_HIGH", 1.35),
+        regime_atr_ratio_low=_float("REGIME_ATR_RATIO_LOW", 0.65),
+        grid_enabled=_bool("GRID_ENABLED", False),
+        grid_max_positions=max(_int("GRID_MAX_POSITIONS", 3), 1),
+        grid_step_atr=max(_float("GRID_STEP_ATR", 1.0), 0.1),
+        grid_lot_multiplier=max(_float("GRID_LOT_MULTIPLIER", 1.0), 0.1),
+        grid_max_lot=min(max(_float("GRID_MAX_LOT", 0.09), 0.0), 0.09),
+        recovery_enabled=_bool("RECOVERY_ENABLED", False),
+        recovery_max_levels=max(_int("RECOVERY_MAX_LEVELS", 2), 0),
+        recovery_min_regime=os.getenv("RECOVERY_MIN_REGIME", "range").strip().lower(),
+        dynamic_lot_cap=min(max(_float("DYNAMIC_LOT_CAP", 0.09), 0.0), 0.09),
     )
 
 

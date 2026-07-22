@@ -35,9 +35,16 @@
     </div>
   </div>
 
+  <div class="live-strip" id="live-strip" role="status" aria-live="polite">
+    <div class="live-strip-copy"><span class="live-indicator loading" id="live-indicator"></span><span id="live-strip-text">Conectando con el dashboard…</span></div>
+    <div class="live-progress-wrap" aria-hidden="true"><span id="live-progress"></span></div>
+    <span class="live-strip-time" id="live-strip-time">—</span>
+  </div>
+
   <div class="tabs">
     <button class="tab-btn active" id="tab-btn-dashboard" data-tab="dashboard" type="button">Dashboard</button>
     <button class="tab-btn" id="tab-btn-settings" data-tab="settings" type="button">Settings</button>
+    <button class="tab-btn" id="tab-btn-backtest" data-tab="backtest" type="button">Backtesting MT5</button>
   </div>
 
   <div id="tab-dashboard" class="tab-panel active">
@@ -166,10 +173,31 @@
           </label>
         </div>
 
+        <h3>Cerebros OpenRouter</h3>
+        <div class="field-grid">
+          <label class="field">
+            <span class="field-label">Clave API 1 · filtro de señales</span>
+            <input type="password" id="set-openrouter-key" autocomplete="new-password" placeholder="•••••••• (sin cambios)">
+          </label>
+          <label class="field">
+            <span class="field-label">Clave API 2 · supervisor de cuenta</span>
+            <input type="password" id="set-supervisor-key" autocomplete="new-password" placeholder="•••••••• (sin cambios)">
+          </label>
+          <label class="field field-checkbox">
+            <input type="checkbox" id="set-ai-enabled">
+            <span>Activar filtro IA de señales</span>
+          </label>
+          <label class="field field-checkbox">
+            <input type="checkbox" id="set-supervisor-enabled">
+            <span>Activar supervisor IA de cuenta</span>
+          </label>
+        </div>
+
         <div class="settings-actions">
           <button type="submit" class="btn-primary">Guardar configuracion</button>
           <span id="settings-message" class="settings-message"></span>
         </div>
+        <div class="settings-note">Las claves se guardan sólo en <code>.env</code> con permisos privados. Nunca se muestran completas, nunca se guardan en SQLite y se aplican al reiniciar el motor.</div>
       </form>
 
       <div class="settings-note">
@@ -183,8 +211,34 @@
 
   </div>
 
+  <div id="tab-backtest" class="tab-panel">
+    <div class="panel">
+      <h2>Backtesting histórico MT5</h2>
+      <div class="panel-sub">Sólo lectura: descarga velas cerradas del bridge y no envía órdenes.</div>
+      <form id="backtest-form">
+        <div class="field-grid">
+          <label class="field"><span class="field-label">Símbolo</span><input id="bt-symbol" value="XAUUSD"></label>
+          <label class="field"><span class="field-label">Velas M1 (100–200000)</span><input type="number" min="100" max="200000" step="100" id="bt-bars" value="3000"></label>
+          <label class="field"><span class="field-label">Desde (opcional)</span><input type="date" id="bt-from"></label>
+          <label class="field"><span class="field-label">Hasta (opcional)</span><input type="date" id="bt-to"></label>
+          <label class="field"><span class="field-label">Capital de prueba (USD)</span><input type="number" min="1" step="0.01" id="bt-balance" value="50"></label>
+          <label class="field"><span class="field-label">Apalancamiento (1:X)</span><input type="number" min="1" step="1" id="bt-leverage" value="500"></label>
+          <label class="field"><span class="field-label">Riesgo por trade (USD)</span><input type="number" min="0.01" step="0.01" id="bt-risk" value="6"></label>
+          <label class="field"><span class="field-label">Spread asumido (precio)</span><input type="number" min="0" step="0.01" id="bt-spread" value="0.25"></label>
+          <label class="field"><span class="field-label">Time-stop (barras, 0=off)</span><input type="number" min="0" step="1" id="bt-hold" value="0"></label>
+          <label class="field field-checkbox"><input type="checkbox" id="bt-ticks"><span>Usar ticks históricos MT5 (hasta 100 por vela)</span></label>
+        </div>
+        <div class="settings-actions"><button type="submit" class="btn-primary" id="bt-run">Ejecutar backtest MT5</button><span id="bt-message" class="settings-message"></span></div>
+        <div class="task-progress" id="bt-progress" hidden><div class="task-progress-head"><span id="bt-progress-text">Consultando MT5…</span><span id="bt-progress-percent">En curso</span></div><div class="progress-track"><span id="bt-progress-bar"></span></div></div>
+      </form>
+      <div id="bt-results" class="backtest-results"></div>
+      <div class="settings-note">Con “ticks históricos” se descargan bid/ask reales de MT5 (limitados para no saturar el bridge) y se usan en la trayectoria intrabar. Sin esa opción, el modelo es OHLC conservador. Las señales se deciden sólo en velas M1 cerradas.</div>
+    </div>
+  </div>
+
 </div>
 <div class="tooltip" id="tooltip"></div>
+<div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
 <script src="app.js"></script>
 </body>
 </html>

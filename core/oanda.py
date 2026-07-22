@@ -3,7 +3,7 @@
 Why this exists: the MT5 route requires the real MT5 terminal running
 somewhere (under Wine on a Kali/Ubuntu machine - see bridge/). OANDA's
 v20 API is plain authenticated HTTPS + JSON, so this adapter runs
-identically on Termux, Kali, and Ubuntu with nothing but `requests` -
+identically on any Linux install with nothing but `requests` -
 no terminal, no Wine, no bridge process, no extra machine. Select it
 with BROKER_KIND=oanda in .env (plus OANDA_API_TOKEN/OANDA_ACCOUNT_ID
 from a free practice account at oanda.com).

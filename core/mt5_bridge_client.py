@@ -41,8 +41,8 @@ class Mt5BridgeClient:
     def __init__(self, base_url: str, timeout_ms: int = 8000, max_retries: int = 3,
                  auth_token: str = "") -> None:
         self.base_url = base_url.rstrip("/")
-        # (connect, read) instead of one number: over a phone's Wi-Fi to a
-        # remote bridge (the Termux setup), a DEAD bridge should be detected
+        # (connect, read) instead of one number: over a network link to a
+        # remote bridge, a DEAD bridge should be detected
         # by the connect phase in a few seconds, while a bridge that is
         # merely SLOW to answer (Wine under load) still gets the full
         # configured window to reply. One combined timeout can't do both -
@@ -166,6 +166,7 @@ class Mt5BridgeClient:
             volume_step=d["volume_step"],
             point=d["point"],
             trade_tick_value=d["trade_tick_value"],
+            trade_tick_size=d.get("trade_tick_size") or d["point"],
             margin_initial=d.get("margin_initial"),
         )
 
@@ -173,10 +174,26 @@ class Mt5BridgeClient:
         d = self._get(f"/price/{symbol}")
         return Tick(bid=d["bid"], ask=d["ask"], spread_price=d["spread_price"], time=d["time"])
 
-    def candles(self, symbol: str, timeframe: str = "M1", count: int = 200) -> pd.DataFrame:
-        d = self._get(f"/candles/{symbol}", timeframe=timeframe, count=count)
+    def candles(self, symbol: str, timeframe: str = "M1", count: int = 200,
+                start: int | None = None, end: int | None = None) -> pd.DataFrame:
+        params = {"timeframe": timeframe, "count": count}
+        if start is not None:
+            params["from"] = int(start)
+        if end is not None:
+            params["to"] = int(end)
+        d = self._get(f"/candles/{symbol}", **params)
         df = pd.DataFrame(d["candles"])
         return df
+
+    def ticks(self, symbol: str, count: int = 10000, start: int | None = None,
+              end: int | None = None) -> pd.DataFrame:
+        params = {"count": min(max(int(count), 1), 100000)}
+        if start is not None:
+            params["from"] = int(start)
+        if end is not None:
+            params["to"] = int(end)
+        d = self._get(f"/ticks/{symbol}", **params)
+        return pd.DataFrame(d["ticks"])
 
     def open_order(self, symbol: str, side: str, lot: float, sl_price: Optional[float] = None) -> dict:
         payload = {"symbol": symbol, "side": side, "lot": lot}

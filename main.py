@@ -76,7 +76,7 @@ def main() -> None:
         broker = SimulatedBroker(starting_balance=starting_balance, leverage=1, spec=spec)
     elif settings.broker_kind == "oanda":
         # Direct REST connection - no MT5 terminal, no Wine, no bridge
-        # process anywhere. Works identically on Termux/Kali/Ubuntu.
+        # process anywhere. Works identically on any Linux install.
         from core.oanda import OandaClient, OandaError
         if not settings.oanda_api_token or not settings.oanda_account_id:
             logger.error("BROKER_KIND=oanda pero faltan OANDA_API_TOKEN y/o OANDA_ACCOUNT_ID en .env.")

@@ -28,6 +28,7 @@ import functools
 import logging
 import sys
 import threading
+from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -345,7 +346,9 @@ def price(symbol: str):
 @synchronized
 def candles(symbol: str):
     tf = request.args.get("timeframe", "M1")
-    count = int(request.args.get("count", 200))
+    count = min(max(int(request.args.get("count", 200)), 50), 200000)
+    start = request.args.get("from")
+    end = request.args.get("to")
     mt5_tf = TIMEFRAME_MAP.get(tf)
     if mt5_tf is None:
         return _err(f"unsupported timeframe {tf}")
@@ -353,9 +356,36 @@ def candles(symbol: str):
     if resolved is None:
         return _err(f"el simbolo {symbol} no existe en este broker/cuenta: {mt5.last_error()}", 404)
     symbol = resolved
-    rates = mt5.copy_rates_from_pos(symbol, mt5_tf, 0, count)
+    try:
+        if start:
+            start_ts, end_ts = int(start), int(end) if end else int(datetime.now(timezone.utc).timestamp())
+            if end_ts <= start_ts:
+                return _err("el rango de velas debe tener fin posterior al inicio")
+            # MT5 returns INVALID_PARAMS for large copy_rates_range calls on
+            # some terminals. Query one-day windows and merge them instead of
+            # letting one oversized request kill the bridge.
+            rows = []
+            cursor = start_ts
+            max_windows = 400
+            windows = 0
+            while cursor < end_ts and len(rows) < count and windows < max_windows:
+                chunk_end = min(cursor + 86400, end_ts)
+                chunk = mt5.copy_rates_range(
+                    symbol, mt5_tf,
+                    datetime.fromtimestamp(cursor, tz=timezone.utc),
+                    datetime.fromtimestamp(chunk_end, tz=timezone.utc),
+                )
+                if chunk is not None:
+                    rows.extend(list(chunk))
+                cursor = chunk_end
+                windows += 1
+            rates = rows[-count:]
+        else:
+            rates = mt5.copy_rates_from_pos(symbol, mt5_tf, 0, min(count, 10000))
+    except (TypeError, ValueError, OverflowError) as exc:
+        return _err(f"parametros de velas invalidos: {exc}")
     if rates is None:
-        return _err(f"copy_rates_from_pos failed: {mt5.last_error()}", 500)
+        return _err(f"MT5 no devolvio velas para el rango solicitado: {mt5.last_error()}", 502)
     out = [
         {
             "time": int(r["time"]),
@@ -368,6 +398,51 @@ def candles(symbol: str):
         for r in rates
     ]
     return jsonify({"ok": True, "candles": out})
+
+
+@app.route("/ticks/<symbol>")
+@synchronized
+def ticks(symbol: str):
+    """Read-only historical tick feed for a future tick-accurate tester.
+    `from` and `to` are Unix seconds; without them the latest `count` ticks
+    are returned. No trading endpoint is touched."""
+    resolved = _resolve_symbol(symbol)
+    if resolved is None:
+        return _err(f"el simbolo {symbol} no existe en este broker/cuenta", 404)
+    count = min(max(int(request.args.get("count", 10000)), 1), 100000)
+    start = request.args.get("from")
+    end = request.args.get("to")
+    try:
+        if start:
+            start_ts, end_ts = int(start), int(end) if end else int(datetime.now(timezone.utc).timestamp())
+            if end_ts <= start_ts:
+                return _err("el rango de ticks debe tener fin posterior al inicio")
+            rows = []
+            cursor = start_ts
+            max_windows = 400
+            windows = 0
+            while cursor < end_ts and len(rows) < count and windows < max_windows:
+                chunk_end = min(cursor + 6 * 3600, end_ts)
+                chunk = mt5.copy_ticks_range(
+                    resolved, datetime.fromtimestamp(cursor, tz=timezone.utc),
+                    datetime.fromtimestamp(chunk_end, tz=timezone.utc), mt5.COPY_TICKS_ALL)
+                if chunk is not None:
+                    rows.extend(list(chunk))
+                cursor = chunk_end
+                windows += 1
+            rates = rows[-count:]
+        else:
+            # A start time of "now" would return no ticks. Ask for a broad
+            # recent window and retain only the requested tail.
+            rates = mt5.copy_ticks_from(resolved, datetime.now(timezone.utc) - timedelta(days=7),
+                                        count, mt5.COPY_TICKS_ALL)
+    except (TypeError, ValueError, OverflowError) as exc:
+        return _err(f"parametros de ticks invalidos: {exc}")
+    if rates is None:
+        return _err(f"MT5 no devolvio ticks para el rango solicitado: {mt5.last_error()}", 502)
+    rows = [{"time": int(r["time"]), "bid": float(r["bid"]), "ask": float(r["ask"]),
+             "last": float(r["last"]), "volume": int(r["volume"])} for r in rates[-count:]]
+    return jsonify({"ok": True, "ticks": rows})
 
 
 @app.route("/positions")

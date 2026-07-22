@@ -99,7 +99,7 @@ def main() -> None:
     backoff = 2.0
     # Give up after this many consecutive near-instant deaths: a process
     # that can't even survive 10 seconds five times in a row is broken in a
-    # way a retry won't fix (missing pandas on a partial Termux install,
+    # way a retry won't fix (missing pandas on a partial/broken install,
     # bad credentials file, syntax error...) - retrying forever just burns
     # battery and fills the log while the dashboard's pidfile check keeps
     # reporting this supervisor as "running". Exiting cleanly lets

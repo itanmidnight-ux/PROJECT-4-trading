@@ -41,6 +41,7 @@ def run_backtest(
     strategy: object | None = None,
     max_lookback_bars: int = 600,
     max_hold_bars: int = 0,
+    ticks: pd.DataFrame | None = None,
 ) -> BacktestResult:
     """candles: columns open, high, low, close, time (oldest -> newest).
     strategy_overrides passes extra kwargs straight to ScalpStrategy (e.g.
@@ -67,7 +68,8 @@ def run_backtest(
     loss profile (see README Rondas 2-6): the few large losers are trades
     that never revert and ride the full 4xATR distance down. Once TP1 has
     hit, the trailing stop already manages the exit and this does nothing."""
-    value_per_point_per_lot = spec.trade_tick_value / spec.point
+    tick_size = spec.trade_tick_size or spec.point
+    value_per_point_per_lot = spec.trade_tick_value / tick_size
     if strategy is None:
         strategy = ScalpStrategy(min_tp_usd=min_tp_usd, tp_levels=tp_levels,
                                   value_per_point_per_lot=value_per_point_per_lot,
@@ -82,6 +84,9 @@ def run_backtest(
     total_pnl = 0.0
 
     open_pos = None  # dict: side, entry, sl, tp_levels(list), next_idx, remaining_lot, orig_lot
+    tick_times = None
+    if ticks is not None and not ticks.empty and "time" in ticks:
+        tick_times = ticks["time"].astype("int64")
 
     warmup = 25
     for i in range(warmup, len(candles)):
@@ -103,8 +108,25 @@ def run_backtest(
             # high for a SELL's), on the conservative assumption that if a
             # single bar's range could have hit both the stop and a TP
             # target, the adverse move happened first.
-            adverse_extreme = (bar["low"] - assumed_spread_price / 2) if direction == 1 else (bar["high"] + assumed_spread_price / 2)
-            favorable_extreme = (bar["high"] - assumed_spread_price / 2) if direction == 1 else (bar["low"] + assumed_spread_price / 2)
+            # With a supplied MT5 tick stream, use the actual bid/ask path
+            # inside this bar. Otherwise retain the conservative OHLC model.
+            bar_ticks = None
+            if tick_times is not None:
+                start_t = int(bar["time"])
+                end_t = int(candles.iloc[i + 1]["time"]) if i + 1 < len(candles) else start_t + 60
+                bar_ticks = ticks[(tick_times >= start_t) & (tick_times < end_t)]
+            if bar_ticks is not None and not bar_ticks.empty:
+                bids = pd.to_numeric(bar_ticks.get("bid"), errors="coerce").dropna()
+                asks = pd.to_numeric(bar_ticks.get("ask"), errors="coerce").dropna()
+                if direction == 1:
+                    adverse_extreme = float(bids.min()) if not bids.empty else float(bar["low"] - assumed_spread_price / 2)
+                    favorable_extreme = float(bids.max()) if not bids.empty else float(bar["high"] - assumed_spread_price / 2)
+                else:
+                    adverse_extreme = float(asks.max()) if not asks.empty else float(bar["high"] + assumed_spread_price / 2)
+                    favorable_extreme = float(asks.min()) if not asks.empty else float(bar["low"] + assumed_spread_price / 2)
+            else:
+                adverse_extreme = (bar["low"] - assumed_spread_price / 2) if direction == 1 else (bar["high"] + assumed_spread_price / 2)
+                favorable_extreme = (bar["high"] - assumed_spread_price / 2) if direction == 1 else (bar["low"] + assumed_spread_price / 2)
 
             hit_sl = (direction == 1 and adverse_extreme <= open_pos["sl"]) or (direction == -1 and adverse_extreme >= open_pos["sl"])
             if hit_sl:
@@ -194,6 +216,15 @@ def run_backtest(
                 sizing = risk.size_position(account, spec, signal.sl_distance_price, mid)
                 if sizing.ok:
                     entry = ask if signal.side == "BUY" else bid
+                    if tick_times is not None:
+                        start_t = int(bar["time"])
+                        end_t = int(candles.iloc[i + 1]["time"]) if i + 1 < len(candles) else start_t + 60
+                        entry_ticks = ticks[(tick_times >= start_t) & (tick_times < end_t)]
+                        if not entry_ticks.empty:
+                            field = "ask" if signal.side == "BUY" else "bid"
+                            values = pd.to_numeric(entry_ticks.get(field), errors="coerce").dropna()
+                            if not values.empty:
+                                entry = float(values.iloc[-1])
                     direction = 1 if signal.side == "BUY" else -1
                     sl = entry - direction * signal.sl_distance_price
                     tp_levels = strategy.build_tp_ladder(sizing.lot, assumed_spread_price, vol_ratio=signal.vol_ratio)

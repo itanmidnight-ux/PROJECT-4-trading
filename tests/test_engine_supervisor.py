@@ -110,7 +110,7 @@ os.kill(int(os.environ["ENGINE_SUPERVISOR_PID"]), signal.SIGTERM)
 
 def test_main_gives_up_after_five_consecutive_fast_failures(tmp_path, monkeypatch):
     """A main.py that dies instantly every time (missing pandas on a
-    partial Termux install, bad config, syntax error) must NOT be retried
+    partial/broken install, bad config, syntax error) must NOT be retried
     forever - before this, the supervisor crash-looped it eternally with
     the dashboard reporting 'Motor corriendo' the whole time. It must try
     exactly 5 times, log why it's giving up, and exit on its own."""

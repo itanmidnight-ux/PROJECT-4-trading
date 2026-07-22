@@ -44,6 +44,7 @@ from typing import Optional
 import pandas as pd
 
 from core.strategy import ScalpStrategy, Side, Signal, compute_indicators, compute_vol_ratio
+from core.regime import detect_regime
 
 
 @dataclass
@@ -684,11 +685,20 @@ class CompositeStrategy:
         extra_strategies: list[tuple[str, object]],
         indicator_rsi_period: int = 14,
         indicator_atr_period: int = 14,
+        regime_filter_enabled: bool = True,
+        regime_adx_trend_threshold: float = 25.0,
+        regime_atr_ratio_high: float = 1.35,
+        regime_atr_ratio_low: float = 0.65,
+        prefer_quantum_queen: bool = False,
     ) -> None:
         self._mean_reversion = mean_reversion
         self._extra = extra_strategies
         self._indicator_rsi_period = indicator_rsi_period
         self._indicator_atr_period = indicator_atr_period
+        self._regime_filter_enabled = regime_filter_enabled
+        self._regime_kwargs = dict(adx_threshold=regime_adx_trend_threshold,
+                                   atr_high=regime_atr_ratio_high, atr_low=regime_atr_ratio_low)
+        self._prefer_quantum_queen = prefer_quantum_queen
         # EMA50 (used by MomentumCrossStrategy on the M5-resampled window)
         # is the slowest thing any extra signal looks at - 55 M1 bars is a
         # deliberately generous floor before even trying them, on top of
@@ -713,20 +723,25 @@ class CompositeStrategy:
 
     def generate_signal(self, df: pd.DataFrame, spread_price: float, lot_hint: float) -> Signal:
         mr_signal = self._mean_reversion.generate_signal(df, spread_price, lot_hint)
-        if mr_signal.side is not None:
+        if not self._prefer_quantum_queen and mr_signal.side is not None:
+            return mr_signal
+        if not self._extra:
             return mr_signal
 
-        if not self._extra:
-            return mr_signal  # nothing else configured - preserve its exact rejection reason
-
         if len(df) < self._warmup_bars:
-            return Signal(side=None, reason="not enough history")
+            return mr_signal
 
         ind = compute_indicators(df, rsi_period=self._indicator_rsi_period, atr_period=self._indicator_atr_period)
+        regime = detect_regime(df, **self._regime_kwargs) if self._regime_filter_enabled else None
         last = ind.iloc[-1]
         vol_ratio = compute_vol_ratio(last["atr"], last["atr_baseline"])
 
-        for name, sub in self._extra:
+        ordered = self._extra
+        if self._prefer_quantum_queen:
+            ordered = sorted(self._extra, key=lambda item: 0 if item[0] == "quantum_queen" else 1)
+        for name, sub in ordered:
+            if regime and regime.name == "volatile" and name in {"ma_grid", "quantum_queen"}:
+                continue
             sub_signal = sub.check(df, ind, spread_price)
             if sub_signal.side is None:
                 continue
@@ -735,7 +750,7 @@ class CompositeStrategy:
             return Signal(side=sub_signal.side, sl_distance_price=sl_distance, tp_levels=tp_levels,
                            reason=f"{name}: {sub_signal.reason}", vol_ratio=vol_ratio)
 
-        return mr_signal  # nothing fired - surface mean-reversion's own reason, the most informative one
+        return self._mean_reversion.generate_signal(df, spread_price, lot_hint)
 
 
 def build_strategy_from_settings(settings, value_per_point_per_lot: float) -> CompositeStrategy:
@@ -818,10 +833,21 @@ def build_strategy_from_settings(settings, value_per_point_per_lot: float) -> Co
             rsi_oversold=settings.strat_ma_grid_rsi_oversold,
             min_adx=settings.strat_ma_grid_min_adx,
         )))
+    if settings.strat_enable_quantum_queen:
+        from core.quantum_queen import QuantumQueenVoteStrategy
+        extra.append(("quantum_queen", QuantumQueenVoteStrategy(
+            cooldown_bars=cooldown, max_spread_price=spread, min_atr_price=min_atr,
+            mask=settings.strat_quantum_mask, threshold=settings.strat_quantum_threshold,
+        )))
 
     return CompositeStrategy(
         mean_reversion=mean_reversion,
         extra_strategies=extra,
         indicator_rsi_period=settings.strat_composite_rsi_period,
         indicator_atr_period=settings.strat_composite_atr_period,
+        regime_filter_enabled=settings.regime_filter_enabled,
+        regime_adx_trend_threshold=settings.regime_adx_trend_threshold,
+        regime_atr_ratio_high=settings.regime_atr_ratio_high,
+        regime_atr_ratio_low=settings.regime_atr_ratio_low,
+        prefer_quantum_queen=settings.strat_quantum_primary,
     )

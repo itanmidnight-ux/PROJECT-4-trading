@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # =====================================================================
 # run.sh - the only other entrypoint besides install.sh. Auto-detects the
-# platform (Kali/Ubuntu/Termux/other) the same way install.sh does, and
+# platform (Kali/Ubuntu/other Linux) the same way install.sh does, and
 # adjusts what it does: on a machine with a local Wine prefix (set up by
 # install.sh's Kali/Ubuntu path) it starts a local MT5 bridge; without one
-# (Termux, or any install that skipped Wine) it talks to whatever
+# (any install that skipped Wine, e.g. --no-wine) it talks to whatever
 # MT5_BRIDGE_URL points at instead of assuming a local bridge exists.
 #
 # Usage:
@@ -21,7 +21,7 @@
 #
 # Why the engine isn't started by --start: it's the thing that actually
 # places orders, and it's meant to be turned on deliberately, from the
-# dashboard (web or native), not automatically the moment a server starts
+# dashboard web, not automatically the moment a server starts
 # (e.g. after a reboot with a systemd unit - see
 # scripts/xauusd-scalper.service.template). `./run.sh --start` brings up
 # everything ELSE (the bridge, the dashboard at
@@ -61,6 +61,15 @@ DASHBOARD_PORT="9000"
 
 log()  { printf '\033[1;36m[run]\033[0m %s\n' "$*"; }
 err()  { printf '\033[1;31m[run][error]\033[0m %s\n' "$*" >&2; }
+progress() {
+    local label="$1" pct="$2" width=28 filled empty
+    filled=$((pct * width / 100)); empty=$((width - filled))
+    printf '\r\033[1;36m[run]\033[0m %-26s [' "$label"
+    printf '%*s' "$filled" '' | tr ' ' '#'
+    printf '%*s' "$empty" '' | tr ' ' '.'
+    printf '] %3d%%' "$pct"
+    [ "$pct" -ge 100 ] && printf '\n'
+}
 
 # dashboard.py picks its own port (see _find_free_port there): if
 # DASHBOARD_PORT (default 9000, what we ASK it to try first) is already
@@ -84,9 +93,6 @@ dashboard_port() {
 # there - each script stays runnable on its own). See install.sh for the
 # reasoning behind each check.
 detect_platform() {
-    if [ "${PREFIX:-}" = "/data/data/com.termux/files/usr" ] || [ -n "${TERMUX_VERSION:-}" ]; then
-        echo "termux"; return
-    fi
     if [ -f /etc/os-release ]; then
         # shellcheck disable=SC1091
         . /etc/os-release
@@ -222,7 +228,7 @@ cmd_emergency_stop() {
 # Repeatable "does everything still work" check. Run after any code
 # change, before trusting a real (even demo) run. Does NOT need Wine/MT5/a
 # broker connection - everything here runs against synthetic data or an
-# in-memory/temp SQLite DB, so it works the same on Termux as on Kali/Ubuntu.
+# in-memory/temp SQLite DB, so it works the same on any Linux install.
 cmd_verify() {
     if [ ! -d ".venv" ]; then
         err "No se encontro .venv. Corre ./install.sh primero (o python3 -m venv .venv && .venv/bin/pip install -r requirements.txt -r requirements-dev.txt)."
@@ -306,9 +312,9 @@ EOF
 
 # ============================================================ cmd: doctor
 # Read-only diagnostic. Never installs or changes anything itself - see
-# install.sh for that. Platform-aware: on Termux (no local Wine, ever) it
-# checks remote-bridge reachability instead of reporting Wine/MT5/Xvfb as
-# "missing", which they're supposed to be on that platform.
+# install.sh for that. When no local MT5 install exists on this machine
+# (e.g. installed with --no-wine) it checks remote-bridge reachability
+# instead of reporting Wine/MT5/Xvfb as "missing".
 cmd_doctor() {
     local platform pass=0 fail=0 warn_count=0
     platform="$(detect_platform)"
@@ -324,28 +330,7 @@ cmd_doctor() {
     section "1. Entorno Python"
     if [ -d ".venv" ]; then
         ok ".venv existe"
-        if [ "$platform" = "termux" ]; then
-            # Split on purpose: dashboard.py never imports pandas/numpy (only
-            # core/strategy.py, core/backtest.py etc. do, reachable only
-            # through the engine) - numpy/pandas are known to sometimes fail
-            # to compile from source on Termux/ARM (a real toolchain
-            # limitation, see install.sh's install_termux), so a missing
-            # pandas there is a warning about the engine/backtest, not a
-            # "the whole install is broken" failure the way a missing Flask
-            # would be.
-            if .venv/bin/python3 -c "import flask, requests, dotenv" 2>/dev/null; then
-                ok "dependencias del dashboard (Flask/requests/python-dotenv) importan correctamente"
-            else
-                bad "faltan dependencias basicas del dashboard en .venv - corre ./install.sh"
-            fi
-            if .venv/bin/python3 -c "import pandas, numpy" 2>/dev/null; then
-                ok "pandas/numpy importan correctamente (motor y backtests disponibles aca)"
-            else
-                warn_msg "pandas/numpy no estan instalados - el motor y los backtests NO van a funcionar en esta"
-                warn_msg "maquina (el dashboard si). Normal en algunos telefonos/toolchains de Termux - ver los"
-                warn_msg "avisos de ./install.sh, o usa esta maquina solo como cliente remoto del dashboard."
-            fi
-        elif .venv/bin/python3 -c "import pandas, numpy, flask, requests, dotenv, webview" 2>/dev/null; then
+        if .venv/bin/python3 -c "import pandas, numpy, flask, requests, dotenv, webview" 2>/dev/null; then
             ok "dependencias de requirements.txt importan correctamente"
         else
             bad "faltan dependencias en .venv - corre: .venv/bin/pip install -r requirements.txt"
@@ -371,13 +356,13 @@ cmd_doctor() {
             ok "MT5_LOGIN y MT5_PASSWORD estan configurados"
         else
             # Not a hard failure on purpose: an install is fully functional
-            # without credentials yet (dashboard-only Termux client, or "fill
-            # them in later") - they're completable any time from the
+            # without credentials yet ("fill them in later") - they're
+            # completable any time from the
             # dashboard's Settings tab, so this must never block install.sh's
             # final re-verification the way a genuinely broken .venv/.env would.
             warn_msg "MT5_LOGIN o MT5_PASSWORD vacios en .env - editalo, corre ./install.sh, o completalo desde la pestaña Settings del dashboard"
         fi
-        if [ "${DRY_RUN:-true}" = "true" ]; then
+        if [ "${DRY_RUN:-false}" = "true" ]; then
             ok "DRY_RUN=true (modo seguro: precios reales, sin ordenes reales)"
         else
             warn_msg "DRY_RUN=false: el motor mandara ORDENES REALES a la cuenta ${MT5_LOGIN:-?} (${MT5_SERVER:-?})"
@@ -426,12 +411,12 @@ cmd_doctor() {
                 warn_msg "OANDA no respondio o rechazo las credenciales - revisa OANDA_API_TOKEN/OANDA_ACCOUNT_ID/OANDA_ENV y la conexion a internet."
             fi
         fi
-    elif [ "$platform" = "termux" ]; then
-        section "3. Bridge remoto (Termux no corre Wine/MT5 local)"
+    elif ! detect_mt5_install >/dev/null 2>&1; then
+        section "3. Bridge remoto (sin instalacion MT5 local en esta maquina)"
         local bridge_url="${MT5_BRIDGE_URL:-http://127.0.0.1:5001}"
         case "$bridge_url" in
             *127.0.0.1*|*localhost*)
-                warn_msg "MT5_BRIDGE_URL ($bridge_url) apunta a esta misma maquina, pero Termux no corre un bridge local - configuralo con la IP de una Kali/Ubuntu real que si lo tenga."
+                warn_msg "MT5_BRIDGE_URL ($bridge_url) apunta a esta misma maquina, pero no hay bridge local instalado aca - configuralo con la IP de otra maquina Kali/Ubuntu que si lo tenga (./install.sh ahi)."
                 ;;
             *)
                 ok "MT5_BRIDGE_URL configurado como remoto: $bridge_url"
@@ -555,8 +540,7 @@ cmd_doctor() {
     local avail_kb avail_mb
     avail_kb=$(df -Pk "$PROJECT_ROOT" | awk 'NR==2 {print $4}')
     avail_mb=$(( avail_kb / 1024 ))
-    local min_needed=500
-    [ "$platform" != "termux" ] && min_needed=2000  # Wine + MT5 need several GB; pure-Python side needs much less
+    local min_needed=2000  # Wine + MT5 need several GB
     if [ "$avail_mb" -lt 500 ]; then
         bad "solo quedan ${avail_mb}MB de disco libres"
     elif [ "$avail_mb" -lt "$min_needed" ]; then
@@ -602,14 +586,6 @@ cmd_stop_all() {
     done
 
     rm -f "$STOP_FLAG"
-
-    # Mirror of the wake lock taken in cmd_start: nothing is running
-    # anymore, so stop keeping the phone awake (battery). Safe to call
-    # even if no lock was ever taken.
-    if command -v termux-wake-unlock >/dev/null 2>&1; then
-        termux-wake-unlock 2>/dev/null || true
-        log "Wake lock de Termux liberado."
-    fi
 
     if [ "$anything" -eq 0 ]; then
         log "No habia nada corriendo."
@@ -739,18 +715,8 @@ cmd_start() {
     mkdir -p "$LOG_DIR" "$RUN_DIR"
     rm -f "$STOP_FLAG"
 
-    # Android agresivamente suspende/mata procesos de fondo cuando la
-    # pantalla se apaga (Doze, "phantom process killer") - sin un wake
-    # lock, el dashboard/motor corriendo en Termux puede morir en cuanto
-    # el telefono queda inactivo. termux-wake-lock (viene con Termux, no
-    # necesita termux-api) lo evita; se libera en ./run.sh --stop.
-    if [ "$(detect_platform)" = "termux" ] && command -v termux-wake-lock >/dev/null 2>&1; then
-        termux-wake-lock 2>/dev/null || true
-        log "Wake lock de Termux adquirido (evita que Android suspenda el servidor con la pantalla apagada)."
-        log "Consejo: exclui Termux de la optimizacion de bateria de Android para maxima estabilidad (ver README)."
-    fi
-
     log "Arrancando el servidor (bridge + dashboard) en segundo plano..."
+    progress "iniciando supervisor" 25
     # $0 en vez de una ruta absoluta rompe aca si el script se invoco sin
     # "./" (ej. `bash run.sh --start`) o via un symlink/PATH lookup: $0 queda
     # como "run.sh" a secas y nohup lo busca en $PATH en vez de en
@@ -760,6 +726,7 @@ cmd_start() {
     disown
     echo $! > "$RUN_DIR/supervisor.pid"
     sleep 2
+    progress "supervisor activo" 100
 
     if kill -0 "$(cat "$RUN_DIR/supervisor.pid" 2>/dev/null)" 2>/dev/null; then
         log "Arrancado. PID del supervisor: $(cat "$RUN_DIR/supervisor.pid")"
@@ -887,7 +854,7 @@ cmd_start_foreground() {
             fi
 
             # Where the bridge LISTENS. 127.0.0.1 (default) = this machine
-            # only - a Termux phone using this machine as its remote bridge
+            # only - another machine using this one as its remote bridge
             # can NOT connect unless this is widened to 0.0.0.0 (all
             # interfaces) in .env. The bridge server itself enforces the
             # auth token on every request either way (defense in depth for
@@ -928,7 +895,7 @@ cmd_start_foreground() {
             fi
         fi
     else
-        # ---- no MT5 install anywhere on this machine (e.g. Termux): remote bridge ----
+        # ---- no MT5 install anywhere on this machine: remote bridge ----
         MT5_BRIDGE_URL="$(grep -E '^MT5_BRIDGE_URL=' "$PROJECT_ROOT/.env" 2>/dev/null | head -1 | cut -d= -f2-)"
         MT5_BRIDGE_URL="${MT5_BRIDGE_URL:-http://127.0.0.1:5001}"
         log "No se encontro ninguna instalacion MT5 local (ni $WINEPREFIX_DIR, ni comando 'metatrader', ni ~/.wine|~/.mt5) - asumiendo bridge remoto en $MT5_BRIDGE_URL"

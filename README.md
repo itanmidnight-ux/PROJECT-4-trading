@@ -1,1214 +1,224 @@
-# XAUUSD 1m Scalper (FBS / MT5) + Dashboard
+# XAUUSD Scalper · MT5 + Web Dashboard
 
-Bot de scalping para oro (XAUUSD) en temporalidad 1 minuto, pensado para
-correr contra una cuenta MT5 de FBS en Linux, con gestion de riesgo real
-y un dashboard nativo para ver resultados.
+Bot algorítmico para XAUUSD con ejecución a través de MetaTrader 5, gestión
+de riesgo basada en la especificación real del broker, backtesting histórico y
+un dashboard web responsive. El proyecto está pensado para Kali/Ubuntu con
+Wine + MT5.
 
-## Lee esto antes de usarlo
+> **Advertencia:** operar derivados implica riesgo de pérdida total. Ningún
+> resultado histórico garantiza ganancias futuras. Empieza en una cuenta demo,
+> usa `DRY_RUN=true` y valida el símbolo, margen y apalancamiento que informa
+> tu broker antes de activar órdenes reales.
 
-- **No existe una estrategia que gane siempre.** Este bot toma señales
-  de reversion a la media (Bandas de Bollinger + RSI en 1m) filtradas por
-  spread y volatilidad. Es una estrategia razonable, no una maquina de
-  dinero garantizado. Va a perder trades — el objetivo del diseño es que
-  cada perdida este acotada (`RISK_PER_TRADE_USD` en `.env`, 3 USD por
-  defecto - ver "Ronda 6" mas abajo para por que no es 1) y que el sistema
-  se detenga solo si el dia se pone feo
-  (`MAX_DAILY_LOSS_USD`, `MAX_DAILY_DRAWDOWN_PCT`).
-- **Sobre el "apalancamiento 1:1" de la cuenta: probablemente no aplica al
-  oro.** Segun la documentacion propia de FBS, el apalancamiento de metales
-  (oro incluido) esta **fijo en 1:500 y no se puede cambiar desde el Area
-  de Trader** - es independiente del apalancamiento configurado para
-  Forex en la cuenta. Con 1:1 literal sobre un contrato estandar de 100 oz,
-  ni el lote minimo (0.01) entraria en una cuenta de $50 (~$4000 de
-  margen requerido); con el 1:500 fijo que FBS aplica a metales, ese mismo
-  lote minimo ronda los $8 de margen - perfectamente viable. El codigo NO
-  asume ninguno de los dos numeros: `bridge/mt5_bridge_server.py` le pide
-  a MT5 el margen real via `order_calc_margin()` (la misma cuenta que usa
-  el broker para decidir si te deja operar) en vez de calcularlo a mano
-  con el apalancamiento de la cuenta, y `core/risk_manager.py` **se niega
-  a operar si ese margen real no alcanza**, en vez de forzar una orden que
-  el broker rechazaria. Corre el backtest y una sesion en `DRY_RUN=true`
-  primero para ver los numeros reales de tu cuenta - esto es evidencia de
-  documentacion publica de FBS, no una garantia de como esta configurada
-  tu cuenta especifica.
-- **El bot no asume NINGUN apalancamiento fijo, funciona con el que tenga
-  la cuenta.** No hay ningun "1:1" ni "1:500" hardcodeado en el codigo que
-  realmente opera: el margen sale de `order_calc_margin()` (el mismo
-  calculo que usa el broker) y el sizing por riesgo sale de
-  `RISK_PER_TRADE_USD` en dolares, no de un numero de lotes fijo - ninguno
-  de los dos depende de que apalancamiento tenga la cuenta. Con poco
-  apalancamiento (ej. 1:1) el margen requerido para el lote minimo puede
-  superar lo disponible en una cuenta chica; en ese caso el bot **rechaza
-  la señal con un mensaje claro** (`core/risk_manager.py`) en vez de
-  fallar o forzar una orden invalida - eso no es un bug, es matematica de
-  margen real: ningun cambio de codigo hace que $50 alcancen para un
-  contrato que necesita $4000 de margen. Si las señales se rechazan
-  siempre por margen insuficiente, el diagnostico es el apalancamiento/
-  balance de la cuenta, no el bot.
-- **"1000 trades/dia" es un techo, no una meta.** `MAX_TRADES_PER_DAY`
-  limita cuantos trades como maximo puede abrir el bot en un dia; cuantos
-  realmente abre depende de que aparezcan señales validas y de que haya
-  margen disponible. No fuerza operaciones para llegar a un numero.
-- **`MAX_DAILY_DRAWDOWN_PCT` corta en tiempo real, no solo entre trades.**
-  El stop-loss por defecto es ancho (ver la seccion de backtest mas abajo -
-  `sl_atr_multiple=4.0`), asi que una posicion abierta puede acumular una
-  perdida flotante grande antes de tocar su propio SL. `core/engine.py`
-  revisa el equity (no solo el balance realizado) en cada ciclo y, si se
-  pasa del limite de drawdown diario, **cierra de inmediato cualquier
-  posicion abierta** en vez de esperar a que el SL la alcance por su
-  cuenta.
-- **Los niveles de take-profit se pueden configurar directamente en
-  dolares de ganancia, no en pips.** Por defecto solo el primer escalon
-  tiene un objetivo explicito en USD (`MIN_TP_USD`) y el resto son
-  multiplos de esa distancia de precio - el comportamiento original, ya
-  validado en el backtest de abajo. Si preferis que CADA escalon reserve
-  su propio monto en dolares (mas facil de razonar: "este nivel cierra
-  cuando llevo $0.60"), configura `TP_TARGETS_USD=0.28,0.60,1.20` en
-  `.env` (uno por cada `TP_LEVELS`, separados por coma). Vacio = sin
-  cambios respecto a antes. Ver `core/strategy.py::build_tp_ladder`.
+## Estado del proyecto
+
+- Dashboard: web únicamente (`dashboard.py` ya no abre una ventana nativa).
+- Broker principal: MT5 mediante `bridge/mt5_bridge_server.py`.
+- Estrategia base: Bollinger + RSI + ATR, con TP escalonado, breakeven y
+  trailing stop.
+- Opcionales: confluencia Quantum Queen de 12 votos, régimen de mercado,
+  grid/piramidación limitada y recuperación controlada. Están apagados por
+  defecto y nunca saltan el `RiskManager`.
+- Calidad actual: `220 passed, 1 skipped` en la suite local. El test omitido
+  requiere un CSV histórico que no está incluido en el repositorio.
 
 ## Arquitectura
 
-```
-run.sh              -> --start/--stop/--status del servidor (bridge + dashboard);
-                        el motor (el bot en si) se arranca/para SOLO desde el
-                        dashboard, no con run.sh - ver "Uso" mas abajo
-install.sh           -> instala todo, auto-detectando la plataforma (Kali/Ubuntu/Termux)
-main.py              -> entrypoint del motor (usa core/engine.py)
-dashboard.py          -> dashboard: ventana nativa (pywebview) o pagina web (--web, puerto 9000)
+```text
+run.sh ──┬─ MT5 bridge (Wine/Windows Python) ── MetaTrader 5 ── Broker
+         └─ dashboard.py (Flask) ── dashboard/{index.html,app.js,style.css}
 
-core/
-  config.py           -> carga .env
-  risk_manager.py      -> sizing de posicion + limites diarios
-  strategy.py           -> señal (Bollinger+RSI) + escalera de TP
-  signals.py             -> señales extra opcionales + CompositeStrategy (ver Ronda 4)
-  engine.py              -> loop principal
-  broker.py               -> BridgeBroker (real) / SimulatedBroker (paper)
-  market_data.py            -> BridgeMarketData (real) / SyntheticMarketData (pruebas)
-  mt5_bridge_client.py       -> cliente HTTP hacia el bridge
-  database.py                 -> SQLite (trades, snapshots, eventos)
-  backtest.py                  -> backtest reutilizando la misma logica
-
-bridge/
-  mt5_bridge_server.py  -> Flask que envuelve el paquete MetaTrader5 (corre bajo Wine)
-
-dashboard/
-  index.html, style.css, app.js -> UI del dashboard (SVG a mano, sin CDN)
+dashboard/API ── core/backtest.py ── core/signals.py ── RiskManager
+                              └── SQLite (data/trades.db)
 ```
 
-### Por que hay un "bridge" con Wine
+Componentes principales:
 
-El paquete `MetaTrader5` de PyPI solo funciona si puede cargar las DLLs
-reales del terminal de Windows. En Linux eso significa correr el terminal
-MT5 y un Python de Windows dentro de Wine. `install.sh` deja todo eso
-armado; `bridge/mt5_bridge_server.py` corre ahi dentro y expone una API
-HTTP simple (`/price`, `/candles`, `/order/open`, ...) que el resto del
-sistema (Python normal de Linux) consume por HTTP. Esta separacion es lo
-que permite que el motor, el dashboard y el risk manager sean Python
-comun y silvestre, sin depender de Wine para nada mas que hablar con MT5.
+| Ruta | Responsabilidad |
+|---|---|
+| `bridge/mt5_bridge_server.py` | Sesión MT5, velas, ticks, cuenta y órdenes. |
+| `core/engine.py` | Ciclo de mercado, señales, sizing y gestión de posiciones. |
+| `core/strategy.py` | Estrategia base y escalera de take-profit. |
+| `core/signals.py` | CompositeStrategy y señales adicionales. |
+| `core/quantum_queen.py` | Port de los 12 votos Quantum Queen. |
+| `core/regime.py` | Clasificación `trend/range/volatile/quiet`. |
+| `core/risk_manager.py` | Riesgo monetario, margen, drawdown y límites diarios. |
+| `core/backtest.py` | Backtest compartido entre dashboard y scripts. |
+| `dashboard.py` | API Flask, dashboard y endpoint de backtesting. |
+| `install.sh` | Instalación y diagnóstico de dependencias. |
+| `run.sh` | Arranque, parada, estado y supervisión de procesos. |
 
-### FBS como broker principal (via el bridge MT5) - robustez especifica
-
-FBS es un broker MT5 puro (sin API REST publica), asi que su unico camino
-es el bridge Wine/MT5 - y ese camino esta endurecido especificamente para
-los fallos tipicos de FBS:
-
-- **Sufijos de simbolo por tipo de cuenta**: en cuentas FBS Micro/Cent el
-  oro NO se llama `XAUUSD` sino `XAUUSDm`/`XAUUSDc` - antes eso mataba al
-  bot con `symbol_select(XAUUSD) failed` sin operar jamas. El bridge ahora
-  **resuelve la variante automaticamente** (exacta -> `XAUUSD*` ->
-  `*XAUUSD*`, saltando variantes con trading deshabilitado, eligiendo el
-  nombre mas corto) y lo reporta en el log y en `./run.sh doctor` ("simbolo
-  XAUUSD disponible en esta cuenta como 'XAUUSDm'").
-- **Errores de orden traducidos**: `order_send failed: 10019` ahora dice
-  "fondos insuficientes (margen)"; `10018` "mercado cerrado"; `10027`
-  "autotrading deshabilitado en el TERMINAL (boton AutoTrading)" - los
-  codigos que de verdad aparecen operando con FBS, accionables desde el
-  event log del dashboard.
-- **Login con pistas reales**: el fallo de login recuerda que el password
-  de la cuenta DEMO de FBS expira a los pocos dias y que el nombre de
-  servidor debe copiarse exacto (FBS-Demo vs FBS-Real).
-- **Arranque del terminal robusto**: `mt5.initialize()` reintenta con la
-  ruta explicita de `terminal64.exe` dentro del prefijo Wine si la
-  deteccion automatica falla (modo de fallo tipico bajo Wine).
-- Ya cubiertos antes: filling mode consultado al broker (no asumido),
-  margen real via `order_calc_margin` (FBS fija metales a 1:500
-  independiente del apalancamiento de la cuenta), reconexion silenciosa
-  con re-login, y el cliente Linux que jamas reenvia una orden ambigua.
-- **Si ya tenes MT5 instalado en tu Linux (ej. el lanzador `metatrader`
-  del instalador oficial de MetaQuotes), el bot lo detecta y lo REUTILIZA**
-  en vez de instalar un segundo terminal: `install.sh` instala el Python
-  de Windows dentro de ESE prefijo Wine, y `run.sh` arranca el bridge ahi
-  y le pasa la ruta real de `terminal64.exe`. No es solo ahorro de disco -
-  el paquete MetaTrader5 habla con el terminal por IPC DENTRO de un mismo
-  prefijo Wine, asi que el bridge tiene que vivir donde vive tu MT5 real
-  (el que tiene tu cuenta FBS logueada). Deteccion: overrides
-  `MT5_WINEPREFIX`/`MT5_TERMINAL_PATH` en `.env` -> prefijo del proyecto
-  (`.wine`) -> lanzador `metatrader` (se lee su WINEPREFIX) -> `~/.mt5` ->
-  `~/.wine`. `./run.sh doctor` muestra cual encontro. Nota sobre cuentas
-  SIN sufijo (como la tuya, XAUUSD a secas): la resolucion de simbolos
-  prueba SIEMPRE el nombre exacto primero - el fallback de sufijos solo
-  actua si el nombre exacto no existe, asi que en cuentas estandar no
-  cambia absolutamente nada.
-
-### Conexion SIN MetaTrader: `BROKER_KIND=oanda`
-
-El motor no esta casado con MT5: habla con el broker a traves de una capa
-abstracta (`core/broker.py::BrokerExecutor` + `core/market_data.py`), y hay
-dos implementaciones reales:
-
-- **`BROKER_KIND=mt5_bridge`** (default): el bridge Wine/MT5 de arriba.
-  Cubre **cualquier broker MT5** (FBS incluido - FBS no publica una API
-  REST, asi que para una cuenta FBS este es el unico camino honesto).
-- **`BROKER_KIND=oanda`**: conexion **directa por HTTPS** a la API REST v20
-  de OANDA (`core/oanda.py`) - **sin MetaTrader, sin Wine, sin bridge, sin
-  segunda maquina**, identica en Termux/Kali/Ubuntu (solo usa `requests`).
-  Pasos: cuenta *practice* gratis en oanda.com -> token en "Manage API
-  Access" -> completar `OANDA_API_TOKEN`, `OANDA_ACCOUNT_ID` y `OANDA_ENV`
-  en `.env`. En Kali/Ubuntu podes instalar sin Wine directamente:
-  `./install.sh --no-wine` (ahorra varios GB; deja `BROKER_KIND=oanda` en
-  `.env` solo). `run.sh doctor` ajusta sus chequeos: en este modo no pide
-  Wine/MT5/bridge en ninguna maquina y en su lugar verifica las
-  credenciales OANDA contra la API real.
-
-  Dos notas honestas: (1) "cualquier broker" no existe como protocolo -
-  cada broker expone su propia API o ninguna; lo que este proyecto ofrece
-  es la costura limpia para agregar mas adaptadores (uno por API) sin
-  tocar el motor. (2) En OANDA el oro se opera en **unidades de 1 oz**
-  (equivalente exacto a 0.01 lotes MT5; la matematica de riesgo del motor
-  es identica), pero el margen del lote minimo a ~20:1 ronda los $200 -
-  una cuenta practice arranca con $100,000 asi que sobra, pero una cuenta
-  chica de $50 NO puede operar oro en OANDA; el RiskManager lo va a
-  rechazar con el mensaje de margen de siempre en vez de forzar la orden.
-
-### Plataformas soportadas (auto-detectadas)
-
-`install.sh` y `run.sh` detectan solos en que sistema estan corriendo
-(`/etc/os-release`, o las variables que Termux define) y ajustan que
-instalan/ejecutan - no hace falta pasarles ningun flag de plataforma.
-
-- **Kali Linux y Ubuntu** (o cualquier Debian-like con `apt-get`): soporte
-  completo. `install.sh` instala Wine + el terminal MT5 real + un Python
-  de Windows dentro de Wine, asi que esta maquina puede correr un bridge
-  local y operar en una cuenta real de punta a punta.
-- **Termux en Android, sin root**: soporte real pero **deliberadamente
-  parcial**, y esto no es una limitacion de este proyecto sino de Wine en
-  si - no existe una forma confiable de correr una aplicacion Win32 GUI
-  real (el terminal MT5) bajo Wine en Android sin root; las combinaciones
-  experimentales con proot/box64 que existen no son algo que este script
-  pueda honestamente prometer que funcionan para un bot con dinero real.
-  Por eso, en Termux `install.sh` instala **solo el lado Python puro**
-  (motor, dashboard, backtest - nada de eso necesita Wine) y configura la
-  maquina como **cliente de un bridge remoto**: `run.sh` en el telefono no
-  intenta levantar Wine local, sino que le habla por HTTP a un bridge
-  corriendo en una Kali/Ubuntu real (`MT5_BRIDGE_URL` en `.env` apuntando
-  a esa otra maquina). Lo que SI funciona 100% local en Termux sin ninguna
-  otra maquina: el dashboard (`dashboard.py --web`), los backtests, y
-  `.venv/bin/python main.py --synthetic` para probar el motor con precios
-  simulados - los ultimos dos necesitan `pandas`, que en algunos
-  telefonos/toolchains de Termux directamente no compila (PyPI no publica
-  wheels precompilados para Android; el compilado desde el codigo fuente
-  puede fallar por una incompatibilidad real del toolchain con el codigo
-  SIMD de numpy para ARM, no un bug de este script). Si eso pasa,
-  `install.sh` no aborta: el dashboard queda funcionando igual (nunca usa
-  pandas), solo motor/backtests locales quedan sin disponibles ahi. Un
-  fallo se recuerda para no reintentar un compilado de hasta 90 minutos
-  en cada corrida - `./install.sh --skip-pandas` lo salta directamente,
-  `./install.sh --retry-pandas` fuerza un nuevo intento.
-
-  Detalles practicos del camino Termux:
-  - **Del lado del bridge (la Kali/Ubuntu), hay que abrir el binding**: el
-    bridge escucha solo en `127.0.0.1` por defecto, asi que un telefono
-    NO puede conectarse aunque `MT5_BRIDGE_URL` este bien configurado.
-    En el `.env` de la maquina del bridge pone `BRIDGE_BIND_HOST=0.0.0.0`
-    y reinicia con `./run.sh --stop && ./run.sh --start`. El token
-    (`BRIDGE_AUTH_TOKEN`) se sigue exigiendo en cada pedido; copia ese
-    mismo token al `.env` del telefono.
-  - **Pantalla apagada / bateria**: Android suspende o mata procesos de
-    fondo agresivamente (Doze, "phantom process killer"). `./run.sh
-    --start` en Termux adquiere solo un **wake lock** (`termux-wake-lock`,
-    incluido en Termux) para que el servidor sobreviva con la pantalla
-    apagada, y `--stop` lo libera. Para maxima estabilidad, exclui ademas
-    la app Termux de la optimizacion de bateria de Android (Ajustes ->
-    Apps -> Termux -> Bateria -> Sin restricciones).
-  - **Seguridad del enlace al bridge remoto**: el login MT5 viaja del
-    telefono al bridge por HTTP - si `MT5_BRIDGE_URL` es `http://` hacia
-    otra maquina, esas credenciales van **sin cifrar** por esa red (el
-    token `BRIDGE_AUTH_TOKEN` autentica, pero no cifra). En tu propia red
-    local puede ser un riesgo aceptable; si no lo es, monta el enlace
-    sobre un canal cifrado: un tunel SSH (`ssh -L 5001:127.0.0.1:5001
-    usuario@ip-del-bridge` y `MT5_BRIDGE_URL=http://127.0.0.1:5001`) o
-    una VPN tipo Tailscale/WireGuard entre el telefono y la maquina del
-    bridge. `./run.sh doctor` avisa cuando detecta un bridge remoto en
-    `http://` plano.
-- **Otras distros Linux con `apt-get`** (Debian, Mint, etc.): deberian
-  funcionar por el mismo camino que Kali/Ubuntu, sin garantia especifica.
-- **Cualquier otra cosa** (Fedora, Arch, sin `apt-get` y no Termux):
-  `install.sh` avisa que no reconoce la plataforma, instala igual el lado
-  Python puro, y te deja instalar Wine/MT5 a mano antes de reintentar.
-
-`./run.sh doctor` siempre muestra que plataforma detecto en la primera
-linea, y ajusta sus propios chequeos (por ejemplo, en Termux no reporta
-"falta Wine" como un error - ahi eso es exactamente lo esperado).
-
-## Instalacion
+## Instalación
 
 ```bash
+git clone <URL-del-repositorio>
+cd programa2
+chmod +x install.sh run.sh
 ./install.sh
 ```
 
-En Kali/Ubuntu: instala dependencias de sistema (apt), crea el venv de
-Linux, instala Wine + el terminal MetaTrader 5 + un Python de Windows
-dentro de Wine con el paquete `MetaTrader5`, y crea `.env` a partir de
-`.env.example` (pidiendo login/password/server de forma interactiva; ese
-archivo queda en `.gitignore` y nunca se commitea). En Termux hace lo
-mismo pero solo para el lado Python puro (ver arriba).
+En Kali/Ubuntu, el instalador prepara Python, Wine, MetaTrader 5 y el Python
+de Windows que importa `MetaTrader5`.
 
-`install.sh` descarga instaladores desde `download.mql5.com` y
-`python.org` (solo en el camino Kali/Ubuntu); necesitas salida a internet
-para esos dos dominios. Si tu red los bloquea, descarga `mt5setup.exe` y
-el instalador de Python 3.11 manualmente y ajusta las rutas al inicio del
-script.
-
-## Uso
-
-`run.sh` arranca el **servidor** (el bridge MT5 + el dashboard) - nunca el
-motor (el bot que abre operaciones). El motor se prende y se apaga
-**exclusivamente desde el dashboard** (boton "Iniciar motor" / "Detener
-motor", o `POST /api/engine/start` / `/api/engine/stop`), a proposito: asi
-nunca arranca a operar solo (por ejemplo al reiniciar la maquina con el
-systemd template) sin que alguien lo haya prendido mirando el dashboard.
+Comandos útiles del instalador:
 
 ```bash
-./run.sh --start          # arranca el bridge MT5 + el dashboard en segundo plano
-./run.sh --status          # reporte prolijo: plataforma, bridge, dashboard, motor, cuenta
-./run.sh --stop             # apaga TODO (motor si estaba corriendo, dashboard, bridge, Xvfb) - no queda nada corriendo
-
-./run.sh emergency-stop       # PARADA DE EMERGENCIA: cierra posiciones abiertas y detiene el motor ya
-./run.sh verify                # compila todo, corre los tests y una prueba de humo del motor
-./run.sh doctor                  # diagnostico de la instalacion real (Wine, MT5, bridge, .env, disco...)
+./install.sh --help
+./install.sh --no-wine       # sólo adaptadores que no necesitan MT5 local
 ```
 
-Con el servidor arriba (`./run.sh --start`), abrí
-`http://127.0.0.1:9000` (o la ventana nativa - ver mas abajo) y desde ahi
-arrancá el motor cuando estes listo. `./run.sh --status` refleja el estado
-real del motor consultando la propia API del dashboard, asi que los dos
-nunca se desincronizan.
+El instalador muestra progreso, valida dependencias y ejecuta un diagnóstico
+final. Nunca guardes `.env` en Git: ya está excluido por `.gitignore`.
+
+## Configuración segura
+
+Copia `.env.example` a `.env` o deja que `install.sh` lo cree. Las credenciales
+se pueden introducir desde **Settings**; las claves OpenRouter se escriben en
+`.env` con permisos privados y nunca se muestran completas.
+
+Variables esenciales:
+
+```env
+MT5_LOGIN=
+MT5_PASSWORD=
+MT5_SERVER=FBS-Demo
+SYMBOL=XAUUSD
+TIMEFRAME=M1
+DRY_RUN=true
+RISK_PER_TRADE_USD=1
+MAX_DAILY_LOSS_USD=8
+MAX_DAILY_DRAWDOWN_PCT=20
+MAX_TRADES_PER_DAY=100
+```
+
+El lote no se fija a ciegas: se calcula con el margen y `SymbolSpec` que
+devuelve MT5. Si el lote mínimo excede el riesgo o margen disponibles, la
+señal se rechaza de forma explícita.
+
+### Quantum Queen y gestión avanzada
+
+Todos los módulos avanzados son opt-in:
+
+```env
+STRAT_ENABLE_QUANTUM_QUEEN=false
+STRAT_QUANTUM_PRIMARY=false
+REGIME_FILTER_ENABLED=true
+GRID_ENABLED=false
+GRID_MAX_POSITIONS=3
+GRID_STEP_ATR=1.0
+GRID_MAX_LOT=0.09
+RECOVERY_ENABLED=false
+RECOVERY_MAX_LEVELS=2
+DYNAMIC_LOT_CAP=0.09
+```
+
+`RECOVERY_ENABLED` permite promediar sólo dentro del régimen configurado y
+hasta el número máximo de niveles. Cada pierna se vuelve a validar con
+`RiskManager`; no hay una autorización implícita para martingala ilimitada.
+
+## Arranque y operación
 
 ```bash
-.venv/bin/python dashboard.py       # pregunta: ventana nativa o web
-.venv/bin/python dashboard.py --web # directo como pagina web en http://127.0.0.1:9000
-.venv/bin/python dashboard.py --web --host 0.0.0.0 --port 9000  # accesible desde otro dispositivo en tu red
-
-.venv/bin/python scripts/fetch_market_data.py --interval 1m --range 5d   # historial real (proxy) para backtestear
-.venv/bin/python scripts/run_backtest.py --csv data/gold_history_1m.csv    # backtest con ese historial
-.venv/bin/python scripts/run_backtest.py --csv data/gold_history_1m.csv --composite --leverage 500  # + señales extra (ver Ronda 4)
-
-.venv/bin/python main.py --synthetic   # motor SIN broker, precios simulados, solo para probar en la terminal
-                                        # (no pasa por el dashboard - ./run.sh verify usa esto mismo para su prueba de humo)
+./run.sh --start     # bridge + dashboard; no inicia el motor
+./run.sh --status    # panel visual con estado real de bridge/cuenta/motor
+./run.sh doctor      # diagnóstico de instalación y conectividad
+./run.sh verify      # compilación, tests y smoke test
+./run.sh --stop      # detiene bridge, dashboard y motor
 ```
 
-`install.sh` y `run.sh` son los unicos dos archivos `.sh` del proyecto -
-la parada de emergencia, verificar, y el diagnostico son subcomandos de
-`run.sh` (`emergency-stop`, `verify`, `doctor`), no scripts separados. Por
-ahora `--start`/`--stop`/`--status` son los unicos comandos de arranque del
-servidor - cualquier otro (incluido sin argumentos) muestra la ayuda.
+Abre `http://127.0.0.1:9000`. El motor se inicia deliberadamente desde el
+botón del dashboard; `--start` nunca comienza a operar por sí solo.
 
-`./run.sh doctor` es el primer comando a correr cuando algo no funciona: no
-instala ni cambia nada, solo te dice exactamente que falta (Wine, el
-terminal MT5, el python de Wine, credenciales en `.env`, el bridge
-corriendo, espacio en disco...) en vez de tener que adivinar o re-correr
-`install.sh` a ciegas. En Termux ajusta solo sus propios chequeos (ver
-"Plataformas soportadas" mas arriba). `install.sh` ya corre este mismo
-diagnostico solo al final de instalar, y falla con codigo de salida
-distinto de cero si algo sigue faltando - no se queda en "deberia estar
-todo bien" sin comprobarlo.
-
-`.github/workflows/ci.yml` corre exactamente `./run.sh verify` (mismo
-codigo, no una definicion paralela de "pasa") mas `ruff` y `shellcheck` en
-cada push/PR - no necesita Wine ni un broker, asi que corre en cualquier
-runner de GitHub Actions estandar.
-
-### Resiliencia
-
-`./run.sh --start` supervisa tanto el bridge MT5 como el dashboard: si
-cualquiera de los dos se cae (crash de Wine, excepcion no manejada,
-perdida de conexion), se reinicia solo con backoff exponencial (2s, 4s,
-8s... hasta 60s) en vez de tirar todo el sistema abajo. El motor, una vez
-arrancado desde el dashboard, tiene su propio supervisor independiente con
-la misma politica de reintentos (`core/engine_supervisor.py`) - un crash
-del motor no tira el dashboard ni el bridge, y viceversa. El cliente del bridge tambien reintenta
-llamadas individuales y vuelve a loguearse solo si la sesion de MT5 se
-cae sin que el proceso del bridge muera. Los logs quedan en `data/logs/`
-(rotan automaticamente, no crecen sin limite). La tabla `account_snapshots`
-(una fila por cada poll del motor, no solo por operacion) tampoco crece sin
-limite: el motor borra filas mas viejas que `SNAPSHOT_RETENTION_DAYS`
-(30 dias por defecto) en un chequeo cada una hora.
-
-**Un cierre de posicion (SL, TP, cierre de emergencia) que falla a nivel
-de red nunca deja una posicion fantasma bloqueando el motor.** Antes de
-esto, si `close_partial` fallaba justo cuando la orden ya habia llegado al
-broker (la orden se ejecuto pero la respuesta HTTP se perdio), el motor
-seguia creyendo que la posicion estaba abierta para siempre: cada paso
-intentaba cerrarla de nuevo, el broker respondia "no encontrada", y - como
-el motor solo sostiene una posicion a la vez - eso bloqueaba cualquier
-operacion nueva hasta un reinicio manual. Ahora, ante un fallo de cierre,
-el motor primero revisa si el broker todavia tiene esa posicion: si la
-tiene, la deja para reintentar en el proximo paso (fallo real, sin
-cambios); si no la tiene, la reconcilia como cerrada con PnL marcado
-explicitamente como no confirmado y sigue operando en vez de quedar
-trabado.
-
-**Lo mismo del lado de abrir una operacion, que es el caso mas peligroso:**
-`open_order` es una llamada que modifica estado (a diferencia de una
-lectura de precio), asi que un fallo de red justo despues de que la orden
-ya se ejecuto en el broker no se puede asumir como "no paso nada" - hacerlo
-arriesgaba mandar una SEGUNDA orden real duplicada en el siguiente intento,
-doblando el riesgo real sin que nadie lo pidiera. Ahora, si `open_order`
-falla, el motor revisa el estado real del broker antes de reintentar: si la
-orden si se ejecuto, adopta esa posicion (en vez de abrir una nueva) y
-sigue con una sola; si de verdad no se ejecuto, no queda nada rastreado y
-la misma señal puede reintentarse limpio en el proximo ciclo.
-
-**Modo de "filling" de la orden calculado dinamicamente, no fijo.**
-`bridge/mt5_bridge_server.py` mandaba siempre `ORDER_FILLING_IOC` en cada
-orden. MT5 exige que ese modo coincida con lo que el simbolo realmente
-acepta (un bitmask que reporta `symbol_info`) - si no coincide, TODAS las
-ordenes fallan con el error 10030, dejando el bot sin poder operar nunca
-aunque el resto (bridge, sizing, señales) funcione perfecto. Ahora se
-pregunta al broker que modos soporta ese simbolo en vez de asumir uno fijo
-(IOC > FOK > RETURN, en ese orden de preferencia). Nota de honestidad: esto
-sigue el patron documentado oficialmente por MetaTrader5 para este problema
-conocido, pero no se pudo probar contra FBS real - este modulo solo corre
-bajo el python de Windows dentro de Wine, que no esta disponible en este
-entorno de desarrollo. Confirmalo en una sesion real antes de asumir que
-resuelve algo que no se sabe si esta roto en tu cuenta especifica.
-
-Para que arranque solo al iniciar el sistema (opcional, no se activa
-por defecto): hay una plantilla de servicio systemd de usuario en
-`scripts/xauusd-scalper.service.template` con instrucciones de instalacion
-en el propio archivo.
-
-### Parada de emergencia (interruptor manual)
-
-Tanto `./run.sh --stop` como el boton "Detener motor" del dashboard
-requieren acceso a la maquina que corre el bot (terminal o red local). Para
-cubrir el caso en que ninguno de los dos este disponible (SSH caido,
-dashboard inalcanzable, querés que alguien mas pueda frenarlo con solo
-tocar un archivo), el motor revisa en cada ciclo si existe un archivo
-(`KILL_SWITCH_PATH` en `.env`, por defecto `data/EMERGENCY_STOP`). Si
-existe:
-
-1. Cierra a mercado cualquier posicion abierta inmediatamente (no espera
-   a que el SL/TP la alcance).
-2. Se detiene, y evita que `core/engine_supervisor.py` lo reinicie solo (a
-   diferencia de un crash comun, que si se reintenta con backoff).
+Para parar de emergencia:
 
 ```bash
-./run.sh emergency-stop            # activa: cierra posiciones y detiene el motor
-./run.sh emergency-stop --clear    # desactiva: borra el interruptor, listo para arrancar el motor de nuevo desde el dashboard
+./run.sh emergency-stop
+./run.sh emergency-stop --clear
 ```
 
-Tambien alcanza con `touch data/EMERGENCY_STOP` desde cualquier cosa que
-pueda escribir al filesystem (no hace falta el subcomando ni una sesion de
-shell interactiva). `./run.sh doctor` reporta si el interruptor esta
-activo.
+El primer comando crea `data/EMERGENCY_STOP`, cierra posiciones en el siguiente
+ciclo y evita el reinicio automático del motor.
 
-### Dashboard: ventana nativa o pagina web
+## Backtesting real con MT5
+
+La pestaña **Backtesting MT5** es de sólo lectura. Permite elegir símbolo,
+timeframe, capital, apalancamiento, riesgo, spread, fechas y modo de ticks.
+Con ticks usa bid/ask históricos; las señales se calculan únicamente sobre
+velas cerradas.
+
+El bridge divide automáticamente rangos grandes en ventanas diarias para
+velas y de seis horas para ticks. Esto evita `Invalid params` de
+`copy_rates_range`/`copy_ticks_range` y limita el tamaño de cada respuesta.
+
+Ejemplo de API local:
 
 ```bash
-.venv/bin/python dashboard.py       # terminal interactiva: pregunta que modo usar
-.venv/bin/python dashboard.py --native  # fuerza ventana nativa (salta la pregunta)
-.venv/bin/python dashboard.py --web     # dashboard web en http://127.0.0.1:9000
-.venv/bin/python dashboard.py --web --host 0.0.0.0 --port 9000  # accesible desde otro dispositivo de tu red
+curl -X POST http://127.0.0.1:9000/api/backtest \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "symbol":"XAUUSD", "timeframe":"M1",
+    "date_from":"2026-05-01T00:00:00Z",
+    "date_to":"2026-07-01T23:59:59Z",
+    "bars":100000, "balance":50, "leverage":500,
+    "risk_usd":1, "spread":0.25, "tick_mode":true
+  }'
 ```
 
-Sin flags y desde una terminal interactiva, pregunta que modo usar. Sin
-flags y sin terminal interactiva (ej. lanzado desde otro script), usa
-ventana nativa - el comportamiento original, sin cambios. `--web` corre
-exactamente el mismo Flask que ya servia la ventana nativa, pero
-escuchando directamente en el puerto indicado (9000 por defecto) en vez
-de solo internamente para pywebview - se puede abrir desde cualquier
-navegador.
-
-La mayoria de las rutas son de solo lectura (balance, curva de equity,
-historial de trades, eventos). Las que no lo son - guardar Settings,
-pausar/reanudar, e **iniciar/detener el motor** (`POST
-/api/engine/start|stop`, ver mas abajo) - nunca abren ni cierran una
-posicion directamente: arrancan o paran el *proceso* del motor, que es
-quien decide cuando operar segun la estrategia configurada. Aun asi,
-`--host 0.0.0.0` expone esos datos reales de la cuenta y esos controles a
-cualquiera en tu red local; el programa avisa esto por consola al
-arrancar, y `DASHBOARD_AUTH_TOKEN` (ver mas abajo) es la forma de
-protegerlos si vas a usar `0.0.0.0`. Para acceso solo desde esta maquina
-(el default, mas seguro), dejá `--host 127.0.0.1` sin tocar.
-
-pywebview (la libreria de la ventana nativa) ahora se importa solo cuando
-se usa ese modo, no al cargar el archivo - `--web` funciona incluso en
-una maquina sin ningun toolkit grafico instalado (un servidor headless).
-
-### Dashboard: pestaña Settings, y controlar el motor desde ahi
-
-Tres controles, disponibles en los dos modos (nativo y web, mismo
-frontend), cada uno resolviendo un problema distinto a proposito:
-
-**Boton "Iniciar motor" / "Detener motor"** (arriba a la derecha, pill
-"Motor corriendo"/"Motor detenido" al lado). Es el arranque/parada real
-del *proceso* del motor - equivalente a lo que antes hacia `./run.sh` a
-secas. `./run.sh --start` deliberadamente NO prende esto: solo levanta el
-bridge y el dashboard, y el motor queda apagado hasta que alguien lo
-prenda aca, mirando el dashboard. Internamente lanza
-`core/engine_supervisor.py` (el mismo proceso detached, crash-resiliente
-con backoff que antes manejaba `run.sh`) via `POST /api/engine/start`;
-detenerlo manda SIGTERM via `POST /api/engine/stop` y espera hasta ~15s
-un cierre limpio antes de forzarlo. El boton "Pausar entradas" de abajo
-queda deshabilitado mientras el motor esta detenido - no tiene nada que
-pausar.
-
-**Boton "Pausar entradas" / "Reanudar entradas"**. Pausa - no es el
-interruptor de emergencia ni apaga el proceso: deja de abrir operaciones
-NUEVAS pero sigue gestionando y protegiendo cualquier posicion ya abierta
-(SL/TP siguen activos), y el motor sigue corriendo - no hace falta
-reiniciar nada, reanudar es instantaneo. Internamente toca/borra un
-archivo (`PAUSE_FLAG_PATH` en `.env`, `data/PAUSED` por defecto) que el
-motor ya revisa en cada paso. Si necesitas cerrar posiciones abiertas YA
-en vez de solo pausar, eso sigue siendo `./run.sh emergency-stop` (ver mas
-arriba) - tres controles distintos, cada uno para un caso distinto.
-
-**Pestaña Settings**: cuenta MT5 (login, password, servidor), si es demo,
-DRY_RUN, y los limites de riesgo (`RISK_PER_TRADE_USD`,
-`MAX_DAILY_LOSS_USD`, `MAX_DAILY_DRAWDOWN_PCT`, `MAX_TRADES_PER_DAY`) -
-editables sin tocar `.env` a mano. **Funciona con cualquier broker
-compatible con MetaTrader 5, no solo FBS** - el campo "Servidor" es texto
-libre (ej. `FBS-Demo`, `ICMarkets-Live07`, `Pepperstone-Demo01`...), y
-`bridge/mt5_bridge_server.py` ya aceptaba cualquier servidor desde antes
-de que existiera esta pestaña (`mt5.login()` no esta atado a FBS en
-ningun lado del codigo).
-
-Detalles importantes:
-- **Los cambios se guardan en la base de datos local** (tabla
-  `bot_settings`, sobrevive reinicios) y **se aplican la proxima vez que
-  arranca el motor** (boton "Iniciar motor" en el dashboard) - a proposito
-  NO son en caliente. Cambiar
-  de cuenta/servidor mientras el motor ya esta corriendo (y quizas con una
-  posicion abierta) es un riesgo real de confundir en que cuenta esta
-  parada esa posicion, asi que esto pide un reinicio en vez de intentar un
-  hot-reload. `/api/status` (los pills de arriba) siempre muestra la
-  cuenta con la que el motor YA esta conectado, nunca un cambio pendiente
-  sin aplicar - para eso esta la pestaña Settings.
-- **El password nunca se muestra ni se re-envia en texto plano.** El campo
-  siempre carga vacio; dejarlo vacio al guardar significa "no lo toques",
-  no "borralo". La API solo informa si hay uno guardado (`has_password`),
-  jamas su valor.
-- **Autenticacion en las rutas que modifican algo.** Igual que el bridge,
-  `DASHBOARD_AUTH_TOKEN` (vacio por defecto, `install.sh` NO lo genera
-  solo a diferencia de `BRIDGE_AUTH_TOKEN` - ver por que abajo) protege
-  `POST /api/settings` y `POST /api/bot/pause|resume` con el header
-  `X-Dashboard-Token`; las rutas de solo lectura no lo piden. Si el
-  dashboard pide el token (ventana emergente del navegador) y no lo
-  configuraste, la accion que intentabas hacer simplemente no se aplica.
-  Por que no se genera automaticamente como el del bridge: el bridge
-  siempre esta
-  expuesto al mismo riesgo (ejecuta ordenes reales) sin importar el modo;
-  el dashboard solo necesita el token cuando elegis exponerlo con
-  `--web --host 0.0.0.0` - forzarlo siempre agregaria una pregunta de
-  token hasta para el uso 100% local (ventana nativa), que no gana nada
-  de seguridad real ahi. `./run.sh doctor` reporta si esta configurado.
-
-### Dashboard: rediseño visual
-
-Ventana nativa y dashboard web sirven exactamente el mismo
-`dashboard/index.html` + `app.js` + `style.css` desde el mismo Flask -
-cualquier mejora visual aplica a los dos por igual, no hay nada que portar
-entre uno y otro. Cambios (siguiendo una metodologia de diseño de datos con
-validacion de paleta por contraste/daltonismo, no elegida a ojo):
-
-- **Selector de tema claro/oscuro manual**, con boton en el header (antes
-  solo seguia la preferencia del sistema operativo). Se guarda en
-  `localStorage` y persiste entre sesiones.
-- **Colores de estado separados de los colores de texto.** Los badges de
-  estado (conectado/dry-run/desconectado, nivel de evento) usan una paleta
-  fija que no cambia entre tema claro/oscuro - la severidad significa lo
-  mismo en los dos temas. El texto de P&L/deltas usa una paleta aparte que
-  si se ajusta por tema (mismo criterio que usan sistemas de diseño
-  validados: colores de "identidad/severidad" fijos, colores de "texto"
-  adaptados al fondo). Paleta verificada con un validador automatico de
-  contraste y separacion por daltonismo, no a ojo.
-- **Grafico de equity: crosshair real en vez de cajas de hover diminutas.**
-  Antes cada punto tenia su propia caja invisible de hover - con la curva
-  mostrando hasta 300 lecturas en un grafico de ~600px, cada caja terminaba
-  siendo de un par de pixeles de ancho, virtualmente imposible de acertar
-  con el mouse. Ahora hay una sola zona de hover que calcula el punto mas
-  cercano al cursor y muestra una linea vertical + tooltip, sin importar
-  cuantos puntos tenga la curva.
-- **Barras de P&L con esquinas redondeadas solo en el extremo del dato**,
-  no en el extremo que toca la linea base (una barra "crece" desde cero;
-  redondear ese extremo la hacia parecer flotando en vez de anclada).
-- **Tooltips con el valor primero, la etiqueta despues** (el dato es lo que
-  se busca al pasar el mouse, no el nombre de la serie).
-- El tile de equity ahora muestra el cambio real (▲/▼ en USD) desde el
-  inicio del grafico visible - antes ese elemento existia en el HTML pero
-  nunca se llenaba con datos.
-- Favicon propio, scrollbar con estilo consistente, estados vacios con
-  icono en vez de solo texto.
-
-Verificado con capturas de pantalla reales (Chromium headless via
-Playwright) en modo claro, oscuro, con datos, vacio, y con el mouse sobre
-los graficos - no solo lectura de codigo.
-
-### Dashboard: hardening y un par de bugs reales
-
-Revision del frontend (`dashboard/app.js`), verificada con Chromium real
-via Playwright (no solo lectura de codigo):
-
-- **Los mensajes de eventos ahora se escapan antes de insertarse en el
-  DOM.** El manejador generico de errores del motor guarda texto crudo de
-  excepciones en la tabla de eventos (`f"{type(exc).__name__}: {exc}"`),
-  que el dashboard mostraba con `innerHTML` sin escapar - un mensaje de
-  error con caracteres como `<` o `"` se habria interpretado como HTML en
-  vez de mostrarse como texto. Probado inyectando un mensaje con
-  `<img src=x onerror=...>`: ahora se ve como texto literal, no se
-  ejecuta.
-- **Los "hitbox" invisibles del grafico de equity (para el tooltip al
-  pasar el mouse) usaban un ancho de columna que no coincidia con el
-  espaciado real de los puntos**, asi que el tooltip podia no aparecer o
-  corresponder al punto equivocado, mas notorio con pocos puntos o un
-  grafico angosto. Corregido para usar el mismo espaciado que el trazado
-  real.
-- **Un solo endpoint del dashboard que fallara tumbaba TODO el refresco**
-  (`Promise.all` fallaba entero si cualquiera de las 7 llamadas fallaba).
-  Ahora cada seccion (tiles, curva de equity, grafico diario/mensual,
-  tabla de trades, eventos) se actualiza de forma independiente - si una
-  falla, las demas se siguen actualizando con normalidad en vez de dejar
-  todo el dashboard en blanco.
-
-### Antes de operar en real
-
-`DRY_RUN=true` en `.env` (valor por defecto) hace que el motor lea
-precios **reales** del bridge pero simule los cierres localmente — no
-manda ninguna orden a la cuenta. Cambia a `DRY_RUN=false` solo cuando:
-
-1. Corriste `scripts/run_backtest.py` con historial real y los numeros
-   tienen sentido para vos.
-2. Dejaste el bot en `DRY_RUN=true` un tiempo contra precios en vivo y
-   viste en el dashboard que el comportamiento es el esperado.
-3. Entendes que aun asi puede perder dinero — la cuenta demo con $50 es
-   justamente para probar esto sin que importe.
-
-## Que dice el backtest con datos reales (y como se llego a esto)
-
-`scripts/fetch_market_data.py` descarga futuros de oro COMEX (GC=F) reales
-via Yahoo Finance - no es el feed exacto de FBS, pero es un proxy liquido
-y correlacionado, util para revisar que la estrategia tenga sentido sobre
-movimiento de mercado real en vez de puro ruido sintetico. Esta seccion es
-el historial completo y honesto de esa validacion, incluyendo el momento
-en que un backtest con mas datos tumbo una conclusion anterior.
-
-**Ronda 1 (5 dias reales de 1m).** Se encontraron y corrigieron dos bugs
-del backtester: (a) solo miraba el precio de cierre de cada vela para
-decidir si el SL/TP se habian tocado, ignorando el rango intra-vela
-(`high`/`low`) - eso escondio una perdida de -$14 contra un limite
-configurado de -$1; y (b) clasificaba mal ganadas/perdidas cuando una
-operacion aseguraba ganancia en el primer TP y despues cerraba en
-breakeven. Con esos bugs corregidos, la configuracion original
-(`sl_atr_multiple=1.2`) perdia dinero de forma consistente - el stop era
-demasiado ajustado para el ruido normal de 1 minuto en oro. Se agrego un
-**trailing stop** despues del primer TP, y se probaron varios valores de
-`sl_atr_multiple` con un split train/test 60/40: `4.0` fue el mas ancho
-que se mantuvo positivo en ambos tramos, dando +$7.50 sobre $50 en los 5
-dias completos (91.7% de operaciones ganadoras).
-
-**Ronda 2 (8 dias reales de 1m - mas datos, misma metodologia) reveló que
-la Ronda 1 estaba mal.** Con una ventana un poco mas larga, la MISMA
-configuracion (`sl_atr_multiple=4.0`) **quebro la cuenta por completo**:
--$55 sobre $50 iniciales, balance final negativo, 108.8% de drawdown
-maximo. Investigando operacion por operacion aparecio la causa real, un
-**tercer bug, mas serio que los dos anteriores**: `size_position` siempre
-opera como minimo el lote minimo del broker (0.01), incluso cuando ese
-lote - dada una distancia de stop ancha por un pico de volatilidad -
-implica arriesgar mucho mas que `RISK_PER_TRADE_USD`. Se reprodujo
-exacto: un presupuesto de riesgo de $1 se convirtio en una perdida real
-de $16 en una sola operacion; una secuencia de esas volo la cuenta en
-horas. **Esto explica por que la Ronda 1 se vio bien**: la ventana de 5
-dias que se uso para "validar" el parametro simplemente no incluyo ningun
-pico de volatilidad lo bastante fuerte como para disparar el bug.
-
-**La correccion:** `core/risk_manager.py` ahora calcula el riesgo real en
-dolares del lote minimo antes de operar, y **rechaza la señal** si supera
-`RISK_PER_TRADE_USD` por mas de un 50% de margen de redondeo (en vez de
-operar igual con el lote minimo y comerse el riesgo real). Con esta
-correccion, sobre los mismos 8 dias reales, el resultado a `RISK_PER_TRADE_USD=1.0`
-es 0 operaciones (el filtro rechaza casi toda señal dada la volatilidad
-real del oro con un lote de 0.01) - subiendo el riesgo por operacion a
-$2-5 habilita mas trades pero **el resultado siguio siendo negativo en
-todos los niveles probados** (-$5.48 a $2, -$7.80 a $3, -$9.97 a $5).
-
-**Conclusion de la Ronda 2:** la combinacion actual de señal (Bollinger+RSI
-en 1m) y gestion de stops **no muestra una ventaja real** sobre esta
-muestra de datos reales, mas alla de la correccion de bugs de seguridad
-que si son mejoras genuinas y quedan en el codigo. El trabajo pendiente
-que quedo anotado: agregar un filtro de tendencia para no operar reversion
-a la media en contra de un movimiento fuerte - exactamente lo que produjo
-la secuencia de perdidas de la Ronda 2.
-
-**Ronda 3: se agrego el filtro de tendencia (ADX) y se lo puso a prueba
-con el mismo rigor.** `core/strategy.py` ahora calcula ADX(14) y descarta
-cualquier señal de reversion a la media si ADX >= 35 (umbral estandar de
-"tendencia fuerte" en analisis tecnico, no ajustado a este dataset). Con
-el filtro fijo en su umbral por defecto, sobre los mismos 8 dias reales
-(risk-usd=$3, split 60/40): TRAIN -$0.42 (6 operaciones, 83.3% ganadas),
-TEST -$4.74 (5 operaciones, 60% ganadas, 13.2% drawdown maximo). Sin el
-filtro (umbral 99, efectivamente desactivado), el mismo split: TRAIN
-+$0.38 (7 operaciones), TEST **-$8.19 (7 operaciones, 21.1% drawdown
-maximo)**. El filtro reduce la perdida y el drawdown fuera de muestra de
-forma clara - hace exactamente lo que se diseño para hacer (evitar las
-peores operaciones, las que pelean contra una tendencia confirmada) - pero
-**no convierte la estrategia en ganadora**.
-
-Se probaron tambien umbrales de ADX mas ajustados (15-22) buscando un
-resultado positivo: en el tramo de entrenamiento llegaron a mostrar 100%
-de aciertos, pero eso fue sobre 3 a 6 operaciones - una muestra demasiado
-chica para significar nada - y en el tramo de prueba la mayoria no genero
-ninguna operacion o perdio la unica que hizo. Se descarto ese resultado
-en vez de reportarlo como un hallazgo: es la misma trampa de sobreajuste
-que ya aparecio en la Ronda 1, esta vez mas facil de detectar porque el
-conteo de operaciones era demasiado bajo para tomarlo en serio.
-
-**Conclusion honesta acumulada (Rondas 1-3):** el objetivo original del
-proyecto (miles de operaciones diarias con ganancias altas y perdidas
-minimas) sigue sin ser alcanzable con esta estrategia sobre gold real.
-Lo que si son mejoras genuinas y quedan en el codigo: los tres bugs de
-seguridad corregidos (deteccion de cruces intra-vela, clasificacion de
-ganada/perdida, tope de riesgo del lote minimo) y el filtro de tendencia,
-que reduce la severidad de las perdidas sin prometer rentabilidad. El
-trabajo pendiente real para encontrar una ventaja genuina necesitaria
-mucho mas historial (semanas a meses, no dias) del feed real de FBS -
-con la cantidad de datos disponible en este entorno, cualquier resultado
-mas optimista que este seria, con alta probabilidad, ruido estadistico
-maquillado de señal. Antes de operar en real: repeti este proceso con
-historial real de FBS (exportado del bridge una vez conectado).
-
-**Ronda 4: se probaron 5 señales M1 nuevas, independientes de la reversion a
-la media - adaptadas de un EA de referencia (MQL5) que me pasaron, con una
-diferencia deliberada e importante.** Ese EA gana confirmaciones (12
-filtros direccionales: cruces de EMA multi-timeframe, RSI, ventanas de
-sesion, ruptura de rango, estructura de swings) pero su gestion de riesgo
-real es un grid/martingale: ninguna orden individual lleva stop-loss, agrega
-mas posiciones si el precio sigue en contra y espera un take-profit sobre el
-precio promedio de todo el grupo - el mismo patron que ya casi quebro una
-cuenta en el backtest de este proyecto (Ronda 2, arriba). Se descarto ese
-mecanismo a proposito (decision confirmada explicitamente antes de tocar
-codigo) y se tomaron solo las ideas de señal, cada una pasando por el mismo
-`RiskManager` y el mismo `RISK_PER_TRADE_USD` que la reversion a la media -
-ver `core/signals.py` para el detalle completo de que se adapto y por que.
-
-Las 5 señales (cruce de EMA9/21 en M1 confirmado por la pendiente de EMA50
-en M5, cruce de RSI por la linea de 50 con histeresis, vela direccional
-fuerte, apertura de sesion Londres/Nueva York, y ruptura del rango
-asiatico) se probaron sobre los mismos 7 dias reales de oro COMEX
-(`scripts/fetch_market_data.py`, risk-usd=$3, apalancamiento 1:500 fijo de
-metales en FBS - ver la nota de apalancamiento mas arriba), cada una sola
-encima de la reversion a la media, y las 5 juntas:
-
-| Configuracion | Trades | Trades/dia | Win rate | PnL | Drawdown max |
-|---|---|---|---|---|---|
-| Solo reversion a la media (baseline) | 17 | ~3.2 | 82.4% | -$0.79 | 12.6% |
-| + cruce de EMA (momentum) | 137 | ~25.8 | 75.9% | -$37.22 | 74.9% |
-| + histeresis de RSI | 79 | ~14.9 | 73.4% | -$36.85 | 75.3% |
-| + vela direccional | 85 | ~16.0 | 67.1% | -$37.02 | 75.3% |
-| + apertura de sesion | 82 | ~15.4 | 76.8% | -$24.97 | 54.9% |
-| + ruptura de rango asiatico | 51 | ~9.6 | 78.4% | -$11.93 | 34.8% |
-| Las 5 juntas | 116 | ~21.8 | 70.7% | -$38.78 | 78.6% |
-
-**El objetivo de frecuencia SI se cumple - cada señal, sola, multiplica los
-trades/dia entre ~3x y ~8x la reversion a la media sola.** Pero el
-resultado en dolares es peor en las 5, no mejor: el win rate se mantiene
-alto (67-78%) pero no compensa perdidas individuales mas grandes,
-exactamente el mismo desbalance ganancia/perdida que ya aparecio en las
-Rondas 1-3 para la reversion a la media, aca mas marcado porque estas 5
-señales son de CONTINUACION (siguen un movimiento que ya empezo) y
-comparten el mismo primer nivel de TP chico y dolar-anclado
-(`MIN_TP_USD=0.28`) que la reversion a la media, la cual sí puede justificar
-un TP chico porque entra EN un extremo estadistico. Una entrada de
-continuacion entrando a mitad de un movimiento no tiene esa misma
-justificacion para un TP tan ajustado frente a su propio stop.
-
-**Por eso las 5 quedan en el codigo, probadas y documentadas, pero
-APAGADAS por defecto** (`STRAT_ENABLE_*=false` en `.env.example`) - activar
-una es una decision informada de quien corra su propio backtest despues de
-ajustarla, no un cambio de comportamiento por defecto. Esto es exactamente
-lo que evita este proyecto en cada ronda: nunca reportar un numero
-optimista sin haberlo corrido primero, y nunca activar por defecto algo que
-el propio backtest muestra que empeora el resultado.
-
-**Ronda 5: ladder de TP adaptativo a la volatilidad (`vol_ratio`), pedido
-explicitamente para intentar arreglar el desbalance encontrado en la Ronda
-4.** `core/strategy.py::build_tp_ladder` ahora recibe un `vol_ratio` (ATR
-actual dividido por un ATR base mas lento, acotado a 0.5-2.0) que separa
-mas los niveles de TP 2+ en mercados volatiles (mas espacio para que un
-movimiento real pague mas) y los junta en mercados tranquilos (la escalera
-se completa mas rapido, mas operaciones realizadas por dia). El primer
-nivel (`MIN_TP_USD`) queda **exactamente igual que antes** - "fijo" en el
-pedido del usuario significa eso: ese piso en dolares no se toca, solo el
-espaciado de lo que viene despues es "inteligente". Se probo tambien subir
-`TP_LEVELS` de 3 a 5 (mas escalones = mas capital que puede salir en
-distintos niveles de la escalera en vez de solo 3 cortes).
-
-| Configuracion | Trades | Trades/dia | Win rate | PnL | Drawdown max |
-|---|---|---|---|---|---|
-| Reversion a la media, ladder adaptativo (TP_LEVELS=3) | 17 | ~3.2 | 82.4% | -$0.95 | 12.6% |
-| Reversion a la media, ladder adaptativo (TP_LEVELS=5) | 17 | ~3.2 | 82.4% | **-$0.13** | 12.5% |
-| Las 5 señales extra, ladder adaptativo (TP_LEVELS=3) | 116 | ~21.8 | 70.7% | -$38.01 | 77.2% |
-| Las 5 señales extra, ladder adaptativo (TP_LEVELS=5) | 123 | ~23.1 | 69.9% | -$39.25 | 79.8% |
-
-**Resultado honesto, en dos partes distintas:**
-
-Para la reversion a la media (la unica estrategia con historial real
-validado), el ladder adaptativo con `TP_LEVELS=5` **si ayuda, y bastante**:
-de -$0.79 (Ronda 3, ladder fijo) a -$0.13 - practicamente breakeven sobre
-esta muestra de 7 dias, sin cambiar ni una señal de entrada, solo como se
-reparte la salida. Tiene sentido: una reversion a la media que funciona
-tipicamente SI atraviesa varios niveles de TP en su camino de vuelta hacia
-el promedio, asi que una escalera con mas escalones y espaciado ajustado a
-la volatilidad real aprovecha mejor ese recorrido.
-
-Para las 5 señales extra de la Ronda 4, el mismo ladder **no arregla el
-problema real**: -$38.01 y -$39.25 son practicamente lo mismo que el
--$38.78 del ladder fijo original. La razon, investigada en vez de asumida:
-estas señales son de continuacion, no de reversion - o el movimiento sigue
-de una y atraviesa varios niveles de TP rapido, o se da vuelta y toca el
-stop casi de inmediato, sin el recorrido gradual que hace que un ladder
-mas fino ayude. El desbalance real (stop proporcionalmente mas ancho que
-lo que tarda en llegar CUALQUIER TP) no es un problema de forma de la
-escalera, es un problema de que el stop de estas señales sigue siendo
-demasiado ancho para su propio patron de resultado binario. Siguen
-**apagadas por defecto** - este ladder adaptativo no cambia esa
-recomendacion.
-
-**Ronda 6: se encontro (y corrigio) un bug de herramienta que invalidaba
-las lecturas de riesgo, y se re-verifico `RISK_PER_TRADE_USD` con datos
-reales frescos.** Al pedir una nueva pasada de mejoras se descargaron 7
-dias reales de oro COMEX terminados hoy mismo (`scripts/fetch_market_data.py`)
-y se corrio un barrido de `RISK_PER_TRADE_USD` con la misma metodologia
-train/test 60/40 de siempre. Primer resultado: **0 operaciones en TODOS
-los niveles probados, de $1 a $8** - mucho mas severo que lo esperado.
-Investigando en vez de asumir que "la estrategia no genera señales" (que
-hubiera sido la conclusion facil y equivocada), aparecio la causa real: el
-**default de `--leverage` en `scripts/run_backtest.py` estaba en 1**, no en
-500 (el apalancamiento real de metales en FBS, ver la nota mas arriba). Con
-apalancamiento 1:1 el margen requerido para el lote minimo en oro a ~$4000
-es ~$4070 - imposible sobre un balance de $50 - asi que CUALQUIER señal se
-rechazaba por margen antes de siquiera llegar al chequeo de riesgo,
-indistinguible de "no hay señales" sin mirar el motivo exacto del rechazo.
-Este bug era **solo de la herramienta de backtest** (el motor en vivo/
-DRY_RUN siempre usa el apalancamiento real que reporta el broker via
-`account.leverage`, nunca este default) pero **invalidaba silenciosamente
-cualquier barrido de riesgo corrido con el CLI sin pasar `--leverage 500`
-a mano** - potencialmente incluyendo lecturas pasadas. Se corrigio el
-default a 500 (`scripts/run_backtest.py`).
-
-Con el apalancamiento corregido, el barrido de `RISK_PER_TRADE_USD` (mismo
-split, `STRAT_SL_ATR_MULTIPLE=4.0`, `TP_LEVELS=5`) dio:
-
-| RISK_PER_TRADE_USD | TRAIN trades | TRAIN win% | TRAIN PnL | TRAIN DD | TEST trades | TEST win% | TEST PnL | TEST DD |
-|---|---|---|---|---|---|---|---|---|
-| 1.0 | 0 | - | $0.00 | 0% | 0 | - | $0.00 | 0% |
-| 2.0 | 1 | 0% | -$2.88 | 5.8% | 0 | - | $0.00 | 0% |
-| 3.0 | 10 | 80.0% | -$1.13 | 13.0% | 10 | 80.0% | -$1.19 | 7.4% |
-| 5.0 | 80 | 87.5% | -$9.13 | **54.9%** | 56 | 92.9% | +$11.30 | 15.5% |
-
-**Confirma exactamente lo que la Ronda 2 ya habia encontrado, ahora con
-datos de hoy:** con el default publicado hasta ahora (`RISK_PER_TRADE_USD=1.0`),
-el bot **no puede operar en absoluto** a los precios actuales del oro - no
-es conservador, esta inerte. `2.0` sigue siendo insuficiente (1 sola
-operacion en todo el tramo de train, 0 en test - muestra demasiado chica
-para significar nada). `5.0` genera volumen real (80+56 operaciones) pero
-es **inestable entre mitades**: +$11.30 en test contra un drawdown de
-**54.9% en train** - una sola mala racha se comio mas de la mitad de la
-cuenta en la mitad de entrenamiento, exactamente el patron de riesgo que
-este proyecto evita en cada ronda anterior. `3.0` es el unico nivel
-**consistente entre train y test** (10 operaciones en cada mitad, ~80% de
-aciertos en ambas, resultado levemente negativo y de magnitud similar en
-las dos: -$1.13 y -$1.19, drawdown razonable de 7-13%) - y coincide, en
-orden de magnitud, con lo que la Ronda 3 ya habia reportado a este mismo
-nivel de riesgo (-$0.42 / -$4.74).
-
-**La decision, honesta:** se sube el default de `RISK_PER_TRADE_USD` de
-1.0 a **3.0** en `.env.example` y `core/config.py`. Esto **no es una
-afirmacion de que la estrategia ahora es rentable** - sigue siendo
-levemente negativa en ambos tramos, igual que en la Ronda 3. Es el piso
-minimo para que el bot pueda generar operaciones reales y consistentes en
-absoluto con el precio actual del oro y el lote minimo del broker, en vez
-de quedarse inerte silenciosamente mientras el operador cree que esta
-"probando en modo seguro". `5.0` se probo y se descarta como default por
-inestable (el drawdown del 54.9% en una mitad es motivo suficiente,
-independientemente de que la otra mitad haya dado ganancia). Sigue
-pendiente el mismo trabajo real de las rondas anteriores: mas historial
-(semanas/meses del feed real de FBS, no dias de un proxy COMEX) antes de
-confiar en que $3.0 - o cualquier otro numero - sea el nivel correcto para
-una cuenta real.
-
-**Ronda 7: se midio el "superscalping" de maxima frecuencia (objetivo
-pedido: minimo 400 trades/dia) con la misma vara de siempre.** Se corrio
-la configuracion mas agresiva que este bot puede montar - cooldown 0, las
-5 señales extra ACTIVADAS a la vez, tope de 1000 trades/dia, riesgo $3,
-ladder adaptativo de 5 niveles - sobre 7 dias reales de oro 1m frescos
-(terminados el mismo dia de la corrida), split train/test 60/40:
-
-| Tramo | Trades | Trades/dia | Win rate | PnL | Drawdown max | Balance final |
-|---|---|---|---|---|---|---|
-| TRAIN | 204 | ~62 | 72.1% | -$37.11 | 77.7% | $12.89 de $50 |
-| TEST | 162 | ~74 | 73.5% | -$37.99 | 78.1% | $12.01 de $50 |
-
-Dos conclusiones, ambas contundentes y consistentes entre mitades:
-
-1. **400 trades/dia no existen en los datos.** Con TODO activado y sin
-   cooldown, el maximo real de señales que el mercado de oro 1m produce
-   con estas 6 estrategias es ~62-74/dia. Llegar a 400 exigiria operar
-   practicamente cada vela SIN señal alguna - y eso tiene una matematica
-   inapelable: con el spread tipico de ~$0.25 en oro, 400 operaciones/dia
-   al lote minimo (1 oz) cuestan ~$100/dia SOLO de spread, sobre una
-   cuenta de $50. Ninguna estrategia lo sobrevive; un "trade por vela"
-   es una maquina de transferirle la cuenta al broker.
-2. **La frecuencia maxima alcanzable pierde, y fuerte.** ~72-73% de
-   operaciones ganadas y aun asi -$37 a -$38 de $50 en cada mitad (78% de
-   drawdown): las ganancias chicas de muchos trades no compensan las
-   perdidas mas grandes de los pocos que fallan - el mismo desbalance ya
-   documentado en las Rondas 4-5, ahora confirmado en datos nuevos.
-
-**Por eso los defaults NO cambian**: reversion a la media sola, cooldown
-2, señales extra apagadas. El modo de alta frecuencia queda disponible
-para quien quiera experimentar (es todo configurable por .env:
-`STRAT_COOLDOWN_BARS=0`, `STRAT_ENABLE_*=true`, `MAX_TRADES_PER_DAY`),
-pero activarlo tal cual hoy es, con la evidencia disponible, perder
-dinero mas rapido. Si el objetivo de muchas operaciones diarias importa
-mas que el resultado, ese es un trade-off que debe elegirse sabiendo
-estos numeros - no algo que este README vaya a presentar como "ganancias
-pequeñas por vela".
-
-**Ronda 8: time-stop probado (no ayudo - queda apagado), y una divergencia
-real backtest/vivo corregida.** Dos trabajos con la misma vara de siempre:
-
-*Time-stop.* La hipotesis, salida directamente del perfil de perdidas
-documentado en las Rondas 2-6 (pocas perdidas grandes de trades que nunca
-revierten y viajan hasta el stop de 4xATR): si la reversion no ocurrio en
-N velas, cerrar a mercado en vez de esperar el stop lejano. Se implemento
-en `core/backtest.py` (`max_hold_bars`, solo pre-TP1 - despues de TP1 el
-trailing ya gestiona la salida) y se barrio N en {15, 30, 60, 90} sobre
-los mismos 7 dias reales, split 60/40:
-
-| max_hold_bars | TRAIN PnL | TEST PnL |
-|---|---|---|
-| 0 (apagado) | -$1.13 | -$1.19 |
-| 15 | -$1.13 | **-$4.62** |
-| 30 / 60 / 90 | -$1.13 | -$1.19 |
-
-Resultado honesto: **no ayuda en estos datos**. Con N=15 empeora el tramo
-de prueba (corta trades que SI iban a revertir); con N>=30 no cambia nada
-(los trades reales ya resuelven TP1-o-stop antes de 30 velas). Por eso NO
-se cablea al motor ni se activa por defecto - queda como parametro de
-experimentacion del backtest (`--max-hold-bars` en `scripts/run_backtest.py`,
-default 0 = apagado, con test que fija su comportamiento).
-
-*Divergencia backtest/vivo (esta si se corrigio).* El backtest evalua
-señales una vez por vela CERRADA; el motor en vivo las evaluaba cada
-ciclo de poll (2s) sobre la vela EN FORMACION, cuyo cierre todavia se
-esta moviendo. Es decir: todos los numeros validados de este README se
-midieron con una regla de entrada que el motor en vivo no seguia - un
-pico a mitad de vela podia disparar una entrada "extrema" que ningun
-backtest vio jamas, justo cuando los spreads se ensanchan. Ahora
-`core/engine.py` evalua entradas SOLO sobre las velas cerradas (la vela
-en formacion se excluye de la ventana), exactamente la vista que el
-backtest valido. La GESTION de posiciones abiertas (SL/TP/trailing/kill
-switch) sigue siendo tick a tick a proposito - proteger una posicion no
-puede esperar al cierre de vela. Test de regresion incluido: una señal
-que solo existe en la vela en formacion no abre nada.
-
-**Ronda 9: sexta señal extra pedida explicitamente para maximizar
-frecuencia de trades (contexto de tendencia M15), medida con la misma
-vara de siempre - y descartada por el mismo motivo que las Rondas 4 y
-7.** La idea: mirar la ULTIMA vela M15 ya CERRADA (resample de M1, nunca
-la vela M15 en formacion - mismo principio de "solo velas cerradas" que
-la Ronda 8 aplico a M1) y usar su cierre vs apertura como contexto
-direccional para M1 (`M15TrendStrategy` en `core/signals.py`, flag
-`STRAT_ENABLE_M15_TREND`). El pedido explicito era priorizar frecuencia
-sobre tamaño de ganancia por trade, aceptando ganancias chicas a cambio
-de mas operaciones - la pregunta que este backtest tenia que contestar es
-si esa frecuencia extra viene con perdida neta o no, sin repetir a
-ciegas el error ya documentado.
-
-Sobre los mismos 7 dias reales de oro COMEX 1m de `data/gold_history.csv`
-(6857 velas, ~4.8 dias), split train/test 60/40 cronologico, cada tramo
-corrido de forma independiente (balance $50 fresco en cada corrida, para
-que el tramo TEST no arranque ya con la cuenta reventada por TRAIN):
-
-| Tramo | Estrategia | Trades | Trades/dia | Win rate | PnL | Drawdown max | Balance final |
-|---|---|---|---|---|---|---|---|
-| Dataset completo | Solo reversion a la media (baseline) | 14 | ~2.94 | 85.7% | +$1.46 | 7.0% | $51.46 |
-| Dataset completo | + M15TrendStrategy activada | 144 | ~30.24 | 78.5% | **-$37.86** | **78.3%** | $12.14 |
-| TRAIN | Solo reversion a la media (baseline) | 4 | ~1.40 | 100.0% | +$2.65 | 0.0% | $52.65 |
-| TRAIN | + M15TrendStrategy activada | 144 | ~50.40 | 78.5% | **-$37.86** | **78.3%** | $12.14 |
-| TEST | Solo reversion a la media (baseline) | 10 | ~5.25 | 80.0% | -$1.33 | 7.4% | $48.67 |
-| TEST | + M15TrendStrategy activada | 69 | ~36.22 | 68.1% | **-$39.52** | **81.1%** | $10.48 |
-
-Tres cosas a notar, todas consistentes entre TRAIN y TEST (no es
-sobreajuste de un solo tramo, es el mismo patron en los dos):
-
-1. **Si cumple el objetivo pedido de frecuencia** - de ~1.4-5.25
-   trades/dia (reversion sola) a ~36-50 trades/dia con la señal activada,
-   con margen de sobra.
-2. **Pero el resultado en dolares es una perdida grande y consistente**,
-   no una mejora chica: -$37.86 en TRAIN y -$39.52 en TEST, con drawdown
-   de 78.3% y 81.1% respectivamente - practicamente la cuenta completa.
-   Los numeros del dataset completo coinciden exactamente con los de
-   TRAIN (144 trades, -$37.86) porque, dentro de una corrida continua, la
-   cuenta ya queda tan reducida al terminar el tramo TRAIN que el motor
-   deja de poder abrir posiciones nuevas durante el tramo TEST - el
-   mismo mecanismo de "cuenta muerta" que Ronda 7 ya diagnostico con el
-   "superscalping" al 76% de drawdown.
-3. **Es el mismo desbalance de siempre, ahora en una señal de tendencia
-   M15 en vez de M1**: un contexto de tendencia de 15 minutos leido de
-   forma tan simple (solo cierre vs apertura, sin EMA ni ADX, a proposito
-   para maximizar cuantas veces dispara) entra en el M1 sin ninguna
-   confirmacion adicional, y el stop-loss (2x ATR de M1 por defecto) es
-   proporcionalmente angosto frente al ruido real que esa entrada
-   encuentra - exactamente el mismo perfil de "muchas ganancias chicas,
-   pocas perdidas grandes que se comen todo" que las Rondas 4 y 7 ya
-   documentaron para otras seis señales.
-
-**Por eso `STRAT_ENABLE_M15_TREND` queda en `false` por defecto**, igual
-que las otras cinco señales extra. La señal, su test suite
-(`tests/test_signals.py`) y su wireado en `build_strategy_from_settings`
-quedan en el codigo, probados y documentados, para quien quiera
-experimentar con un stop mas ancho, un filtro de cuerpo/rango mas estricto
-u otra confirmacion adicional antes de reconsiderar el default - pero
-activarla tal cual hoy, con la evidencia de este backtest, es priorizar
-frecuencia de trades a costa de perder la mayor parte de la cuenta, no
-una mejora real.
-
-**Ronda 10: se porto la logica de señal de un EA MQL5 pedido explicitamente
-("ScalpMaster Pro v1.0"), en M15 en vez de M1 - con un hallazgo de
-seguridad serio en el original y otro hallazgo estructural, ninguno de los
-dos negociable, encontrados ANTES de siquiera llegar al backtest.**
-
-*El hallazgo de seguridad (en el codigo fuente del EA, no en este repo).*
-El EA abre toda posicion con `Trade.Buy(lot, _Symbol, 0, 0, 0, ...)` - los
-parametros de stop-loss y take-profit van en `0`, es decir **la posicion
-se abre sin stop-loss real**. Su unica proteccion es un trailing stop que
-recien se activa despues de que el precio toca el primer nivel de un grid
-de 6 take-profits; si el precio nunca llega ahi y sigue en contra, la
-posicion queda expuesta sin limite. El pedido original afirmaba que un
-backtest adjunto (que nunca llego al mensaje - ni reporte, ni numeros, solo
-la afirmacion) le habia dado "ganancias realmente altas". Un backtest sin
-SL que se ve bien no es evidencia confiable de nada: solo significa que la
-ventana de tiempo usada no incluyo la cola de riesgo que el diseño deja
-abierta - el mismo sesgo de muestra ya documentado en este README (Ronda 1:
-5 dias que no alcanzaron a mostrar el bug que la Ronda 2, con mas dias,
-si mostro). Por eso **no se porto el SL=0**: `MACrossGridStrategy`
-(`core/signals.py`) porta la logica de señal (cruce SMA9/SMA26 confirmado
-un bar despues, espera fija de 2 velas, filtro RSI permisivo 70/30) pero
-siempre devuelve una distancia de stop real basada en ATR y pasa por el
-mismo `RiskManager` que toda otra señal de este proyecto - sin excepciones,
-igual que las 6 señales de las Rondas 4 y 9.
-
-*El hallazgo estructural (este si, nuevo de esta ronda).* El pedido era
-M15, no M1 - a diferencia de `M15TrendStrategy` (Ronda 9), que lee UNA
-vela M15 como contexto para entradas M1, esta señal opera directamente
-sobre velas M15 nativas (sin resample interno), igual que pide el EA
-original. Se descargaron 4486 velas M15 reales de oro COMEX
-(`scripts/fetch_market_data.py --interval 15m --range 60d`, 73.5 dias
-corridos, 2026-05-08 a 2026-07-20 UTC - mucho mas historial que los ~5-8
-dias que alcanzaba 1m) y se corrio el mismo split cronologico 60/40 de
-siempre (TRAIN 2691 velas / 45.2 dias, TEST 1795 velas / 28.2 dias). Con
-el `RISK_PER_TRADE_USD=3.0` que este proyecto ya tiene como default (Ronda
-6): **0 operaciones en TRAIN y 0 en TEST**, tanto para la reversion a la
-media sola como para el composite con `MACrossGridStrategy` activada. No
-es que la señal no dispare - es un problema de escala: el ATR tipico de
-una vela M15 de oro ronda los $9-10 (vs ~$0.3 en M1), asi que hasta el
-stop mas angosto de esta señal (`3xATR ~ $28`) ya arriesga, al lote minimo
-del broker (0.01), mas de lo que `RiskManager.MAX_RISK_OVERSHOOT_FACTOR`
-(1.5x) tolera sobre un presupuesto de $3 - la MISMA proteccion que evito
-que la Ronda 2 volara la cuenta, aca simplemente rechazando cada señal en
-vez de operar con riesgo real disparado. **En M15, con este tamaño de
-cuenta y el lote minimo del broker, el default actual del proyecto deja
-el bot inerte para CUALQUIER estrategia con SL basado en ATR, no solo esta
-- no es un bug de esta señal, es una consecuencia aritmetica de escalar
-de M1 a M15 sin subir tambien el presupuesto de riesgo.**
-
-Para poder leer la CALIDAD de la señal (no solo confirmar que esta inerte),
-se repitio el backtest con `RISK_PER_TRADE_USD=20` **unicamente como piso
-de diagnostico** - deja pasar el lote minimo en la mayoria de las velas M15,
-pero significa arriesgar ~40% de una cuenta de $50 en una sola operacion,
-algo que este README no recomienda ni recomendaria nunca como default real:
-
-| Tramo | Estrategia | Trades | Trades/dia (dias reales) | Win rate | PnL | $/dia | Drawdown max |
-|---|---|---|---|---|---|---|---|
-| TRAIN (45.2 dias) | Solo reversion a la media | 11 | 0.24 | 100.0% | +$9.55 | +$0.21 | 0.0% |
-| TRAIN (45.2 dias) | + MACrossGridStrategy activada | 68 | 1.50 | 100.0% | +$58.79 | +$1.30 | 0.0% |
-| TEST (28.2 dias) | Solo reversion a la media | 12 | 0.43 | 100.0% | +$10.91 | +$0.39 | 0.0% |
-| TEST (28.2 dias) | + MACrossGridStrategy activada | 58 | 2.06 | 96.6% | +$3.85 | +$0.14 | **43.1%** |
-
-(Trades/dia calculado sobre los dias CALENDARIO reales que cubre cada CSV,
-no con la formula bars/1440 que imprime `scripts/run_backtest.py` por
-defecto - esa formula asume velas M1 y subestima brutalmente los dias de
-un dataset M15, exactamente el mismo tipo de error silencioso que la Ronda
-6 encontro con el apalancamiento.)
-
-**Lectura honesta, no la optimista:** en TRAIN, el composite con la señal
-nueva activada se ve espectacular - 68 operaciones, 100% de aciertos, 0%
-de drawdown. Pero en TEST, la MISMA configuracion tiene 2 perdidas y un
-drawdown de **43.1%** - y termina con MENOS ganancia total (+$3.85) que la
-reversion a la media SOLA en ese mismo tramo (+$10.91). Es exactamente el
-patron que este README ya señalo como no confiable en la Ronda 1 (5 dias
-que se veian bien) y en la Ronda 6 (`RISK_PER_TRADE_USD=5.0`: +$11.30 en
-test contra 54.9% de drawdown en train) - un resultado que luce perfecto
-en una mitad y se desestabiliza en la otra no es una ventaja real, es una
-muestra chica (68 operaciones en 45 dias) que no vio su propia cola de
-riesgo todavia. Sumale que el "0.24-0.43 trades/dia" de la reversion a la
-media sola en M15 confirma algo esperable por construccion: M15 tiene 15x
-menos barras por dia que M1, asi que CUALQUIER señal en M15 va a generar
-menos oportunidades/dia que en M1 solo por el cambio de escala temporal -
-no es comparable en frecuencia contra el baseline de M1 (14 trades,
-~2.94/dia, 85.7% ganadas, +$1.46, 7% drawdown, Ronda 9) sin tener en
-cuenta esa diferencia estructural de timeframe.
-
-**Por eso `STRAT_ENABLE_MA_GRID` queda en `false` por defecto**, con dos
-motivos independientes, cualquiera de los dos ya alcanzaria solo: (1) al
-`RISK_PER_TRADE_USD` real de este proyecto la señal no genera ninguna
-operacion en absoluto sobre M15 - activarla hoy, tal cual esta configurado
-el resto del bot, no cambia nada; y (2) incluso forzando un presupuesto de
-riesgo artificialmente alto solo para poder leer la calidad de la señal,
-el resultado es inestable entre TRAIN y TEST, con un drawdown de 43.1% en
-la mitad de prueba - el mismo perfil de "se ve bien hasta que no" que este
-proyecto ya rechazo como default en rondas anteriores. La clase, su ATR-SL
-agregado (la parte que si vale la pena conservar del EA original), su test
-suite (`tests/test_signals.py`) y su wireado en `build_strategy_from_settings`
-quedan en el codigo, documentados, para quien quiera experimentar con un
-`RISK_PER_TRADE_USD` mayor (sabiendo que implica arriesgar una fraccion
-grande de una cuenta chica por operacion) o con mas historial M15 antes de
-reconsiderar el default.
-
-*Nota tecnica adicional, para quien reactive esta señal junto con otras:*
-`CompositeStrategy` prueba primero la reversion a la media y, si esta
-dispara una señal pero `RiskManager` la rechaza por tamaño de lote (como
-puede pasar en M15 con su SL mas ancho, 4xATR), esa vela se pierde sin
-darle nunca la oportunidad a `MACrossGridStrategy` de disparar en el mismo
-bar - es el orden de prioridad ya documentado en `CompositeStrategy`
-(reversion a la media primero, siempre), no algo especifico de esta señal,
-pero vale tenerlo presente al leer los numeros de la tabla de arriba: el
-composite no aisla la señal nueva al 100%, la mide igual que las Rondas 4,
-7 y 9 midieron las suyas (reversion a la media + la señal, la primera que
-dispare gana).
-
-**Ronda 11: se probo `MACrossGridStrategy` en M1 (timeframe nativo del bot,
-no M15 como la Ronda 10) sobre datos reales de la propia cuenta demo FBS
-conectada en vivo (login MT5 real, no solo el proxy GC=F de Yahoo) mas
-7839 velas M1 reales de GC=F (7 dias). El pedido explicito era pasarla a
-M1 y entender por que "llega a quiebra inmediata".** Diagnostico con
-numeros reales, aislando la señal (reversion a la media desactivada para
-medir solo esta):
-
-| Config | Trades | Win rate | PnL total | Drawdown max |
-|---|---|---|---|---|
-| Sin filtro ADX | 111 | 78.4% | **-$29.24** | 70.1% |
-
-Causa raiz encontrada (no "ruido" en abstracto - la matematica exacta):
-promedio de ganancia por operacion **+$0.14** (la primera pata chica del
-grid de TP) contra promedio de perdida **-$3.54** (el stop ATR completo) -
-una relacion riesgo/beneficio de ~25:1 en contra, que ni un 78% de acierto
-alcanza a compensar. La razon de fondo: un cruce de SMA(9)/SMA(26) es una
-señal de TENDENCIA, y en M1 la mayoria de esos cruces ocurren en tramos
-laterales/ruidosos (sin tendencia real), generando whipsaws - exactamente
-el perfil que este proyecto ya identifico como fatal en las Rondas 4 y 7
-(mas frecuencia sin mas calidad de señal = perdidas).
-
-Se probo agregar un filtro de fuerza de tendencia real: ADX(14) (ya
-calculado en `compute_indicators` para el lado de reversion a la media,
-solo reutilizado aqui) exigido por encima de un minimo antes de permitir
-la entrada. Barrido sobre las mismas 7839 velas, con validacion TRAIN/TEST
-(60/40 cronologico, misma disciplina de siempre):
-
-| ADX minimo | TRAIN trades | TRAIN PnL | TEST trades | TEST PnL | TEST drawdown |
-|---|---|---|---|---|---|
-| 0 (sin filtro) | 65 | +$0.02 | 46 | **-$29.26** | 62.1% |
-| 20 | 19 | +$7.53 | 10 | **-$5.27** | 13.5% |
-| 25 | 5 | +$3.11 | 2 | +$0.97 | 0.0% |
-
-**Veredicto honesto: el filtro ADX ayuda de verdad, pero no arregla M1 por
-completo.** En `ADX>=20` (el unico umbral con suficientes operaciones en
-TEST como para confiar en el numero, 10 trades) la perdida se reduce
-~5.5x y el drawdown ~4.6x - una mejora real y medida, no cosmetica - pero
-el resultado en TEST sigue siendo negativo. `ADX>=25` se ve rentable en
-ambas mitades, pero con 5 y 2 operaciones respectivamente es una muestra
-demasiado chica para distinguir de pura suerte - exactamente el tipo de
-sobreajuste que este proyecto rechaza reportar como si fuera una edge real.
-
-Se implemento el filtro como `min_adx` en `MACrossGridStrategy` (default
-de clase `0.0` = apagado, para no romper compatibilidad con quien ya
-usaba la clase) y `STRAT_MA_GRID_MIN_ADX=20.0` como default recomendado en
-`core/config.py` una vez que se active `STRAT_ENABLE_MA_GRID` (que sigue
-en `false` por defecto - esto no cambia esa decision). Si se quiere
-experimentar con esta señal en M1 real, `ADX>=20` es el punto de partida
-mas honesto disponible hoy; no se recomienda M1 para uso real sin mas
-validacion (mas historial, mas dias, ideal con tick data real de FBS en
-vez del proxy GC=F).
-
-**Ronda 12: se pidio explicitamente maximizar ganancia CON el maximo
-numero de trades/dia posible, en cualquier timeframe entre M1 y M15
-(el bridge MT5 real solo soporta M1, M5 o M15 - no hay M3/M10 del
-broker). Se conecto en vivo a la cuenta demo real de FBS para datos
-frescos y se corrio un barrido completo timeframe x RISK_PER_TRADE_USD
-con split TRAIN/TEST 60/40 sobre datos reales de cada timeframe** (M1:
-7839 velas/7 dias: GC=F; M5: 13507 velas/73.7 dias; M15: 4486 velas/73.5
-dias), delegado a un agente con verificacion cruzada propia despues (dos
-metodos de backtest independientes con el mismo resultado, mas 1-2
-corridas de control directas contra `core/backtest.py` sin modificar).
-
-| Timeframe | Mejor risk encontrado | TRAIN PnL / dd | TEST PnL / dd | Trades/dia (TEST) |
-|---|---|---|---|---|
-| **M1** | **6** | +$3.31 / 28.4% | **+$22.52** / 11.9% | **~32** |
-| M5 | ninguno estable | siempre negativo o dd 74-95% | igual | 0.1-5.75 |
-| M15 | 20 (no confiable) | +$9.55 / 0% (11 trades) | +$10.91 / 0% (12 trades) | 0.43 |
-
-**M1 gana, claro y sin ambiguedad.** Es el unico timeframe con PnL
-positivo y drawdown controlado en AMBAS mitades para un rango entero de
-valores de riesgo (5, 6, 7 - no un solo punto de suerte). Dentro de M1,
-`RISK_PER_TRADE_USD=6` supera al `3.0` que traia el proyecto desde la
-Ronda 6 (que nunca fue una afirmacion de rentabilidad, solo "el piso
-donde el bot opera en absoluto"): TEST +$22.52 con 11.9% de drawdown,
-~30-32 trades/dia en ambas mitades. En `RISK_PER_TRADE_USD=8` el sistema
-se rompe (TRAIN -$5.89, 47.5% drawdown) - ese es el borde real medido,
-no una suposicion.
-
-M5 no tiene ningun punto bueno: por debajo de risk=7 no opera (el ATR en
-dolares de M5 es demasiado alto para el lote minimo al riesgo bajo, mismo
-mecanismo que ya freno a M15 en risk bajo), y apenas empieza a operar el
-drawdown se dispara a 74-95% con PnL mayormente negativo en ambas
-mitades - no es falta de barrido, es un resultado genuinamente negativo.
-M15 solo tiene un punto limpio en risk=20, pero con 11-12 operaciones por
-mitad es una muestra demasiado chica para confiar (exactamente el "piso
-de diagnostico" ya descartado en la Ronda 10) - un escalon mas arriba
-(risk=25) el TEST colapsa a -$57.40 con 113.2% de drawdown, confirmando
-que es un filo de navaja, no una zona estable. La frecuencia estructural
-tambien juega en contra de M5/M15: menos velas/dia que M1 (5x y 15x menos
-respectivamente) significa estructuralmente menos oportunidades/dia, sin
-importar que tan bien calibrado este el riesgo.
-
-Se probo ademas si `tick_volume` (dato real que el bridge MT5 ya entrega
-en cada vela, sin necesidad de librerias externas) ayuda como filtro de
-entrada - el prototipo mostro mejora en una muestra de 8 horas reales de
-la cuenta demo, pero es una muestra demasiado chica (1-14 operaciones)
-para ser una conclusion; se necesitan varios dias de datos reales con
-volumen antes de decidir sobre esto.
-
-**`RISK_PER_TRADE_USD` default paso de `3.0` a `6.0`** (ver `.env.example`
-y `core/config.py`) como consecuencia directa de este hallazgo, y se
-aplico tambien a la cuenta demo conectada (DRY_RUN sigue en `true`, sin
-riesgo real).
-
-## Credenciales
-
-Nunca van al repositorio. `install.sh` las guarda en `.env` (con permisos
-`600`, excluido por `.gitignore`). Si preferis no guardarlas en disco,
-dejalas vacias en `.env` y exportalas como variables de entorno antes de
-correr `run.sh` en su lugar.
+Si el broker no tiene historial suficiente, el dashboard devuelve un error
+estructurado y conserva el proceso activo. No presenta PnL inventado.
+
+## Cerebros OpenRouter
+
+El filtro de señales sólo puede confirmar o vetar una señal determinista; no
+elige lotes ni modifica stops. El supervisor de cuenta puede pausar entradas o
+reducir riesgo, pero tampoco puede saltarse límites locales. Ambos tienen
+cache, límite diario y comportamiento fail-closed ante errores de red.
+
+Configúralos desde Settings o `.env`:
+
+```env
+AI_BRAIN_ENABLED=false
+OPENROUTER_API_KEY=
+AI_SUPERVISOR_ENABLED=false
+OPENROUTER_SUPERVISOR_API_KEY=
+```
+
+No subas nunca las claves a GitHub. Si una clave fue expuesta, revócala y
+genera otra.
+
+## Calidad, pruebas y desarrollo
+
+```bash
+python -m py_compile core/*.py dashboard.py bridge/mt5_bridge_server.py
+node --check dashboard/app.js
+bash -n install.sh run.sh
+pytest -q
+```
+
+Las pruebas cubren riesgo, señales, Quantum Queen, backtesting, bridge,
+dashboard, configuración y supervisión del motor. El test omitido por falta de
+datos se identifica explícitamente en la salida de pytest.
+
+Antes de un cambio importante:
+
+1. Ejecuta `./run.sh verify`.
+2. Comprueba `git diff --check`.
+3. Ejecuta un backtest con datos del broker y un periodo fuera de muestra.
+4. Mantén `DRY_RUN=true` hasta revisar drawdown, margen y número de trades.
+
+## Seguridad y límites conocidos
+
+- Flask es un servidor de desarrollo; usa `127.0.0.1` por defecto.
+- Si expones el dashboard o bridge en la red, configura los tokens y usa un
+  túnel SSH/VPN.
+- MT5, Wine y algunos brokers pueden rechazar rangos enormes o no ofrecer
+  ticks antiguos. El chunking reduce el problema, pero no puede crear datos
+  que el terminal no tenga.
+- Los resultados dependen de spread, comisión, latencia, fill, swap y reglas
+  del broker. El objetivo de este proyecto es reproducibilidad y control de
+  riesgo, no prometer una ganancia diaria.
+
+## Licencia
+
+Añade aquí la licencia que el propietario del repositorio quiera utilizar
+(por ejemplo, MIT) antes de publicar el proyecto.
