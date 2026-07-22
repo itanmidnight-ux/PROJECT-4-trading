@@ -35,3 +35,6 @@ mt5setup.exe
 
 # Local worktrees
 .worktrees/
+
+# subagent-driven-development scratch (progress ledger)
+.superpowers/
