@@ -883,3 +883,28 @@ def test_composite_generate_signal_computes_indicators_at_most_twice():
         composite.generate_signal(df, spread_price=0.2, lot_hint=0.01)
 
     assert call_count[0] <= 2, f"expected <=2 compute_indicators calls, got {call_count[0]}"
+
+
+def test_composite_forwards_precomputed_indicators():
+    mean_reversion = ScalpStrategy(min_tp_usd=0.5, tp_levels=3, value_per_point_per_lot=1.0)
+
+    class NoOpExtra:
+        def check(self, df, ind, spread_price):
+            from core.signals import SubSignal
+            return SubSignal(side=None, reason="never fires")
+
+    composite = CompositeStrategy(mean_reversion=mean_reversion, extra_strategies=[("noop", NoOpExtra())])
+    df = _flat_candles()
+    mr_ind = compute_indicators(df, bb_period=mean_reversion.bb_period, bb_std=mean_reversion.bb_std,
+                                 rsi_period=mean_reversion.rsi_period, atr_period=mean_reversion.atr_period,
+                                 adx_period=mean_reversion.adx_period)
+    composite_ind = compute_indicators(df, rsi_period=composite._indicator_rsi_period,
+                                        atr_period=composite._indicator_atr_period)
+
+    with patch("core.strategy.compute_indicators", wraps=compute_indicators) as spy, \
+         patch("core.signals.compute_indicators", wraps=compute_indicators) as spy2:
+        composite.generate_signal(df, 0.2, 0.01,
+                                   precomputed_mr_indicators=mr_ind,
+                                   precomputed_composite_indicators=composite_ind)
+    assert spy.call_count == 0
+    assert spy2.call_count == 0
