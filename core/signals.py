@@ -44,7 +44,7 @@ from typing import Optional
 import pandas as pd
 
 from core.strategy import ScalpStrategy, Side, Signal, compute_indicators, compute_vol_ratio
-from core.regime import detect_regime
+from core.regime import Regime, detect_regime
 
 
 @dataclass
@@ -723,7 +723,8 @@ class CompositeStrategy:
 
     def generate_signal(self, df: pd.DataFrame, spread_price: float, lot_hint: float,
                          precomputed_mr_indicators: pd.DataFrame | None = None,
-                         precomputed_composite_indicators: pd.DataFrame | None = None) -> Signal:
+                         precomputed_composite_indicators: pd.DataFrame | None = None,
+                         precomputed_regime: "Regime | None" = None) -> Signal:
         mr_signal = self._mean_reversion.generate_signal(df, spread_price, lot_hint,
                                                            precomputed_indicators=precomputed_mr_indicators)
         if not self._prefer_quantum_queen and mr_signal.side is not None:
@@ -738,7 +739,10 @@ class CompositeStrategy:
             ind = precomputed_composite_indicators
         else:
             ind = compute_indicators(df, rsi_period=self._indicator_rsi_period, atr_period=self._indicator_atr_period)
-        regime = detect_regime(df, **self._regime_kwargs) if self._regime_filter_enabled else None
+        if precomputed_regime is not None:
+            regime = precomputed_regime
+        else:
+            regime = detect_regime(df, **self._regime_kwargs) if self._regime_filter_enabled else None
         last = ind.iloc[-1]
         vol_ratio = compute_vol_ratio(last["atr"], last["atr_baseline"])
 
