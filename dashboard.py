@@ -480,7 +480,7 @@ def api_backtest():
             leverage=leverage, risk_per_trade_usd=risk_usd, min_tp_usd=effective.min_tp_usd,
             tp_levels=effective.tp_levels, assumed_spread_price=spread,
             max_trades_per_day=effective.max_trades_per_day, max_hold_bars=max_hold, ticks=ticks,
-            strategy=strategy)
+            strategy=strategy, precompute_indicators=True)
     except Exception as exc:
         db.log_event(ts=_now_iso(), level="WARN", message=f"Backtest MT5 no ejecutado: {type(exc).__name__}")
         return jsonify({"ok": False, "error": f"No se pudo completar el backtest MT5: {exc}"}), 502

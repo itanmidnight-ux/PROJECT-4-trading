@@ -196,6 +196,38 @@ def test_backtest_route_uses_mt5_history_without_order_calls(tmp_path, monkeypat
     assert data["fill_model"].startswith("OHLC")
 
 
+def test_backtest_route_passes_precompute_indicators_true(tmp_path, monkeypatch):
+    """/api/backtest must actually use core/backtest.py's fast path -
+    precompute_indicators exists but is worthless if the route never
+    passes it. Mocks dashboard.run_backtest (the lazily-imported
+    module-level name the route calls) and asserts the call it receives
+    has precompute_indicators=True in its kwargs."""
+    import dashboard as dmod
+    import pandas as pd
+    from unittest.mock import MagicMock
+    from core.backtest import BacktestResult
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs): pass
+        def login(self, *args): pass
+        def symbol_spec(self, symbol):
+            return SymbolSpec(100, .01, 1, .01, .01, 1.0, trade_tick_size=.01)
+        def candles(self, symbol, timeframe, count):
+            return pd.DataFrame([{"time": i, "open": 4000, "high": 4001, "low": 3999, "close": 4000} for i in range(count)])
+
+    client, _db = make_client(tmp_path, mt5_login="123", mt5_password="pw", mt5_server="Demo", dashboard_auth_token="")
+    monkeypatch.setattr(dmod, "Mt5BridgeClient", FakeClient)
+    mock_run_backtest = MagicMock(return_value=BacktestResult(trades=0, wins=0, losses=0, total_pnl=0.0,
+                                                                max_drawdown_pct=0.0, final_balance=50.0))
+    monkeypatch.setattr(dmod, "run_backtest", mock_run_backtest)
+
+    response = client.post("/api/backtest", json={"bars": 100, "balance": 50, "leverage": 500})
+
+    assert response.status_code == 200
+    mock_run_backtest.assert_called_once()
+    assert mock_run_backtest.call_args.kwargs.get("precompute_indicators") is True
+
+
 def test_status_reports_the_running_engines_own_settings_not_pending_saves(tmp_path):
     """/api/status must reflect what the (possibly separate, already-
     running) engine process actually connected with - not a settings-tab
