@@ -63,7 +63,7 @@ def _kill_and_reap(pid: int) -> None:
 
 
 def test_engine_start_refuses_when_pandas_missing(tmp_path, monkeypatch):
-    """On a partial Termux install (pandas/numpy failed to build), starting
+    """On a partial/broken install (pandas/numpy failed to build), starting
     the engine used to crash-loop the supervisor forever while /api/status
     kept saying engine_running=true. The route must probe importability
     first and refuse with a clear 409 - without ever spawning anything."""

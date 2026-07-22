@@ -1,13 +1,10 @@
 """
-dashboard.py - dashboard for the XAUUSD scalper, as either a native
-desktop window or a plain web server.
+dashboard.py - web dashboard for the XAUUSD scalper.
 
 Run with:  .venv/bin/python dashboard.py
-Options are prompted interactively if run from a terminal with no flags;
-non-interactively (e.g. from a script) it defaults to the native window,
-matching this file's original behavior. Flags skip the prompt:
-    .venv/bin/python dashboard.py --native   # force native window
-    .venv/bin/python dashboard.py --web      # web server on :9000
+The project intentionally exposes only the browser dashboard; the former
+native pywebview wrapper has been removed so every launch behaves the same
+on desktop, server and headless environments.
 
 Shows account stats, equity curve, win/loss breakdown, P&L by day/month,
 trade history, and engine events - all read live from the same SQLite
@@ -39,9 +36,8 @@ import os
 import signal
 import subprocess
 import sys
-import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -54,8 +50,17 @@ from core.config import (  # noqa: E402
     DB_OVERRIDABLE_INT_FIELDS,
     apply_db_overrides,
     load_settings,
+    ENV_PATH,
 )
 from core.database import Database  # noqa: E402
+from dataclasses import replace  # noqa: E402
+
+# Lazy: the dashboard's read-only/status view must still start on an
+# install without pandas (e.g. --no-wine, or a partial/broken venv). The
+# MT5 backtest route loads these only when the operator actually requests
+# a backtest.
+Mt5BridgeClient = None
+run_backtest = None
 
 ROOT = Path(__file__).resolve().parent
 DASHBOARD_DIR = ROOT / "dashboard"
@@ -137,6 +142,41 @@ def _engine_pid() -> int | None:
 
 def _row_to_dict(row) -> dict:
     return {k: row[k] for k in row.keys()}  # sqlite3.Row isn't a dict; .keys() is required here
+
+
+def _write_env_secret(key: str, value: str) -> None:
+    """Atomically update one secret in .env without logging or echoing it."""
+    path = ENV_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    replacement = f"{key}={value}"
+    found = False
+    out = []
+    for line in lines:
+        if line.startswith(f"{key}="):
+            out.append(replacement)
+            found = True
+        else:
+            out.append(line)
+    if not found:
+        out.append(replacement)
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent,
+                                     prefix=".env.", delete=False) as tmp:
+        tmp.write("\n".join(out) + "\n")
+        tmp_path = Path(tmp.name)
+    os.chmod(tmp_path, 0o600)
+    os.replace(tmp_path, path)
+
+
+def _read_secret_field(data: dict, field: str) -> str | None:
+    value = data.get(field)
+    if value is None or not str(value).strip():
+        return None
+    value = str(value).strip()
+    if len(value) > 512 or "\n" in value or "\r" in value:
+        raise ValueError(f"{field} invalida")
+    return value
 
 
 @app.before_request
@@ -254,6 +294,12 @@ def api_get_settings():
         "max_daily_drawdown_pct": effective.max_daily_drawdown_pct,
         "max_trades_per_day": effective.max_trades_per_day,
         "symbol": effective.symbol,
+        "has_openrouter_api_key": bool(effective.openrouter_api_key),
+        "has_supervisor_api_key": bool(effective.openrouter_supervisor_api_key),
+        "ai_brain_enabled": effective.ai_brain_enabled,
+        "ai_supervisor_enabled": effective.ai_supervisor_enabled,
+        "openrouter_model": effective.openrouter_model,
+        "openrouter_supervisor_model": effective.openrouter_supervisor_model,
     })
 
 
@@ -270,6 +316,22 @@ def api_save_settings():
         return jsonify({"ok": False, "error": "cuerpo invalido, se esperaba JSON"}), 400
 
     to_save: dict[str, str] = {}
+
+    global settings
+    env_updates: dict[str, str] = {}
+    try:
+        key1 = _read_secret_field(data, "openrouter_api_key")
+        key2 = _read_secret_field(data, "openrouter_supervisor_api_key")
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    if key1:
+        env_updates["OPENROUTER_API_KEY"] = key1
+    if key2:
+        env_updates["OPENROUTER_SUPERVISOR_API_KEY"] = key2
+    if "ai_brain_enabled" in data:
+        env_updates["AI_BRAIN_ENABLED"] = "true" if data["ai_brain_enabled"] else "false"
+    if "ai_supervisor_enabled" in data:
+        env_updates["AI_SUPERVISOR_ENABLED"] = "true" if data["ai_supervisor_enabled"] else "false"
 
     for key in ("mt5_login", "mt5_server"):
         if key in data and str(data[key]).strip():
@@ -301,14 +363,138 @@ def api_save_settings():
                 return jsonify({"ok": False, "error": f"{key} debe ser mayor que 0"}), 400
             to_save[key] = str(value)
 
-    if not to_save:
+    if not to_save and not env_updates:
         return jsonify({"ok": False, "error": "no se recibio ningun campo valido"}), 400
 
     db.set_settings(to_save)
+    for key, value in env_updates.items():
+        _write_env_secret(key, value)
+    if env_updates:
+        # The next engine process reads .env; update this dashboard instance
+        # too so /api/settings immediately reflects configured status.
+        settings = replace(settings,
+            openrouter_api_key=env_updates.get("OPENROUTER_API_KEY", settings.openrouter_api_key),
+            openrouter_supervisor_api_key=env_updates.get("OPENROUTER_SUPERVISOR_API_KEY", settings.openrouter_supervisor_api_key),
+            ai_brain_enabled=env_updates.get("AI_BRAIN_ENABLED", str(settings.ai_brain_enabled)).lower() == "true",
+            ai_supervisor_enabled=env_updates.get("AI_SUPERVISOR_ENABLED", str(settings.ai_supervisor_enabled)).lower() == "true")
     db.log_event(ts=_now_iso(), level="INFO",
-                 message="Configuracion actualizada desde el dashboard (aplica en el proximo arranque del motor)")
+                 message="Configuracion actualizada desde el dashboard (secretos guardados sin registrarlos; aplica en el proximo arranque del motor)")
     return jsonify({"ok": True, "message": "Guardado. Se aplica la proxima vez que arranque el motor "
                                             "(boton \"Iniciar motor\" arriba)."})
+
+
+@app.route("/api/backtest", methods=["POST"])
+def api_backtest():
+    """Read-only MT5 historical test; never calls an order endpoint.
+
+    Default mode uses completed OHLC bars. With tick_mode=true it additionally
+    downloads MT5 bid/ask ticks and uses their intrabar path.
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        bars = min(max(int(data.get("bars", 3000)), 100), 200000)
+        balance = float(data.get("balance", 50))
+        leverage = int(data.get("leverage", 500))
+        risk_usd = float(data.get("risk_usd", settings.risk_per_trade_usd))
+        spread = float(data.get("spread", 0.25))
+        max_hold = max(int(data.get("max_hold_bars", 0)), 0)
+        tick_mode = bool(data.get("tick_mode", False))
+        backtest_timeframe = str(data.get("timeframe") or "M1").upper()
+        if backtest_timeframe not in {"M1", "M5", "M15", "M30", "H1"}:
+            raise ValueError("timeframe no soportado para backtesting")
+        date_from = data.get("date_from")
+        date_to = data.get("date_to")
+        start_ts = end_ts = None
+        if date_from or date_to:
+            if not (date_from and date_to):
+                raise ValueError("date_from y date_to deben enviarse juntos")
+            start_ts = int(datetime.fromisoformat(str(date_from).replace("Z", "+00:00")).timestamp())
+            end_ts = int(datetime.fromisoformat(str(date_to).replace("Z", "+00:00")).timestamp())
+            if end_ts <= start_ts:
+                raise ValueError("date_to debe ser posterior a date_from")
+        if balance <= 0 or leverage <= 0 or risk_usd <= 0 or spread < 0:
+            raise ValueError("balance, leverage y riesgo deben ser positivos; spread no puede ser negativo")
+    except (TypeError, ValueError) as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+
+    effective = apply_db_overrides(settings, db.get_all_settings())
+    if not effective.mt5_login or not effective.mt5_password:
+        return jsonify({"ok": False, "error": "Configura login y password MT5 en Settings antes de probar."}), 409
+    global Mt5BridgeClient, run_backtest
+    if Mt5BridgeClient is None:
+        from core.mt5_bridge_client import Mt5BridgeClient as _Mt5BridgeClient
+        Mt5BridgeClient = _Mt5BridgeClient
+    if run_backtest is None:
+        from core.backtest import run_backtest as _run_backtest
+        run_backtest = _run_backtest
+    client = Mt5BridgeClient(effective.bridge_url, effective.bridge_timeout_ms,
+                             auth_token=effective.bridge_auth_token, max_retries=1)
+    symbol = str(data.get("symbol") or effective.symbol)
+    try:
+        client.login(effective.mt5_login, effective.mt5_password, effective.mt5_server)
+        spec = replace(client.symbol_spec(symbol), margin_initial=None)
+        if start_ts is not None:
+            # MT5 terminals commonly reject very large copy_rates_range
+            # requests even when the date span is valid. Chunking by day
+            # keeps each response bounded and preserves the complete period.
+            candle_parts = []
+            cursor = start_ts
+            while cursor < end_ts and sum(len(p) for p in candle_parts) < bars:
+                chunk_end = min(cursor + 24 * 3600, end_ts)
+                part = client.candles(symbol, backtest_timeframe, 5000, start=cursor, end=chunk_end)
+                if not part.empty:
+                    candle_parts.append(part)
+                cursor = chunk_end
+            import pandas as pd
+            candles = pd.concat(candle_parts, ignore_index=True) if candle_parts else pd.DataFrame()
+            if not candles.empty:
+                candles = candles.drop_duplicates(subset=["time"]).sort_values("time").tail(bars).reset_index(drop=True)
+        else:
+            candles = client.candles(symbol, backtest_timeframe, bars)
+        if len(candles) < 100:
+            return jsonify({"ok": False, "error": f"MT5 devolvio solo {len(candles)} velas; se necesitan al menos 100."}), 502
+        ticks = None
+        if tick_mode:
+            tick_start = int(candles.iloc[0]["time"])
+            tick_end = int(candles.iloc[-1]["time"]) + 60
+            # MT5 brokers can return millions of ticks for two months. Query
+            # six-hour windows so the bridge never builds one unbounded JSON
+            # response; each request remains capped by the MT5 bridge.
+            chunks = []
+            cursor = tick_start
+            while cursor < tick_end:
+                chunk_end = min(cursor + 6 * 3600, tick_end)
+                part = client.ticks(symbol, count=100000, start=cursor, end=chunk_end)
+                if not part.empty:
+                    chunks.append(part)
+                cursor = chunk_end
+            import pandas as pd
+            ticks = pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame()
+            if ticks.empty or not {"bid", "ask", "time"}.issubset(ticks.columns):
+                return jsonify({"ok": False, "error": "MT5 no devolvio ticks bid/ask para ese periodo."}), 502
+        from core.signals import build_strategy_from_settings
+        tick_size = spec.trade_tick_size or spec.point
+        value_per_point = spec.trade_tick_value / tick_size if tick_size else 0.0
+        strategy = build_strategy_from_settings(effective, value_per_point)
+        result = run_backtest(candles=candles, spec=spec, starting_balance=balance,
+            leverage=leverage, risk_per_trade_usd=risk_usd, min_tp_usd=effective.min_tp_usd,
+            tp_levels=effective.tp_levels, assumed_spread_price=spread,
+            max_trades_per_day=effective.max_trades_per_day, max_hold_bars=max_hold, ticks=ticks,
+            strategy=strategy)
+    except Exception as exc:
+        db.log_event(ts=_now_iso(), level="WARN", message=f"Backtest MT5 no ejecutado: {type(exc).__name__}")
+        return jsonify({"ok": False, "error": f"No se pudo completar el backtest MT5: {exc}"}), 502
+
+    return jsonify({"ok": True, "symbol": symbol, "timeframe": backtest_timeframe, "bars": len(candles),
+        "fill_model": ("ticks MT5 bid/ask intrabar" if tick_mode else
+                       "OHLC conservador (stop antes que TP si ambos tocan la misma vela)"),
+        "tick_to_tick": bool(tick_mode),
+        "warning": ("Ticks reales bid/ask de MT5; la señal sigue evaluándose al cierre de cada vela M1."
+                    if tick_mode else "No es tick-by-tick: se usaron velas M1 cerradas y OHLC conservador."),
+        "trades": result.trades, "wins": result.wins, "losses": result.losses,
+        "win_rate": result.win_rate, "total_pnl": result.total_pnl,
+        "max_drawdown_pct": result.max_drawdown_pct, "final_balance": result.final_balance,
+        "starting_balance": balance, "leverage": leverage})
 
 
 @app.route("/api/bot/pause", methods=["POST"])
@@ -342,20 +528,19 @@ def api_engine_start():
     if _engine_pid() is not None:
         return jsonify({"ok": False, "error": "El motor ya esta corriendo."}), 409
 
-    # On a partial Termux install (pandas/numpy failed to build - a
-    # documented, supported outcome, see install.sh) main.py can't even
-    # import: without this check, spawning the supervisor put it into an
-    # eternal crash-restart loop while this dashboard reported "Motor
-    # corriendo" (the supervisor process itself stays alive). Refuse up
-    # front with a clear reason instead. find_spec, not a subprocess
-    # probe: this process and main.py share the same venv, so lookup here
-    # is authoritative - and subprocess.run would drag Popen into it,
-    # which broke under test mocks of Popen for exactly that reason.
+    # On a partial/broken install (pandas/numpy missing from .venv)
+    # main.py can't even import: without this check, spawning the
+    # supervisor put it into an eternal crash-restart loop while this
+    # dashboard reported "Motor corriendo" (the supervisor process itself
+    # stays alive). Refuse up front with a clear reason instead. find_spec,
+    # not a subprocess probe: this process and main.py share the same
+    # venv, so lookup here is authoritative - and subprocess.run would
+    # drag Popen into it, which broke under test mocks of Popen for
+    # exactly that reason.
     if not _engine_deps_available():
         return jsonify({"ok": False, "error":
             "Faltan pandas/numpy en esta maquina - el motor no puede correr aca. "
-            "En Termux esto es lo esperado si install.sh no pudo compilarlos: "
-            "usa esta maquina solo como visor y corre el motor en una Kali/Ubuntu."}), 409
+            "Corre ./install.sh (o .venv/bin/pip install -r requirements.txt) para instalarlos."}), 409
 
     RUN_DIR.mkdir(parents=True, exist_ok=True)
     proc = subprocess.Popen(
@@ -423,41 +608,17 @@ def run_server(host: str, port: int) -> None:
     app.run(host=host, port=port, debug=False, use_reloader=False)
 
 
-def _run_native() -> None:
-    """Original behavior: the Flask server only ever listens on
-    127.0.0.1 internally, and a native pywebview window points at that
-    local address - nothing here is reachable from outside this machine.
-    pywebview is imported here, not at module load, so --web mode still
-    works on a machine with no GUI toolkit installed at all (e.g. a
-    headless server) - it would previously have failed to even start in
-    that case, regardless of which mode was wanted."""
-    import webview
-
-    internal_port = _find_free_port("127.0.0.1", 8765)
-    thread = threading.Thread(target=run_server, args=("127.0.0.1", internal_port), daemon=True)
-    thread.start()
-    time.sleep(0.6)
-
-    webview.create_window(
-        "XAUUSD Scalper — Dashboard",
-        f"http://127.0.0.1:{internal_port}",
-        width=1360,
-        height=880,
-        min_size=(960, 600),
-        background_color="#0b0c0f",
-    )
-    webview.start()
-
-
 def _run_web(host: str, port: int) -> None:
-    """Runs the same dashboard as a plain web server instead of a native
-    window - for checking it from a browser on another device (phone,
+    """Runs the browser dashboard for checking it from a browser on another device (phone,
     another computer on the same network) or on a headless machine with
     no GUI toolkit at all. No route can open/close a trade, but account
     data is real, and the Settings/pause-resume routes can change stored
     broker credentials or trading state - 0.0.0.0 exposes all of that to
     anyone on the network, mitigated by DASHBOARD_AUTH_TOKEN if set."""
     requested_port = port
+    print("\033[1;36m[dashboard]\033[0m Preparando dashboard web", flush=True)
+    for label in ("cargando configuración", "comprobando rutas", "reservando puerto"):
+        print(f"\033[2m  ▸ {label}...\033[0m", flush=True)
     port = _find_free_port(host, port)
     try:
         RUN_DIR.mkdir(parents=True, exist_ok=True)
@@ -482,45 +643,17 @@ def _run_web(host: str, port: int) -> None:
     run_server(host, port)
 
 
-def _prompt_mode() -> str:
-    print("Como queres abrir el dashboard?")
-    print("  1) Ventana nativa de escritorio (default)")
-    print(f"  2) Dashboard web (http://127.0.0.1:{WEB_DEFAULT_PORT}, se abre en el navegador)")
-    try:
-        choice = input("Elegi 1 o 2 [1]: ").strip()
-    except EOFError:
-        return "native"
-    return "web" if choice == "2" else "native"
-
-
 def main() -> None:
     signal.signal(signal.SIGCHLD, _reap_children)
     parser = argparse.ArgumentParser(description="XAUUSD scalper - dashboard")
-    mode_group = parser.add_mutually_exclusive_group()
-    mode_group.add_argument("--web", action="store_true",
-                             help="Corre como dashboard web en vez de ventana nativa.")
-    mode_group.add_argument("--native", action="store_true",
-                             help="Fuerza ventana nativa (salta el prompt interactivo).")
+    parser.add_argument("--web", action="store_true", help="Compatibilidad: el dashboard siempre es web.")
     parser.add_argument("--host", default="127.0.0.1",
-                         help="Direccion donde escucha --web (default 127.0.0.1, solo esta "
+                         help="Direccion donde escucha el dashboard (default 127.0.0.1, solo esta "
                               "maquina). 0.0.0.0 expone el dashboard a tu red local.")
     parser.add_argument("--port", type=int, default=WEB_DEFAULT_PORT,
-                         help=f"Puerto para --web (default {WEB_DEFAULT_PORT}).")
+                         help=f"Puerto del dashboard web (default {WEB_DEFAULT_PORT}).")
     args = parser.parse_args()
-
-    if args.web:
-        mode = "web"
-    elif args.native:
-        mode = "native"
-    elif sys.stdin.isatty():
-        mode = _prompt_mode()
-    else:
-        mode = "native"  # non-interactive, no flags: keep this file's original default behavior
-
-    if mode == "web":
-        _run_web(args.host, args.port)
-    else:
-        _run_native()
+    _run_web(args.host, args.port)
 
 
 if __name__ == "__main__":

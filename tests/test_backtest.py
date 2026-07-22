@@ -115,3 +115,17 @@ def test_backtest_runs_clean_on_real_style_data_without_crashing():
     )
     assert result.trades >= 0  # just needs to complete without raising
     assert result.wins + result.losses == result.trades
+
+
+def test_backtest_accepts_real_style_bid_ask_ticks_for_intrabar_path():
+    base = oversold_candles()
+    ticks = pd.DataFrame([
+        {"time": int(row.time) + 10, "bid": float(row.close) - 0.10,
+         "ask": float(row.close) + 0.10, "last": float(row.close), "volume": 1}
+        for row in base.itertuples()
+    ])
+    result = run_backtest(candles=base, ticks=ticks, spec=SPEC,
+                          starting_balance=50_000.0, leverage=100,
+                          risk_per_trade_usd=1.0, min_tp_usd=0.28, tp_levels=3,
+                          assumed_spread_price=SPREAD)
+    assert result.trades >= 0

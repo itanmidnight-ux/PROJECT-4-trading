@@ -11,12 +11,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from core.broker import BrokerExecutor, SimulatedBroker
+from core.ai_brain import OpenRouterBrain
+from core.account_supervisor import AccountSupervisorBrain
 from core.config import Settings
 from core.database import Database
 from core.market_data import MarketDataSource
 from core.mt5_bridge_client import Tick
 from core.risk_manager import RiskManager
 from core.signals import build_strategy_from_settings
+from core.regime import detect_regime
 from core.strategy import TpLevel
 
 logger = logging.getLogger("engine")
@@ -55,6 +58,7 @@ class ManagedPosition:
     breakeven_moved: bool = False
     trail_active: bool = False
     best_price_since_be: float = 0.0
+    grid_level: int = 0
 
 
 def _now_iso() -> str:
@@ -96,6 +100,19 @@ class TradingEngine:
         self._last_tick_change_wallclock: float | None = None
         self._stale_warned = False
         self._last_prune_wallclock: float = 0.0
+        self._last_grid_bar_time: int | None = None
+        self._ai_brain = (
+            OpenRouterBrain(settings.openrouter_api_key, settings.openrouter_model,
+                            settings.ai_brain_timeout_ms, settings.ai_brain_max_calls_per_day)
+            if settings.ai_brain_enabled else None
+        )
+        self._account_supervisor = (
+            AccountSupervisorBrain(settings.openrouter_supervisor_api_key,
+                                   settings.openrouter_supervisor_model,
+                                   settings.ai_supervisor_timeout_ms,
+                                   settings.ai_supervisor_max_calls_per_day)
+            if settings.ai_supervisor_enabled else None
+        )
 
     def _ensure_initialized(self) -> None:
         if self._spec is not None:
@@ -107,12 +124,14 @@ class TradingEngine:
                 f"(point={spec.point}, trade_tick_value={spec.trade_tick_value}). "
                 "Refusing to trade with a spec that would divide by zero."
             )
-        value_per_point_per_lot = spec.trade_tick_value / spec.point
+        tick_size = spec.trade_tick_size or spec.point
+        value_per_point_per_lot = spec.trade_tick_value / tick_size
         self._risk = RiskManager(
             risk_per_trade_usd=self.settings.risk_per_trade_usd,
             max_daily_loss_usd=self.settings.max_daily_loss_usd,
             max_daily_drawdown_pct=self.settings.max_daily_drawdown_pct,
             max_trades_per_day=self.settings.max_trades_per_day,
+            max_lot=self.settings.dynamic_lot_cap,
         )
         self._strategy = build_strategy_from_settings(self.settings, value_per_point_per_lot)
         self._spec = spec  # assign last: an exception above must leave state uninitialized
@@ -219,7 +238,10 @@ class TradingEngine:
             return
 
         if self._open_positions:
-            # Keep it simple and low-risk: one position at a time.
+            # Optional bounded basket management. It is disabled by default;
+            # when enabled it still requires a closed-bar regime check and
+            # every leg is independently sized by RiskManager.
+            self._maybe_add_grid_position(candles.iloc[:-1], tick)
             return
 
         lot_hint = self._spec.volume_min
@@ -237,7 +259,34 @@ class TradingEngine:
         if signal.side is None:
             return
 
-        sizing = self._risk.size_position(account, self._spec, signal.sl_distance_price, mid_price)
+        supervisor_multiplier = 1.0
+        if self._account_supervisor is not None:
+            bar_time = int(candles.iloc[-2]["time"]) if len(candles) >= 2 else 0
+            supervisor = self._account_supervisor.evaluate(
+                candles.iloc[:-1], account.__dict__, self.settings.risk_per_trade_usd,
+                signal.side, bar_time,
+            )
+            if not supervisor.allow_entries:
+                logger.info("Signal %s discarded: %s", signal.side, supervisor.reason)
+                self.db.log_event(ts=_now_iso(), level="INFO", message=supervisor.reason)
+                return
+            supervisor_multiplier = supervisor.risk_multiplier
+
+        # A network/model failure is deliberately a veto, never an implicit
+        # approval. This stays before sizing/order submission and cannot
+        # affect risk limits or an already-open position.
+        if self._ai_brain is not None:
+            decision = self._ai_brain.evaluate(candles.iloc[:-1], signal.side,
+                                               tick.spread_price, signal.sl_distance_price)
+            if not decision.allow:
+                logger.info("Signal %s discarded: %s", signal.side, decision.reason)
+                self.db.log_event(ts=_now_iso(), level="INFO", message=decision.reason)
+                return
+
+        sizing = self._risk.size_position(
+            account, self._spec, signal.sl_distance_price, mid_price,
+            risk_budget_usd=self.settings.risk_per_trade_usd * supervisor_multiplier,
+        )
         if not sizing.ok:
             logger.warning("Signal found but cannot size trade: %s", sizing.reason)
             self.db.log_event(ts=_now_iso(), level="WARN", message=sizing.reason)
@@ -281,6 +330,61 @@ class TradingEngine:
         ))
         self._strategy.on_trade_opened()
         logger.info("Opened %s %.4f lot @ %.3f (SL %.3f)", signal.side, sizing.lot, open_result.fill_price, sl_price)
+
+    def _maybe_add_grid_position(self, closed_candles, tick: Tick) -> None:
+        if not self.settings.grid_enabled or not self._open_positions or self._last_grid_bar_time == self._last_bar_time:
+            return
+        if len(self._open_positions) >= max(1, self.settings.grid_max_positions):
+            return
+        if len(closed_candles) < 30:
+            return
+        regime = detect_regime(closed_candles,
+                               adx_threshold=self.settings.regime_adx_trend_threshold,
+                               atr_high=self.settings.regime_atr_ratio_high,
+                               atr_low=self.settings.regime_atr_ratio_low)
+        if regime.name in {"unknown", "volatile", "quiet"}:
+            return
+        pos = self._open_positions[0]
+        direction = 1 if pos.side == "BUY" else -1
+        price = tick.bid if direction == 1 else tick.ask
+        tr = (closed_candles["high"] - closed_candles["low"]).rolling(14).mean()
+        atr = float(tr.iloc[-1]) if tr.iloc[-1] == tr.iloc[-1] else 0.0
+        if atr <= 0:
+            return
+        favorable = direction * (price - pos.entry_price) >= atr * self.settings.grid_step_atr
+        adverse = not favorable and direction * (price - pos.entry_price) <= -atr * self.settings.grid_step_atr
+        # Averaging down is explicitly opt-in and only allowed in a range.
+        if adverse and (not self.settings.recovery_enabled or regime.name != self.settings.recovery_min_regime):
+            return
+        if not favorable and not adverse:
+            return
+        self._last_grid_bar_time = self._last_bar_time
+        level = max(p.grid_level for p in self._open_positions) + 1
+        if level > self.settings.recovery_max_levels and adverse:
+            return
+        sl_distance = max(atr * self.settings.strat_sl_atr_multiple, self._strategy.min_tp_distance_for_lot(self._spec.volume_min) * 1.5)
+        account = self.broker.account()
+        budget = self.settings.risk_per_trade_usd * (self.settings.grid_lot_multiplier ** level)
+        sizing = self._risk.size_position(account, self._spec, sl_distance, price, risk_budget_usd=budget)
+        if not sizing.ok:
+            return
+        fill = tick.ask if direction == 1 else tick.bid
+        sl = fill - sl_distance if direction == 1 else fill + sl_distance
+        try:
+            opened = self.broker.open_order(self.settings.symbol, pos.side, sizing.lot, sl, fill)
+        except Exception:
+            logger.exception("No se pudo abrir la pierna grid/piramidal")
+            return
+        tp = self._strategy.build_tp_ladder(sizing.lot, tick.spread_price)
+        trade_id = self.db.open_trade(ticket=opened.ticket, symbol=self.settings.symbol, side=pos.side,
+                                       lot=sizing.lot, entry_price=opened.fill_price, sl_price=sl,
+                                       opened_at=_now_iso(), dry_run=self.settings.dry_run)
+        self._open_positions.append(ManagedPosition(
+            trade_id=trade_id, ticket=opened.ticket, side=pos.side,
+            entry_price=opened.fill_price, original_lot=sizing.lot, remaining_lot=sizing.lot,
+            sl_price=sl, tp_levels=tp, sl_distance_price=sl_distance,
+            trail_distance_price=tp[0].distance_price, grid_level=level))
+        logger.warning("Added bounded %s leg %d (%s regime) lot=%.4f", "recovery" if adverse else "pyramid", level, regime.name, sizing.lot)
 
     def _safe_close_partial(self, pos: ManagedPosition, lot: float, exit_price: float) -> CloseAttempt:
         """Wraps broker.close_partial so a failed close can never silently

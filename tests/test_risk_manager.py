@@ -87,6 +87,28 @@ def test_sizing_tolerates_small_rounding_overshoot_near_the_risk_budget():
     assert result.ok is True
 
 
+def test_sizing_uses_trade_tick_size_not_display_point():
+    rm = make_risk(risk_per_trade_usd=1.0)
+    account = AccountState(balance=1_000.0, equity=1_000.0, free_margin=1_000.0, leverage=500)
+    # $1 is paid per $0.10 tick, so a $1 stop costs $10/lot. Treating the
+    # display point (0.01) as the tick would overstate risk by 10x.
+    spec = SymbolSpec(100.0, 0.01, 10.0, 0.01, 0.01, 1.0, trade_tick_size=0.10)
+    result = rm.size_position(account, spec, sl_distance_price=1.0, current_price=4000.0)
+    assert result.ok is True
+    assert result.lot == 0.1
+
+
+def test_supervisor_risk_budget_can_only_reduce_position_size():
+    rm = make_risk(risk_per_trade_usd=6.0)
+    account = AccountState(balance=1000, equity=1000, free_margin=1000, leverage=500)
+    full = rm.size_position(account, STANDARD_SPEC, 1.0, 4000, risk_budget_usd=6.0)
+    reduced = rm.size_position(account, STANDARD_SPEC, 1.0, 4000, risk_budget_usd=1.5)
+    attempted_increase = rm.size_position(account, STANDARD_SPEC, 1.0, 4000, risk_budget_usd=60.0)
+    assert full.ok and reduced.ok and attempted_increase.ok
+    assert reduced.lot < full.lot
+    assert attempted_increase.lot == full.lot
+
+
 def test_sizing_rejects_zero_or_negative_sl_distance():
     rm = make_risk()
     account = AccountState(balance=50.0, equity=50.0, free_margin=50.0, leverage=100)

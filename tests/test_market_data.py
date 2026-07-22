@@ -1,5 +1,5 @@
 """Tests for BridgeMarketData's incremental candle sync - the remote-bridge
-bandwidth optimization for the Termux (phone -> remote bridge) setup.
+bandwidth optimization for a remote-client (this machine -> remote bridge) setup.
 
 The one invariant that matters: the window BridgeMarketData hands the
 engine must be bar-for-bar IDENTICAL to what a naive full fetch would have

@@ -37,8 +37,8 @@ class BridgeMarketData(MarketDataSource):
     window is candle_history_count bars (default 600) - that's a ~600-row
     JSON payload per poll for data where at most ONE new bar can appear
     per minute and only the forming (last) bar ever changes. Over the
-    remote-bridge link the Termux setup uses (phone Wi-Fi -> another
-    machine), that's real bandwidth, battery, and latency per poll for
+    remote-bridge link a remote-client setup uses (this machine ->
+    another one over the network), that's real bandwidth and latency per poll for
     ~597 rows that are guaranteed identical to what we already have.
 
     Correctness invariant: the merged window must be bar-for-bar identical

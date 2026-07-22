@@ -12,42 +12,18 @@
 #     machine can run everything, including a local bridge with a real
 #     broker connection.
 #
-#   - Termux on Android (no root): there is no reliable way to run a real
-#     Windows GUI application (the MT5 terminal) under Wine on Android -
-#     experimental proot/box64 combinations exist but are not something
-#     this script can honestly claim to set up for a real-money bot. So
-#     on Termux this installs ONLY the pure-Python side (engine,
-#     dashboard, backtest - none of which need Wine) and configures it as
-#     a CLIENT that talks to a bridge running on a separate real Linux
-#     machine over the network (MT5_BRIDGE_URL points at that machine,
-#     not 127.0.0.1). Backtesting and the dashboard work fully locally on
-#     the phone either way.
+# Safe to re-run: every step checks whether it's already done first.
 #
-# Safe to re-run: every step checks whether it's already done first. On
-# Termux specifically, a PREVIOUS failed pandas/numpy build is remembered
-# (see PANDAS_FAILED_MARKER below) so a re-run doesn't blindly repeat a
-# doomed 90-minute compile attempt - pass --skip-pandas to skip it up
-# front instead of waiting for it to fail again, or --retry-pandas to
-# force one more attempt (e.g. after Termux ships a binary package, or
-# after `pkg upgrade`).
-#
-# Usage: ./install.sh [--skip-pandas | --retry-pandas]
+# Usage: ./install.sh [--no-wine]
 # =====================================================================
 set -euo pipefail
 
-SKIP_PANDAS=0
-RETRY_PANDAS=0
 NO_WINE=0
 for arg in "$@"; do
     case "$arg" in
-        --skip-pandas) SKIP_PANDAS=1 ;;
-        --retry-pandas) RETRY_PANDAS=1 ;;
         --no-wine) NO_WINE=1 ;;
         -h|--help)
-            echo "Uso: ./install.sh [--skip-pandas | --retry-pandas] [--no-wine]"
-            echo "  --skip-pandas    No intentar instalar numpy/pandas (Termux) - el dashboard"
-            echo "                   funciona igual, el motor y los backtests no."
-            echo "  --retry-pandas   Reintentar numpy/pandas aunque haya fallado antes (Termux)."
+            echo "Uso: ./install.sh [--no-wine]"
             echo "  --no-wine        (Kali/Ubuntu) No instalar Wine ni el terminal MT5 - para"
             echo "                   usar el bot con BROKER_KIND=oanda (conexion REST directa,"
             echo "                   sin MetaTrader en ninguna maquina). Ahorra varios GB."
@@ -67,13 +43,35 @@ VENV_DIR="$PROJECT_ROOT/.venv"
 WINEPREFIX_DIR="$PROJECT_ROOT/.wine"
 MT5_INSTALLER_URL="https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe"
 WIN_PYTHON_URL="https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe"
-PANDAS_FAILED_MARKER="$VENV_DIR/.pandas_build_failed"
 
 log()  { printf '\033[1;36m[install]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[install][warn]\033[0m %s\n' "$*"; }
 err()  { printf '\033[1;31m[install][error]\033[0m %s\n' "$*" >&2; }
+progress() {
+    local label="$1" pct="$2" width=28 filled empty
+    filled=$((pct * width / 100)); empty=$((width - filled))
+    printf '\r\033[1;36m[install]\033[0m %-24s [' "$label"
+    printf '%*s' "$filled" '' | tr ' ' '#'
+    printf '%*s' "$empty" '' | tr ' ' '.'
+    printf '] %3d%%' "$pct"
+    [ "$pct" -ge 100 ] && printf '\n'
+}
 
 require_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+require_installer_tools() {
+    local missing=() cmd
+    # python3 is deliberately not in this preflight: the Debian-like
+    # branch installs it as its first package step on a clean machine.
+    for cmd in bash sed grep awk; do
+        require_cmd "$cmd" || missing+=("$cmd")
+    done
+    if [ "${#missing[@]}" -gt 0 ]; then
+        err "Herramientas imprescindibles ausentes: ${missing[*]}"
+        err "Debian/Kali/Ubuntu: sudo apt-get install bash coreutils sed grep gawk"
+        return 1
+    fi
+}
 
 # Wraps `pip install` with visible progress and a bounded timeout instead
 # of pip's default quiet (-q), unbounded behavior - a stalled network or a
@@ -81,8 +79,8 @@ require_cmd() { command -v "$1" >/dev/null 2>&1; }
 # to compiling it from source, common on ARM/Android/anything off the
 # manylinux beaten path) used to look EXACTLY like the installer being
 # frozen, with no way to tell "still working" from "actually stuck". Used
-# by every platform branch below, not just Termux (where this was first
-# found) - a stalled download or a slow compile can happen on any system.
+# by every platform branch below - a stalled download or a slow compile
+# can happen on any system.
 # $1: max seconds to allow. $@ (rest): passed straight through to
 # `pip install`, e.g. `run_pip_install 1200 -r requirements.txt`.
 run_pip_install() {
@@ -90,8 +88,8 @@ run_pip_install() {
     shift
     if ! timeout "$max_seconds" pip install --progress-bar on "$@"; then
         err "pip install se paso de $((max_seconds / 60)) minutos, o fallo."
-        err "Si fue un paquete compilando desde el codigo fuente (comun en ARM/Termux, sin"
-        err "wheels precompilados), instala las herramientas de compilacion primero"
+        err "Si fue un paquete compilando desde el codigo fuente (sin wheels"
+        err "precompilados para esta arquitectura), instala las herramientas de compilacion primero"
         err "(ej. build-essential/clang, make, pkg-config) y volve a correr ./install.sh."
         return 1
     fi
@@ -121,6 +119,10 @@ download_with_timeout() {
 # Leaves the venv ACTIVATED on success; returns 1 (with errors printed) on
 # any failure. Callers keep their own `deactivate`s.
 ensure_venv() {
+    if ! require_cmd timeout; then
+        err "Falta la herramienta 'timeout' (coreutils); no puedo acotar instalaciones colgadas."
+        return 1
+    fi
     if [ -d "$VENV_DIR" ] && { [ ! -f "$VENV_DIR/bin/activate" ] || [ ! -x "$VENV_DIR/bin/pip" ]; }; then
         warn "El venv en $VENV_DIR esta incompleto/roto (probablemente una corrida anterior interrumpida) - recreandolo."
         rm -rf "$VENV_DIR"
@@ -149,17 +151,11 @@ ensure_venv() {
 }
 
 # ------------------------------------------------------- platform detection
-# Termux sets $PREFIX to its own userland root (no root access, no real
-# /usr) - the standard, most reliable way to detect it. $TERMUX_VERSION is
-# a newer, additional signal some Termux builds also set. Everything else
-# is told apart via /etc/os-release's ID (kali, ubuntu, ...) or ID_LIKE
+# Told apart via /etc/os-release's ID (kali, ubuntu, ...) or ID_LIKE
 # (debian) - falling back to "has apt-get" for any Debian derivative
 # os-release didn't name explicitly, then "unknown" for anything else
 # (Fedora, Arch, ...) this script doesn't have a tested path for.
 detect_platform() {
-    if [ "${PREFIX:-}" = "/data/data/com.termux/files/usr" ] || [ -n "${TERMUX_VERSION:-}" ]; then
-        echo "termux"; return
-    fi
     if [ -f /etc/os-release ]; then
         # shellcheck disable=SC1091
         . /etc/os-release
@@ -212,223 +208,7 @@ detect_mt5_install() {
 
 PLATFORM="$(detect_platform)"
 log "Plataforma detectada: $PLATFORM"
-
-# ------------------------------------------------------------- Termux path
-install_termux() {
-    log "Termux/Android sin root: instalando solo el lado Python puro"
-    log "(motor, dashboard, backtest) - Wine + terminal MT5 real no tienen"
-    log "un camino confiable en Android, asi que esta maquina va a hablarle"
-    log "a un bridge corriendo en otra Linux real (MT5_BRIDGE_URL remoto),"
-    log "no a levantar uno local."
-
-    log "Paso 1/3: paquetes de Termux"
-    pkg update -y
-    pkg install -y python coreutils
-
-    log "Paso 2/3: venv de Python + dependencias"
-    # numpy y pandas NO tienen wheels precompilados para Termux/Android en
-    # PyPI (libc bionic, ABI distinto de manylinux) - si pip tiene que
-    # compilarlos desde el codigo fuente puede tardar mucho (30-90+
-    # minutos en un telefono real) o fallar sin las herramientas de
-    # compilacion adecuadas, y como esto antes corria en modo silencioso
-    # (-q, sin progreso visible) se veia exactamente igual a que el
-    # instalador se hubiera colgado. Termux SI tiene sus propios paquetes
-    # binarios para estos (compilados una vez por el equipo de Termux, no
-    # por vos) - los probamos primero via pkg para evitar la compilacion
-    # por completo; el venv se crea con --system-site-packages para poder
-    # verlos desde adentro.
-    local got_numpy_via_pkg=0 got_pandas_via_pkg=0
-    if pkg install -y python-numpy 2>/dev/null; then
-        got_numpy_via_pkg=1
-        log "numpy instalado via pkg (binario, sin compilar)."
-    else
-        warn "python-numpy no esta disponible via pkg en este Termux - pip va a intentar compilarlo (puede tardar bastante)."
-    fi
-    if pkg install -y python-pandas 2>/dev/null; then
-        got_pandas_via_pkg=1
-        log "pandas instalado via pkg (binario, sin compilar)."
-    else
-        warn "python-pandas no esta disponible via pkg en este Termux - pip va a intentar compilarlo (puede tardar bastante, a veces 30+ minutos)."
-    fi
-
-    # A venv from a previous run of an older install.sh (or one that got
-    # interrupted before this fix) may exist without --system-site-packages -
-    # it would never see the numpy/pandas pkg installed above, so pip would
-    # go straight back to compiling them from source on every re-run.
-    # Recreate it rather than leave that stuck state around.
-    if [ -d "$VENV_DIR" ] && ! grep -q 'include-system-site-packages = true' "$VENV_DIR/pyvenv.cfg" 2>/dev/null; then
-        warn "El venv existente no tiene --system-site-packages - recreandolo para que vea numpy/pandas de pkg."
-        rm -rf "$VENV_DIR"
-    fi
-    ensure_venv --system-site-packages || return 1
-
-    # pywebview (ventana nativa) necesita un backend GTK/Qt real que Termux
-    # no tiene - se omite a proposito (dashboard.py ya hace el import de
-    # forma perezosa, --web funciona igual). numpy/pandas se omiten SOLO
-    # si pkg ya los proveyo arriba, para que pip no los recompile encima
-    # del binario que ya esta instalado.
-    local skip_pattern='^pywebview'
-    [ "$got_numpy_via_pkg" -eq 1 ] && skip_pattern="${skip_pattern}|^numpy"
-    [ "$got_pandas_via_pkg" -eq 1 ] && skip_pattern="${skip_pattern}|^pandas"
-
-    # Exported (not just a prefix on the next command) so the pip install
-    # on the other side of the "|" below inherits it too - a plain
-    # VAR=val prefix only applies to the single command it's attached to.
-    # -j$cpu_count paralelizes any C/C++/Cython compile across every core
-    # of the phone instead of the default single-threaded build - doesn't
-    # change WHAT gets installed or which version, only how long compiling
-    # whatever needed compiling anyway takes.
-    local cpu_count
-    cpu_count="$(nproc 2>/dev/null || echo 2)"
-    export MAKEFLAGS="-j${cpu_count}"
-
-    # dashboard.py itself never imports pandas (only core/strategy.py,
-    # core/backtest.py, core/signals.py, core/market_data.py, and
-    # core/mt5_bridge_client.py do - all only reachable through the
-    # ENGINE, not the dashboard) - so install requests/python-dotenv/Flask
-    # FIRST, on their own, completely independent of whether pandas ever
-    # succeeds. Those have real Android wheels and install fast and
-    # reliably; splitting them out means a pandas failure below can no
-    # longer take an otherwise-working dashboard down with it.
-    local core_skip_pattern="${skip_pattern}|^pandas|^numpy"
-    log "Instalando dependencias del dashboard (rapido, no necesitan compilar)..."
-    if ! grep -vE "$core_skip_pattern" requirements.txt | run_pip_install 600 -r /dev/stdin; then
-        deactivate
-        err "Fallo instalando las dependencias basicas (requests/Flask/python-dotenv) - esto no"
-        err "deberia tardar ni fallar normalmente. Revisa la conexion a internet."
-        return 1
-    fi
-
-    # numpy/pandas separately, and NOT fatal if they fail.
-    #
-    # If numpy came from pkg above, build pandas with --no-build-isolation
-    # so its own build doesn't try to rebuild a SECOND, vanilla numpy from
-    # source. Confirmed live why that second build reliably fails, not
-    # just slowly: Android's libc (Bionic) does not provide the `long
-    # double` complex-math functions (cpowl, cexpl, ccosl, csinl, ctanl,
-    # ccoshl, csinhl, ctanhl - all of <complex.h>) that numpy's C source
-    # calls unconditionally - "call to undeclared library function
-    # 'cpow'... ISO C99 and later do not support implicit function
-    # declarations", pointing straight at <complex.h>. That's a real,
-    # permanent gap in Android's libc, not a slow-but-eventually-working
-    # situation - a vanilla `pip install numpy` compiling from the plain
-    # PyPI sdist CANNOT succeed on Termux no matter how long it's given.
-    # Termux's own `pkg install python-numpy` binary already has this
-    # patched by the Termux maintainers (that's why it works) - the
-    # problem is pandas' isolated build venv ignores that pkg-provided
-    # numpy and low-level rebuilds its own straight from source, hitting
-    # the exact same wall all over again as a hidden step of "installing
-    # pandas". --no-build-isolation is what lets pandas' build see the
-    # already-working numpy instead.
-    local no_isolation_flag=""
-    if [ "$got_numpy_via_pkg" -eq 1 ]; then
-        log "numpy ya viene de pkg - preparando un build sin aislamiento para pandas, para"
-        log "que no intente recompilar su propio numpy sin parchear (eso es lo que fallaba)."
-        pkg install -y ninja 2>/dev/null || true
-        if timeout 600 pip install -q Cython meson meson-python wheel setuptools 'versioneer[toml]'; then
-            no_isolation_flag="--no-build-isolation"
-        else
-            warn "No se pudieron instalar las herramientas de build livianas - sigo por el camino normal."
-        fi
-    fi
-
-    local pandas_ok=1
-    if [ "$SKIP_PANDAS" -eq 1 ]; then
-        pandas_ok=0
-        log "Saltando numpy/pandas (--skip-pandas). El dashboard funciona igual; el motor y los"
-        log "backtests no van a estar disponibles en esta maquina."
-    elif [ -f "$PANDAS_FAILED_MARKER" ] && [ "$RETRY_PANDAS" -ne 1 ] && [ "$got_pandas_via_pkg" -ne 1 ]; then
-        pandas_ok=0
-        warn "numpy/pandas ya habian fallado en una corrida anterior de ./install.sh en esta"
-        warn "maquina - no reintentando el compilado (podia tardar hasta 90 minutos para el"
-        warn "mismo resultado). Corre './install.sh --retry-pandas' si queres intentarlo de"
-        warn "nuevo (ej. despues de 'pkg upgrade', o si Termux agrego el paquete binario)."
-    else
-        log "Instalando numpy/pandas (esto es lo que puede tardar o fallar en Termux - ver mas abajo)..."
-        # shellcheck disable=SC2086  # no_isolation_flag is deliberately either empty or one flag word - nothing to quote-split wrong
-        if grep -vE "$skip_pattern" requirements.txt | grep -E '^(pandas|numpy)' | run_pip_install 5400 $no_isolation_flag -r /dev/stdin; then
-            rm -f "$PANDAS_FAILED_MARKER"
-        else
-            pandas_ok=0
-            mkdir -p "$VENV_DIR" && touch "$PANDAS_FAILED_MARKER"
-            warn "numpy/pandas no se pudieron instalar en esta maquina - normal en algunos"
-            warn "telefonos/toolchains de Termux, no es un bug de este script. Sin ellos, el"
-            warn "MOTOR y los BACKTESTS no van a funcionar aca, pero el DASHBOARD si (no los usa)."
-            warn "'pkg search python-pandas' te dice si tu repo de Termux ya lo agrego como binario"
-            warn "(evita la compilacion por completo) - si no, corre el motor real en una maquina"
-            warn "Kali/Ubuntu y usa esta como cliente remoto del dashboard nada mas."
-            warn "La proxima corrida de ./install.sh va a saltear este intento solo - usa"
-            warn "--retry-pandas para forzarlo de nuevo."
-        fi
-    fi
-    deactivate
-    if [ "$pandas_ok" -eq 1 ]; then
-        log "venv listo en $VENV_DIR (sin pywebview - usa dashboard.py --web en Termux)"
-    else
-        warn "venv listo en $VENV_DIR PERO SIN pandas/numpy - ver arriba."
-    fi
-
-    log "Paso 3/3: configuracion (.env)"
-    setup_env_file
-    log "IMPORTANTE: en .env, configura MT5_BRIDGE_URL con la IP/host de la"
-    log "maquina Linux (Kali/Ubuntu) real que SI corre el bridge (ej."
-    log "http://192.168.1.50:5001), y BRIDGE_AUTH_TOKEN con el mismo token"
-    log "que install.sh genero en esa otra maquina (copialo de su .env)."
-
-    if [ "$pandas_ok" -eq 1 ]; then
-        cat <<'EOF'
-
-=====================================================================
- Instalacion completa (modo Termux / cliente remoto).
-
- Esta maquina puede: correr el dashboard, correr backtests, y probar
- el motor en modo --synthetic. Para trading real necesita un bridge
- corriendo en una Linux de verdad (Kali/Ubuntu) en la misma red o
- alcanzable por red - configuralo en MT5_BRIDGE_URL (.env) antes de
- iniciar el motor desde el dashboard.
-
- Para arrancar el dashboard (recomendado --web en Termux, no hay
- entorno grafico nativo):
-   ./run.sh --start
-   luego abrí http://127.0.0.1:9000 e iniciá el motor desde ahí.
-
- Para probar el motor sin broker, sin pasar por el dashboard:
-   .venv/bin/python main.py --synthetic
-
- Diagnostico completo (que falta, que esta bien):
-   ./run.sh doctor
-=====================================================================
-EOF
-    else
-        cat <<'EOF'
-
-=====================================================================
- Instalacion PARCIAL (modo Termux / cliente remoto) - sin pandas/numpy.
-
- numpy/pandas no se pudieron compilar en esta maquina (ver los avisos
- arriba). Esta maquina SI puede: correr el dashboard como visor de una
- cuenta cuyo motor corre en otra parte. NO puede: correr el motor real
- ni backtests localmente - ambos necesitan pandas.
-
- Para arrancar el dashboard igual (recomendado --web, no hay entorno
- grafico nativo):
-   ./run.sh --start
-   luego abrí http://127.0.0.1:9000 - podes ver cuentas/trades/eventos
-   normalmente, con tal de que el MOTOR corra en otra maquina que si
-   tenga pandas (Kali/Ubuntu) y esta se configure como cliente remoto
-   (MT5_BRIDGE_URL en .env apuntando a esa otra maquina).
-
- Para reintentar pandas mas adelante (ej. si Termux agrega el paquete
- binario, o corres esto de nuevo con mas parches/version del sistema):
-   pkg search python-pandas
-   .venv/bin/pip install pandas
-
- Diagnostico completo (que falta, que esta bien):
-   ./run.sh doctor
-=====================================================================
-EOF
-    fi
-}
+progress "preflight" 10
 
 # --------------------------------------------------------- Debian-like path
 install_debian_like() {
@@ -461,29 +241,6 @@ install_debian_like() {
     else
         log "--no-wine: sin Wine/MT5 - para BROKER_KIND=oanda (REST directo). Configura OANDA_* en .env despues."
     fi
-    # pywebview (ventana nativa del dashboard, dashboard.py sin --web) usa el
-    # backend GTK/WebKit en Linux via PyGObject (el modulo 'gi') - eso NO es
-    # instalable con pip (son bindings sobre libs C del sistema), tiene que
-    # venir de apt. Sin esto el dashboard nativo no tiene ningun backend
-    # disponible y falla al abrir ventana; --web sigue andando igual.
-    apt_packages="$apt_packages python3-gi python3-gi-cairo gir1.2-gtk-3.0"
-    # El nombre del paquete GIR de WebKit2 cambio entre versiones de Debian/
-    # Ubuntu (4.0 en releases mas viejos, 4.1 en Kali/Debian actual) - un
-    # nombre que no exista rompe TODO el apt-get install de abajo (falla en
-    # bloque), asi que se elige el que realmente existe en este repo apt en
-    # vez de asumir uno fijo.
-    local webkit_gir_pkg=""
-    for cand in gir1.2-webkit2-4.1 gir1.2-webkit2-4.0; do
-        if apt-cache show "$cand" >/dev/null 2>&1; then
-            webkit_gir_pkg="$cand"
-            break
-        fi
-    done
-    if [ -n "$webkit_gir_pkg" ]; then
-        apt_packages="$apt_packages $webkit_gir_pkg"
-    else
-        warn "Ningun paquete gir1.2-webkit2-4.x disponible en este repo apt - el dashboard nativo puede no tener backend WebKit. Usa --web como alternativa."
-    fi
     # shellcheck disable=SC2086  # $apt_packages es una lista de paquetes a proposito
     if ! timeout 1800 $SUDO apt-get install -y --no-install-recommends $apt_packages; then
         err "apt-get install fallo o se paso de 30 minutos."
@@ -505,8 +262,7 @@ install_debian_like() {
     # de GTK/glib para compilar), asi que heredar del sistema es el camino
     # real, no un pip install mas. Un venv de una corrida anterior de
     # install.sh (antes de este fix) no tiene esa flag y nunca la va a
-    # tener sin recrearlo - detectado y recreado aca, igual que el camino
-    # de Termux ya hace para --system-site-packages.
+    # tener sin recrearlo - detectado y recreado aca.
     if [ -d "$VENV_DIR" ] && ! grep -q 'include-system-site-packages = true' "$VENV_DIR/pyvenv.cfg" 2>/dev/null; then
         warn "El venv existente no tiene --system-site-packages - recreandolo para que el dashboard nativo vea python3-gi del sistema."
         rm -rf "$VENV_DIR"
@@ -602,12 +358,22 @@ install_debian_like() {
         if ! timeout 1800 $XVFB_CMD wine "$WIN_PYTHON" -m pip install -r bridge/requirements-bridge.txt -q; then
             err "pip (dentro de Wine) fallo o se paso de 30 minutos instalando bridge/requirements-bridge.txt."
             err "Podes reintentar solo este paso corriendo ./install.sh de nuevo."
+            exit 1
         fi
-        log "Entorno del bridge (lado Wine) listo."
+        # Do not call the environment ready until the exact import the bridge
+        # needs succeeds. This catches a wrong Wine prefix, a 32/64-bit
+        # mismatch, or a pip install that silently went to another Python.
+        if ! timeout 120 $XVFB_CMD wine "$WIN_PYTHON" -c "import MetaTrader5" >/dev/null 2>&1; then
+            err "MetaTrader5 no se puede importar en el Python de Windows del mismo prefijo."
+            err "Revisa que terminal64.exe y Python estén en el mismo WINEPREFIX y corre ./install.sh de nuevo."
+            exit 1
+        fi
+        log "Entorno del bridge (lado Wine) verificado: MetaTrader5 importable."
     else
         err "No se encontro el Python de Windows en la ruta esperada: $WIN_PYTHON"
         err "El bridge (bridge/mt5_bridge_server.py) no va a poder correr sin el."
         err "Podes reintentar este paso solo, corriendo install.sh de nuevo."
+        exit 1
     fi
     fi  # NO_WINE
 
@@ -631,11 +397,10 @@ install_debian_like() {
 =====================================================================
  Instalacion completa.
 
- Antes de operar en real (DRY_RUN=false en .env):
-   1. Corre un backtest:  .venv/bin/python scripts/run_backtest.py
-   2. Arranca en modo simulado con precios reales del broker (DRY_RUN=true,
-      valor por defecto) durante un tiempo y revisa el dashboard.
-   3. Solo entonces, si los numeros te convencen, cambia DRY_RUN=false.
+ Antes de arrancar el motor real:
+   1. Ejecuta la pestaña Backtesting MT5 (solo lectura).
+   2. Confirma credenciales, símbolo, margen y límites de riesgo en Settings.
+   3. Inicia el motor desde el dashboard; DRY_RUN=false envía órdenes reales.
 
  Para arrancar el servidor (bridge MT5 + dashboard):
    ./run.sh --start
@@ -652,8 +417,8 @@ EOF
 
 # --------------------------------------------------------- fallback path
 install_unknown() {
-    warn "No se reconocio la plataforma (ni Termux, ni un Linux con apt-get)."
-    warn "Este instalador soporta Kali, Ubuntu y Termux directamente."
+    warn "No se reconocio la plataforma (no tiene apt-get)."
+    warn "Este instalador soporta Kali y Ubuntu directamente."
     warn "Otras distros: instala a mano el equivalente de python3, python3-venv,"
     warn "wine, xvfb, wget, curl, cabextract, y volve a correr este script -"
     warn "va a seguir con el venv de Python y la configuracion de .env igual."
@@ -714,11 +479,31 @@ setup_env_file() {
         log "Generado un token de autenticacion para el bridge (la API del bridge va a rechazar pedidos sin el)."
     fi
 
+    # Add keys introduced by newer releases without overwriting credentials
+    # or any operator-selected value in an existing .env.
+    ensure_env_key() {
+        local key="$1" value="$2"
+        if ! grep -qE "^${key}=" "$PROJECT_ROOT/.env" 2>/dev/null; then
+            printf '%s=%s\n' "$key" "$value" >> "$PROJECT_ROOT/.env"
+            log "Agregada configuracion nueva: ${key}"
+        fi
+    }
+    ensure_env_key AI_BRAIN_ENABLED false
+    ensure_env_key OPENROUTER_MODEL openrouter/free
+    ensure_env_key AI_BRAIN_TIMEOUT_MS 6000
+    ensure_env_key AI_BRAIN_MAX_CALLS_PER_DAY 40
+    ensure_env_key CANDLE_HISTORY_COUNT 600
+    ensure_env_key AI_SUPERVISOR_ENABLED false
+    ensure_env_key OPENROUTER_SUPERVISOR_MODEL openrouter/free
+    ensure_env_key AI_SUPERVISOR_TIMEOUT_MS 6000
+    ensure_env_key AI_SUPERVISOR_MAX_CALLS_PER_DAY 24
+
     chmod 600 "$PROJECT_ROOT/.env" 2>/dev/null || true
 }
 
+require_installer_tools || exit 1
+
 case "$PLATFORM" in
-    termux) install_termux ;;
     kali|ubuntu|debian-like) install_debian_like ;;
     *) install_unknown ;;
 esac

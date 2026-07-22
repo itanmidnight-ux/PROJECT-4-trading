@@ -14,6 +14,7 @@ from dataclasses import replace
 
 import dashboard as dmod
 from core.database import Database
+from core.risk_manager import SymbolSpec
 
 
 def make_client(tmp_path, **settings_overrides):
@@ -94,6 +95,31 @@ def test_save_settings_rejects_a_non_json_body(tmp_path):
     assert resp.status_code == 400
 
 
+def test_openrouter_keys_are_written_to_env_but_never_returned(tmp_path, monkeypatch):
+    env_path = tmp_path / ".env"
+    env_path.write_text("MT5_LOGIN=old\n", encoding="utf-8")
+    monkeypatch.setattr(dmod, "ENV_PATH", env_path)
+    client, _db = make_client(tmp_path, dashboard_auth_token="")
+    response = client.post("/api/settings", json={
+        "openrouter_api_key": "key-one-secret",
+        "openrouter_supervisor_api_key": "key-two-secret",
+        "ai_brain_enabled": True,
+        "ai_supervisor_enabled": True,
+    })
+    assert response.status_code == 200
+    body = response.get_json()
+    assert "key-one-secret" not in str(body)
+    assert "key-two-secret" not in str(body)
+    saved = env_path.read_text(encoding="utf-8")
+    assert "OPENROUTER_API_KEY=key-one-secret" in saved
+    assert "OPENROUTER_SUPERVISOR_API_KEY=key-two-secret" in saved
+    settings = client.get("/api/settings").get_json()
+    assert settings["has_openrouter_api_key"] is True
+    assert settings["has_supervisor_api_key"] is True
+    assert "openrouter_api_key" not in settings
+    assert "openrouter_supervisor_api_key" not in settings
+
+
 def test_pause_and_resume_roundtrip(tmp_path):
     client, _db = make_client(tmp_path, pause_flag_path=str(tmp_path / "PAUSED"))
 
@@ -137,6 +163,37 @@ def test_get_routes_do_not_require_token_even_when_configured(tmp_path):
     client, _db = make_client(tmp_path, dashboard_auth_token="secret123")
     assert client.get("/api/status").status_code == 200
     assert client.get("/api/settings").status_code == 200
+
+
+def test_backtest_requires_credentials_and_is_a_post_route(tmp_path):
+    client, _db = make_client(tmp_path, mt5_login="", mt5_password="", dashboard_auth_token="")
+    # Flask's static catch-all handles unsupported GETs as a 404; only POST
+    # is intentionally registered for this potentially expensive operation.
+    assert client.get("/api/backtest").status_code == 404
+    response = client.post("/api/backtest", json={"bars": 100})
+    assert response.status_code == 409
+
+
+def test_backtest_route_uses_mt5_history_without_order_calls(tmp_path, monkeypatch):
+    import dashboard as dmod
+    import pandas as pd
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs): pass
+        def login(self, *args): pass
+        def symbol_spec(self, symbol):
+            return SymbolSpec(100, .01, 1, .01, .01, 1.0, trade_tick_size=.01)
+        def candles(self, symbol, timeframe, count):
+            return pd.DataFrame([{"time": i, "open": 4000, "high": 4001, "low": 3999, "close": 4000} for i in range(count)])
+
+    client, _db = make_client(tmp_path, mt5_login="123", mt5_password="pw", mt5_server="Demo", dashboard_auth_token="")
+    monkeypatch.setattr(dmod, "Mt5BridgeClient", FakeClient)
+    response = client.post("/api/backtest", json={"bars": 100, "balance": 50, "leverage": 500})
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["ok"] is True
+    assert data["tick_to_tick"] is False
+    assert data["fill_model"].startswith("OHLC")
 
 
 def test_status_reports_the_running_engines_own_settings_not_pending_saves(tmp_path):

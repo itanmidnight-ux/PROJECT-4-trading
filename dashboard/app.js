@@ -2,6 +2,30 @@ const POLL_MS = 3000;
 const THEME_KEY = 'xauusd-dashboard-theme';
 const AUTH_TOKEN_KEY = 'xauusd-dashboard-token';
 const tooltip = document.getElementById('tooltip');
+let refreshInFlight = false;
+
+function setLiveState(kind, message, stamp = '') {
+  const strip = document.getElementById('live-strip');
+  const indicator = document.getElementById('live-indicator');
+  const progress = document.getElementById('live-progress');
+  if (!strip || !indicator) return;
+  strip.classList.toggle('is-loading', kind === 'loading');
+  indicator.className = `live-indicator ${kind}`;
+  document.getElementById('live-strip-text').textContent = message;
+  document.getElementById('live-strip-time').textContent = stamp || (kind === 'loading' ? 'Actualizando' : 'Ahora');
+  if (progress) progress.classList.toggle('complete', kind !== 'loading');
+}
+
+function showToast(message, kind = 'info') {
+  const region = document.getElementById('toast-region');
+  if (!region) return;
+  const toast = document.createElement('div');
+  toast.className = `toast ${kind}`;
+  toast.textContent = message;
+  region.appendChild(toast);
+  requestAnimationFrame(() => toast.classList.add('visible'));
+  setTimeout(() => { toast.classList.remove('visible'); setTimeout(() => toast.remove(), 220); }, 3600);
+}
 
 // Defense in depth: most fields rendered below come from fixed server-side
 // enums (side, status, level) and are safe as-is, but event messages can
@@ -325,6 +349,43 @@ function initTabs() {
   });
 }
 
+function initBacktestForm() {
+  const form = document.getElementById('backtest-form');
+  if (!form) return;
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const msg = document.getElementById('bt-message');
+    const out = document.getElementById('bt-results');
+    const btn = document.getElementById('bt-run');
+    const progress = document.getElementById('bt-progress');
+    const progressText = document.getElementById('bt-progress-text');
+    const progressPercent = document.getElementById('bt-progress-percent');
+    btn.disabled = true; msg.textContent = 'Descargando histórico MT5…'; out.innerHTML = '';
+    progress.hidden = false; progressText.textContent = 'Consultando ticks/velas de MT5…'; progressPercent.textContent = 'En curso';
+    const payload = {
+      symbol: document.getElementById('bt-symbol').value.trim(), bars: Number(document.getElementById('bt-bars').value),
+      date_from: document.getElementById('bt-from').value ? `${document.getElementById('bt-from').value}T00:00:00Z` : '',
+      date_to: document.getElementById('bt-to').value ? `${document.getElementById('bt-to').value}T23:59:59Z` : '',
+      balance: Number(document.getElementById('bt-balance').value), leverage: Number(document.getElementById('bt-leverage').value),
+      risk_usd: Number(document.getElementById('bt-risk').value), spread: Number(document.getElementById('bt-spread').value),
+      max_hold_bars: Number(document.getElementById('bt-hold').value),
+      tick_mode: document.getElementById('bt-ticks').checked,
+    };
+    try {
+      const resp = await authFetch('/api/backtest', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
+      const r = await resp.json();
+      if (!resp.ok || !r.ok) throw new Error(r.error || `HTTP ${resp.status}`);
+      msg.textContent = `${r.bars} velas descargadas · ${r.fill_model}`;
+      msg.className = 'settings-message ok';
+      progressText.textContent = 'Backtest completado'; progressPercent.textContent = '100%';
+      document.getElementById('bt-progress-bar')?.classList.add('complete');
+      showToast('Backtest MT5 finalizado. Revisa el modelo y el drawdown.', 'ok');
+      out.innerHTML = `<div class="bt-grid"><div><b>Trades</b><strong>${r.trades}</strong></div><div><b>Win rate</b><strong>${(r.win_rate*100).toFixed(1)}%</strong></div><div><b>P&amp;L</b><strong class="${r.total_pnl >= 0 ? 'bt-good' : 'bt-bad'}">${fmtUsd(r.total_pnl)}</strong></div><div><b>Drawdown máximo</b><strong>${Number(r.max_drawdown_pct).toFixed(1)}%</strong></div><div><b>Balance final</b><strong>${fmtUsd(r.final_balance)}</strong></div><div><b>Modelo</b><strong>${r.tick_to_tick ? 'Ticks MT5' : 'OHLC'}</strong></div></div><p class="bt-warning">${escapeHtml(r.warning)}</p>`;
+    } catch (err) { msg.textContent = err.message; msg.className = 'settings-message error'; progressText.textContent = 'No se pudo completar'; progressPercent.textContent = 'Error'; showToast(err.message, 'error'); }
+    finally { btn.disabled = false; setTimeout(() => { progress.hidden = true; document.getElementById('bt-progress-bar')?.classList.remove('complete'); }, 1800); }
+  });
+}
+
 // ---------------------------------------------------------- pause / resume
 // Distinct from the engine start/stop control below: this only matters
 // while the engine PROCESS is already running (it flips a flag file an
@@ -446,6 +507,13 @@ async function loadSettings() {
   document.getElementById('set-max-loss').value = data.max_daily_loss_usd ?? '';
   document.getElementById('set-max-dd').value = data.max_daily_drawdown_pct ?? '';
   document.getElementById('set-max-trades').value = data.max_trades_per_day ?? '';
+  const key1 = document.getElementById('set-openrouter-key');
+  const key2 = document.getElementById('set-supervisor-key');
+  key1.value = ''; key2.value = '';
+  key1.placeholder = data.has_openrouter_api_key ? '•••••••• (sin cambios)' : '(sin configurar)';
+  key2.placeholder = data.has_supervisor_api_key ? '•••••••• (sin cambios)' : '(sin configurar)';
+  document.getElementById('set-ai-enabled').checked = !!data.ai_brain_enabled;
+  document.getElementById('set-supervisor-enabled').checked = !!data.ai_supervisor_enabled;
 }
 
 function initSettingsForm() {
@@ -466,9 +534,15 @@ function initSettingsForm() {
       max_daily_loss_usd: Number(document.getElementById('set-max-loss').value),
       max_daily_drawdown_pct: Number(document.getElementById('set-max-dd').value),
       max_trades_per_day: Number(document.getElementById('set-max-trades').value),
+      ai_brain_enabled: document.getElementById('set-ai-enabled').checked,
+      ai_supervisor_enabled: document.getElementById('set-supervisor-enabled').checked,
     };
     const password = document.getElementById('set-password').value;
     if (password) payload.mt5_password = password;
+    const aiKey = document.getElementById('set-openrouter-key').value.trim();
+    const supervisorKey = document.getElementById('set-supervisor-key').value.trim();
+    if (aiKey) payload.openrouter_api_key = aiKey;
+    if (supervisorKey) payload.openrouter_supervisor_api_key = supervisorKey;
 
     try {
       const resp = await authFetch('/api/settings', {
@@ -510,7 +584,12 @@ async function fetchJson(path) {
 }
 
 async function refresh() {
-  const [status, summary, equity, daily, monthly, trades, events] = await Promise.all([
+  if (refreshInFlight) return;
+  refreshInFlight = true;
+  const started = performance.now();
+  setLiveState('loading', 'Actualizando datos en vivo…');
+  try {
+    const [status, summary, equity, daily, monthly, trades, events] = await Promise.all([
     fetchJson('/api/status'),
     fetchJson('/api/summary'),
     fetchJson('/api/equity_curve'),
@@ -518,7 +597,7 @@ async function refresh() {
     fetchJson('/api/pnl_monthly'),
     fetchJson('/api/trades'),
     fetchJson('/api/events'),
-  ]);
+    ]);
 
   const connPill = document.getElementById('pill-conn');
   if (status === null) {
@@ -526,6 +605,7 @@ async function refresh() {
     // didn't respond at all - nothing else can be trusted either.
     connPill.className = 'pill off';
     document.getElementById('pill-conn-text').textContent = 'Sin conexion al motor';
+    setLiveState('disconnected', 'Sin conexión con el dashboard');
     return;
   }
 
@@ -540,6 +620,7 @@ async function refresh() {
   document.getElementById('pill-conn-text').textContent = status.connected ? 'Motor activo' : 'Motor sin datos recientes';
 
   document.getElementById('pill-updated').textContent = new Date().toLocaleTimeString();
+  setLiveState(status.connected ? 'connected' : 'disconnected', status.connected ? (status.engine_running ? 'Motor activo · datos en vivo' : 'Dashboard conectado · motor detenido') : 'Motor sin datos recientes', `${Math.round(performance.now() - started)} ms`);
 
   updateEngineButton(!!status.engine_running);
   updatePauseButton(!!status.paused);
@@ -580,6 +661,9 @@ async function refresh() {
   if (monthly) renderBarChart('chart-monthly', [...monthly].reverse(), { xKey: 'month', valueKey: 'pnl' });
   if (trades) renderTrades('trades-table', trades);
   if (events) renderEvents('events-list', events);
+  } finally {
+    refreshInFlight = false;
+  }
 }
 
 initTheme();
@@ -587,6 +671,7 @@ initTabs();
 initEngineButton();
 initPauseButton();
 initSettingsForm();
+initBacktestForm();
 refresh();
 setInterval(refresh, POLL_MS);
 window.addEventListener('resize', refresh);

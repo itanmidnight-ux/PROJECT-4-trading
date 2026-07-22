@@ -6,9 +6,13 @@
 # Data & logs
 data/*.db
 data/*.db-journal
+data/*.db-shm
+data/*.db-wal
 data/*.sqlite
 data/*.csv
 data/run/
+data/run.rootbak/
+data/logs.rootbak/
 logs/
 *.log
 
@@ -25,3 +29,6 @@ mt5setup.exe
 
 # OS
 .DS_Store
+
+# Skill driver screenshot sessions (regenerated on every run)
+.claude/skills/*/sessions/

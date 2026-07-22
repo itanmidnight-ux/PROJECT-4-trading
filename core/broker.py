@@ -82,10 +82,24 @@ class BridgeBroker(BrokerExecutor):
         return OpenResult(ticket=str(result["ticket"]), fill_price=result["price"])
 
     def close_partial(self, ticket: str, lot: float, fill_price: float) -> float:
+        # MT5's DEAL response gives the close fill price, not realized PnL.
+        # Returning that price (the old behavior) corrupts the database and
+        # daily loss breaker by thousands of USD on gold. Snapshot the live
+        # position before sending the mutating request, then calculate PnL
+        # from the broker-confirmed close price and the actual tick size.
+        position = next((p for p in self.client.positions() if str(p["ticket"]) == str(ticket)), None)
+        if position is None:
+            raise RuntimeError(f"position {ticket} not found before close")
         result = self.client.close_order(ticket, lot)
-        # The bridge doesn't compute PnL for us on partial close; the
-        # engine computes it from entry/fill price + spec, same as sim.
-        return result["price"]
+        spec = self.client.symbol_spec(position["symbol"])
+        tick_size = spec.trade_tick_size or spec.point
+        if tick_size <= 0 or spec.trade_tick_value <= 0:
+            raise RuntimeError(f"invalid symbol specification while closing {ticket}")
+        direction = 1 if position["type"] == "BUY" else -1
+        closed_lot = min(float(result.get("volume", lot)), float(position["volume"]))
+        return direction * (float(result["price"]) - float(position["price_open"])) * (
+            spec.trade_tick_value / tick_size
+        ) * closed_lot
 
     def open_positions(self, symbol: str) -> list[BrokerPosition]:
         raw = self.client.positions(symbol)
@@ -142,7 +156,8 @@ class SimulatedBroker(BrokerExecutor):
             pos.sl_price = sl_price
 
     def _pnl(self, pos: SimPosition, lot: float, fill_price: float) -> float:
-        value_per_point_per_lot = self._spec.trade_tick_value / self._spec.point
+        tick_size = self._spec.trade_tick_size or self._spec.point
+        value_per_point_per_lot = self._spec.trade_tick_value / tick_size
         direction = 1 if pos.side == "BUY" else -1
         return direction * (fill_price - pos.entry_price) * value_per_point_per_lot * lot
 

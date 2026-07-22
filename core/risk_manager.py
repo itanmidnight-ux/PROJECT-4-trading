@@ -23,6 +23,10 @@ class SymbolSpec:
     volume_step: float
     point: float               # smallest price increment, e.g. 0.01
     trade_tick_value: float    # USD value of one tick move for a 1.0 lot position
+    # `trade_tick_value` is the value of `trade_tick_size`, NOT necessarily
+    # of `point`.  Many symbols happen to use the same value for both, but
+    # assuming that is unsafe and can under/over-size a trade.
+    trade_tick_size: float = 0.0
     margin_initial: Optional[float] = None  # USD margin per 1.0 lot, if broker reports it
 
 
@@ -59,11 +63,13 @@ class RiskManager:
         max_daily_loss_usd: float,
         max_daily_drawdown_pct: float,
         max_trades_per_day: int,
+        max_lot: Optional[float] = None,
     ) -> None:
         self.risk_per_trade_usd = risk_per_trade_usd
         self.max_daily_loss_usd = max_daily_loss_usd
         self.max_daily_drawdown_pct = max_daily_drawdown_pct
         self.max_trades_per_day = max_trades_per_day
+        self.max_lot = max_lot if max_lot and max_lot > 0 else None
 
         self._day: date = date.today()
         self._trades_today = 0
@@ -143,6 +149,7 @@ class RiskManager:
         spec: SymbolSpec,
         sl_distance_price: float,
         current_price: float,
+        risk_budget_usd: Optional[float] = None,
     ) -> SizingResult:
         """
         Compute the largest lot size that stays within BOTH the USD risk
@@ -154,17 +161,25 @@ class RiskManager:
         if sl_distance_price <= 0:
             return SizingResult(ok=False, reason="Distancia de stop invalida")
 
-        value_per_point_per_lot = spec.trade_tick_value / spec.point if spec.point else 0.0
-        if value_per_point_per_lot <= 0:
+        tick_size = spec.trade_tick_size or spec.point
+        value_per_price_per_lot = spec.trade_tick_value / tick_size if tick_size else 0.0
+        if value_per_price_per_lot <= 0:
             return SizingResult(ok=False, reason="Spec de simbolo invalida (tick value)")
 
-        # Lot size so that sl_distance_price * value_per_point_per_lot * lot == risk_per_trade_usd
-        risk_based_lot = self.risk_per_trade_usd / (sl_distance_price * value_per_point_per_lot)
+        # Lot size so that sl_distance_price * value_per_price_per_lot * lot == risk_per_trade_usd.
+        risk_budget = self.risk_per_trade_usd if risk_budget_usd is None else min(
+            max(float(risk_budget_usd), 0.0), self.risk_per_trade_usd
+        )
+        if risk_budget <= 0:
+            return SizingResult(ok=False, reason="Presupuesto de riesgo supervisor invalido")
+        risk_based_lot = risk_budget / (sl_distance_price * value_per_price_per_lot)
 
         # Snap to broker step, respect min/max
         step = spec.volume_step or 0.01
         lot = max(spec.volume_min, self._round_to_step(risk_based_lot, step))
         lot = min(lot, spec.volume_max)
+        if self.max_lot is not None:
+            lot = min(lot, self.max_lot)
 
         # The floor above (spec.volume_min) is a REAL bug fix, not a nicety:
         # during a volatility spike the ATR-based stop distance widens, so
@@ -174,9 +189,9 @@ class RiskManager:
         # - reproduced directly against real market data: a $1 risk budget
         # became a real $16 loss this way, and a sequence of those wiped an
         # entire $50 account in hours. Refuse instead of quietly eating it.
-        actual_risk_usd = lot * sl_distance_price * value_per_point_per_lot
-        risk_budget = self.risk_per_trade_usd * self.MAX_RISK_OVERSHOOT_FACTOR
-        if actual_risk_usd > risk_budget:
+        actual_risk_usd = lot * sl_distance_price * value_per_price_per_lot
+        max_allowed_risk = risk_budget * self.MAX_RISK_OVERSHOOT_FACTOR
+        if actual_risk_usd > max_allowed_risk:
             return SizingResult(
                 ok=False,
                 reason=(
@@ -221,5 +236,10 @@ class RiskManager:
     def _round_to_step(value: float, step: float) -> float:
         if step <= 0:
             return value
-        steps = round(value / step)
+        # Never round UP a risk-derived volume.  Rounding to the nearest
+        # step can silently exceed the requested risk before the later
+        # tolerance gate notices it; flooring is deterministic and keeps
+        # the actual loss cap at or below the configured budget (apart from
+        # an unavoidable broker minimum, which is explicitly rejected).
+        steps = int(value / step)
         return round(steps * step, 8)
