@@ -84,15 +84,21 @@ def main() -> int:
                     print(f"> nav {rest[0]} -> {page.title()!r}")
                 elif cmd == "wait-for":
                     target = rest[0]
+                    # Optional 2nd arg: per-call timeout override in ms
+                    # (default 10000) - a real backtest run can occasionally
+                    # exceed the default 10s (e.g. cold MT5 bridge session
+                    # right after a dashboard restart), so callers can widen
+                    # just this one wait rather than the whole driver.
+                    wait_ms = int(rest[1]) if len(rest) > 1 else 10000
                     if target.startswith("text="):
                         needle = target[len("text=") :]
                         page.wait_for_function(
                             "needle => document.body.innerText.includes(needle)",
                             arg=needle,
-                            timeout=10000,
+                            timeout=wait_ms,
                         )
                     else:
-                        page.wait_for_selector(target, timeout=10000, state="visible")
+                        page.wait_for_selector(target, timeout=wait_ms, state="visible")
                     print(f"> wait-for {target} ok")
                 elif cmd == "screenshot":
                     shot_count += 1
