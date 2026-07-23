@@ -582,16 +582,51 @@ WEB_DEFAULT_PORT = 9000
 DASHBOARD_PORT_FILE = RUN_DIR / "dashboard.port"
 
 
+def _resolve_candidate_dashboard_script(pid: int) -> Path | None:
+    """Best-effort resolution of the absolute path of the `dashboard.py`
+    script a candidate process is actually running, by parsing its real
+    /proc/<pid>/cmdline argv (NUL-separated) for an argument that looks
+    like a `dashboard.py` file and resolving it against that process's own
+    /proc/<pid>/cwd (a relative argv path is relative to the process's
+    cwd, not ours). Returns None on ANY failure (permission denied, pid
+    gone by the time we look, malformed/unreadable /proc entries, no
+    matching argv, cwd unreadable) - the caller treats None as "can't
+    confirm, don't touch it", never as a reason to guess."""
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return None
+    argv = [a for a in raw.decode(errors="replace").split("\x00") if a]
+    candidates = [a for a in argv if a.endswith("dashboard.py")]
+    if not candidates:
+        return None
+    script_arg = candidates[0]
+    script_path = Path(script_arg)
+    try:
+        if script_path.is_absolute():
+            return script_path.resolve()
+        cwd = Path(os.readlink(f"/proc/{pid}/cwd"))
+        return (cwd / script_path).resolve()
+    except OSError:
+        return None
+
+
 def _reclaim_stale_dashboard_port(host: str, port: int) -> None:
-    """If `port` is already bound by another dashboard.py process (a stale
-    instance left over from a previous run/crash/duplicate manual launch),
+    """If `port` is already bound by another process running THIS SAME
+    dashboard.py script (a stale instance left over from a previous
+    run/crash/duplicate manual launch of this exact project checkout),
     terminates it and frees the port - so a fresh launch always ends up on
     WEB_DEFAULT_PORT instead of silently drifting to 9001/9002/... forever.
-    Never touches a process that isn't confirmably this project's own
-    dashboard.py (verified via /proc/<pid>/cmdline) - anything else on the
-    port is left completely alone and _find_free_port's normal
-    auto-increment fallback takes over instead, exactly as it did before
-    this function existed."""
+    Never touches a process whose resolved script path doesn't match this
+    project's own `Path(__file__).resolve()` - a mere substring match on
+    "dashboard.py" somewhere in argv is NOT enough (an unrelated app with
+    the same filename, or - concretely - another checkout/worktree of this
+    same repo running its own dashboard.py, would match the substring but
+    is a DIFFERENT process we must never kill). Anything that isn't
+    confirmably this exact file is left completely alone and
+    _find_free_port's normal auto-increment fallback takes over instead,
+    exactly as it did before this function existed."""
+    own_script = Path(__file__).resolve()
     try:
         out = subprocess.run(["lsof", "-ti", f":{port}", "-sTCP:LISTEN"],
                               capture_output=True, text=True, timeout=5)
@@ -601,13 +636,13 @@ def _reclaim_stale_dashboard_port(host: str, port: int) -> None:
     for pid_str in pids:
         try:
             pid = int(pid_str)
-            cmdline = Path(f"/proc/{pid}/cmdline").read_text(errors="replace")
-        except (OSError, ValueError):
+        except ValueError:
             continue
-        if "dashboard.py" not in cmdline:
-            continue  # not us - never kill something we can't identify as our own dashboard
         if pid == os.getpid():
             continue  # can't be ourselves, we haven't bound the port yet, but guard anyway
+        candidate_script = _resolve_candidate_dashboard_script(pid)
+        if candidate_script is None or candidate_script != own_script:
+            continue  # not confirmably THIS project's own dashboard.py - never kill it
         print(f"\033[1;33m[dashboard]\033[0m Puerto {port} ocupado por otra instancia de "
               f"dashboard.py (PID {pid}) - liberándolo...", flush=True)
         try:
