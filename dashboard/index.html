@@ -4,7 +4,12 @@
 <meta charset="utf-8">
 <title>XAUUSD Scalper — Dashboard</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%233987e5'/%3E%3Cstop offset='1' stop-color='%237c5cff'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='40' height='40' rx='11' fill='url(%23g)'/%3E%3Ctext x='20' y='27' font-family='system-ui,sans-serif' font-size='17' font-weight='700' fill='white' text-anchor='middle'%3EAu%3C/text%3E%3C/svg%3E">
+<!-- favicon gradient matches --gold-accent (the brand mark's dedicated,
+     nowhere-else-reused token, see style.css) instead of the old blue/purple. -->
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%23F59E0B'/%3E%3Cstop offset='1' stop-color='%23875706'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='40' height='40' rx='11' fill='url(%23g)'/%3E%3Ctext x='20' y='27' font-family='system-ui,sans-serif' font-size='17' font-weight='700' fill='white' text-anchor='middle'%3EAu%3C/text%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -37,7 +42,7 @@
 
   <div class="live-strip" id="live-strip" role="status" aria-live="polite">
     <div class="live-strip-copy"><span class="live-indicator loading" id="live-indicator"></span><span id="live-strip-text">Conectando con el dashboard…</span></div>
-    <div class="live-progress-wrap" aria-hidden="true"><span id="live-progress"></span></div>
+    <span class="live-pulse" id="live-pulse" aria-hidden="true"></span>
     <span class="live-strip-time" id="live-strip-time">—</span>
   </div>
 
@@ -217,7 +222,7 @@
       <div class="panel-sub">Sólo lectura: descarga velas cerradas del bridge y no envía órdenes.</div>
       <form id="backtest-form">
         <div class="field-grid">
-          <label class="field"><span class="field-label">Símbolo</span><input id="bt-symbol" value="XAUUSD"></label>
+          <label class="field"><span class="field-label">Símbolo</span><input type="text" id="bt-symbol" value="XAUUSD"></label>
           <label class="field"><span class="field-label">Velas M1 (100–200000)</span><input type="number" min="100" max="200000" step="100" id="bt-bars" value="3000"></label>
           <label class="field"><span class="field-label">Desde (opcional)</span><input type="date" id="bt-from"></label>
           <label class="field"><span class="field-label">Hasta (opcional)</span><input type="date" id="bt-to"></label>

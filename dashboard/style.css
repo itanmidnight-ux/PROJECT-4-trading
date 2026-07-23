@@ -1,118 +1,130 @@
 /* ===========================================================================
-   Color tokens. Dark is the default (:root); light is applied either by the
-   OS preference (media query, low-specificity :where() guard so a manual
-   toggle always wins) or by an explicit viewer toggle (data-theme, see
-   app.js) which must win in both directions - see the two [data-theme]
-   blocks below the media query.
+   Design tokens - terminal-green / near-black palette. Dark is the
+   UNCONDITIONAL default (bare :root) - it must render regardless of OS/
+   browser prefers-color-scheme. Light is reached ONLY via an explicit
+   viewer toggle (data-theme="light", see app.js) - see the two [data-theme]
+   blocks below. There is intentionally no `prefers-color-scheme` media
+   query here: dark-mode-primary is a non-negotiable product requirement,
+   not something that should auto-follow the OS/browser default.
 
-   Status colors (--good/--warning/--critical) are FIXED across themes by
-   design: they classify a state (connected/dry-run/disconnected, event
-   severity) and must mean the same thing regardless of the color scheme.
-   --delta-good/--delta-critical are the mode-aware counterparts for signed
-   TEXT (P&L figures, deltas) - text tokens still shift with theme even
-   though the underlying state a badge encodes does not.
+   Canonical source-of-truth tokens (redeclared per theme block below):
+   --bg, --card, --primary, --primary-dim, --destructive, --foreground,
+   --muted, --border, --gold-accent, plus --warning/--on-primary/
+   --on-destructive (status/contrast tokens the confirmed 9-token palette
+   doesn't cover but the UI still needs). --gold-accent is reserved for the
+   brand mark ("Au") ONLY - it must not be reused anywhere else.
+
+   Unlike the previous palette, --primary/--destructive/--warning
+   intentionally use DIFFERENT hex values between dark and light: the
+   light-theme tones are deliberately darker/more saturated to hold AA
+   contrast on a near-white background instead of staying fixed across
+   themes.
+
+   Below the per-theme blocks:
+   - "derived" tokens are computed ONCE (via color-mix()) from the
+     canonical vars above and still adapt correctly per theme, because
+     var() substitution happens at used-value time against whatever
+     cascades on the element requesting it, not at declaration time;
+   - "legacy aliases" keep the OLD variable names alive, pointed at the new
+     tokens, because dashboard/app.js builds inline styles/SVG attributes
+     referencing them directly (e.g. var(--series-1), var(--good),
+     var(--text-primary)) and is out of scope for this task - removing
+     those names outright would leave dangling var(--undefined) references
+     rendering as broken/transparent elements.
    =========================================================================== */
 :root {
   color-scheme: dark;
-  --surface-1:      #1a1a19;
-  --surface-2:      #232322;
-  --page:           #0d0d0d;
-  --text-primary:   #ffffff;
-  --text-secondary: #c3c2b7;
-  --text-muted:     #898781;
-  --gridline:       #2c2c2a;
-  --baseline:       #383835;
-  --border:         rgba(255,255,255,0.10);
 
-  --series-1:       #3987e5;  /* categorical blue - equity curve, BUY badge */
-  --series-1-wash:  rgba(57,135,229,0.12);
-  --series-sell:    #d55181;  /* categorical magenta - SELL badge */
+  /* -- canonical palette (dark, default) -- */
+  --bg:             #0D1117;
+  --card:           #182424;
+  --primary:        #00FF41;  /* terminal green - actions, gains, live pulse */
+  --primary-dim:    #008F11;  /* secondary green / hover */
+  --destructive:    #FF3D3D;  /* losses, dangerous actions - darkened from #FF3333
+                                  to clear WCAG AA 4.5:1 as text on --card #182424
+                                  (measured contrast ~4.55:1; #FF3333 was ~4.38:1) */
+  --foreground:     #E6EDF3;
+  --muted:          #94A3B8;
+  --border:         #30363D;
+  --gold-accent:    #F59E0B;  /* ONLY the logo/brand mark - nowhere else */
 
-  --delta-good:     #0ca30c;
-  --delta-critical: #e66767;
+  /* -- status/contrast extension tokens (not in the core 9, still per-theme) -- */
+  --warning:        #FFB020;  /* dry-run / caution - distinct from --gold-accent */
+  --on-primary:     #0B0F0D;  /* text atop a solid --primary fill */
+  --on-destructive: #FFFFFF;  /* text atop a solid --destructive fill */
 
-  --good:     #0ca30c;
-  --warning:  #fab219;
-  --critical: #d03b3b;
+  /* -- fonts -- */
+  --font-ui:   'IBM Plex Sans', system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-data: 'JetBrains Mono', ui-monospace, monospace;
 
-  --glow-blue: 0 0 24px rgba(57,135,229,0.35);
-  --glow-good: 0 0 18px rgba(12,163,12,0.30);
-  --glow-crit: 0 0 18px rgba(208,59,59,0.30);
-
+  /* -- shape / elevation (theme-neutral) -- */
+  --radius: 16px;
+  --radius-sm: 10px;
   --shadow-sm: 0 1px 2px rgba(0,0,0,0.24);
   --shadow-md: 0 8px 24px rgba(0,0,0,0.32);
   --shadow-lg: 0 16px 44px rgba(0,0,0,0.40);
 
-  --radius: 16px;
-  --radius-sm: 10px;
+  /* -- derived tokens (auto-adapt to whichever theme block is active) -- */
+  --card-alt:          color-mix(in srgb, var(--card) 85%, var(--foreground) 15%);
+  --muted-strong:      color-mix(in srgb, var(--foreground) 65%, var(--muted) 35%);
+  --chart-grid:        var(--border);
+  --chart-baseline:    color-mix(in srgb, var(--muted) 50%, transparent);
+  --primary-wash:      color-mix(in srgb, var(--primary) 12%, transparent);
+  --destructive-wash:  color-mix(in srgb, var(--destructive) 14%, transparent);
+  --glow-primary:      0 0 24px color-mix(in srgb, var(--primary) 35%, transparent);
+  --glow-gold:         0 0 24px color-mix(in srgb, var(--gold-accent) 35%, transparent);
+
+  /* -- legacy aliases for dashboard/app.js's inline var(--old-name) refs -- */
+  --page:           var(--bg);
+  --text-primary:   var(--foreground);
+  --text-secondary: var(--muted-strong);
+  --text-muted:     var(--muted);
+  --surface-1:      var(--card);
+  --surface-2:      var(--card-alt);
+  --series-1:       var(--primary);     /* equity curve, BUY badge */
+  --series-1-wash:  var(--primary-wash);
+  --series-sell:    var(--destructive); /* SELL badge */
+  --good:           var(--primary);
+  --critical:       var(--destructive);
+  --delta-good:     var(--primary);
+  --delta-critical: var(--destructive);
+  --gridline:       var(--chart-grid);
+  --baseline:       var(--chart-baseline);
+
   font-size: 15px;
 }
 
-@media (prefers-color-scheme: light) {
-  :root:where(:not([data-theme="dark"])) {
-    color-scheme: light;
-    --surface-1: #fcfcfb;
-    --surface-2: #f4f3f0;
-    --page: #f9f9f7;
-    --text-primary: #0b0b0b;
-    --text-secondary: #52514e;
-    --text-muted: #898781;
-    --gridline: #e1e0d9;
-    --baseline: #c3c2b7;
-    --border: rgba(11,11,11,0.10);
-    --series-1: #2a78d6;
-    --series-1-wash: rgba(42,120,214,0.10);
-    --series-sell: #e87ba4;
-    --delta-good: #006300;
-    --delta-critical: #e34948;
-    --shadow-sm: 0 1px 2px rgba(11,11,11,0.06);
-    --shadow-md: 0 8px 24px rgba(11,11,11,0.08);
-    --shadow-lg: 0 16px 44px rgba(11,11,11,0.10);
-  }
-}
-
-/* Explicit viewer toggle (see the theme-toggle button in app.js) - beats the
-   OS setting in both directions because an attribute selector always outranks
-   the :where()-wrapped media block above. */
+/* Explicit viewer toggle (see the theme-toggle button in app.js) - the ONLY
+   way to reach the light palette. */
 :root[data-theme="light"] {
   color-scheme: light;
-  --surface-1: #fcfcfb;
-  --surface-2: #f4f3f0;
-  --page: #f9f9f7;
-  --text-primary: #0b0b0b;
-  --text-secondary: #52514e;
-  --text-muted: #898781;
-  --gridline: #e1e0d9;
-  --baseline: #c3c2b7;
-  --border: rgba(11,11,11,0.10);
-  --series-1: #2a78d6;
-  --series-1-wash: rgba(42,120,214,0.10);
-  --series-sell: #e87ba4;
-  --delta-good: #006300;
-  --delta-critical: #e34948;
-  --shadow-sm: 0 1px 2px rgba(11,11,11,0.06);
-  --shadow-md: 0 8px 24px rgba(11,11,11,0.08);
-  --shadow-lg: 0 16px 44px rgba(11,11,11,0.10);
+  --bg:             #F7F9F8;
+  --card:           #FFFFFF;
+  --primary:        #008F11;
+  --primary-dim:    #00C22C;
+  --destructive:    #C81E1E;
+  --foreground:     #0D1117;
+  --muted:          #57606A;
+  --border:         #D0D7DE;
+  --gold-accent:    #B45309;
+  --warning:        #9A6700;
+  --on-primary:     #FFFFFF;
+  --on-destructive: #FFFFFF;
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --surface-1: #1a1a19;
-  --surface-2: #232322;
-  --page: #0d0d0d;
-  --text-primary: #ffffff;
-  --text-secondary: #c3c2b7;
-  --text-muted: #898781;
-  --gridline: #2c2c2a;
-  --baseline: #383835;
-  --border: rgba(255,255,255,0.10);
-  --series-1: #3987e5;
-  --series-1-wash: rgba(57,135,229,0.12);
-  --series-sell: #d55181;
-  --delta-good: #0ca30c;
-  --delta-critical: #e66767;
-  --shadow-sm: 0 1px 2px rgba(0,0,0,0.24);
-  --shadow-md: 0 8px 24px rgba(0,0,0,0.32);
-  --shadow-lg: 0 16px 44px rgba(0,0,0,0.40);
+  --bg:             #0D1117;
+  --card:           #182424;
+  --primary:        #00FF41;
+  --primary-dim:    #008F11;
+  --destructive:    #FF3D3D;
+  --foreground:     #E6EDF3;
+  --muted:          #94A3B8;
+  --border:         #30363D;
+  --gold-accent:    #F59E0B;
+  --warning:        #FFB020;
+  --on-primary:     #0B0F0D;
+  --on-destructive: #FFFFFF;
 }
 
 * { box-sizing: border-box; }
@@ -122,16 +134,37 @@ html, body {
   padding: 0;
   background: var(--page);
   color: var(--text-primary);
-  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-family: var(--font-ui);
   overflow-x: hidden;
 }
 
 body {
   background-image:
-    radial-gradient(circle at 15% 0%, rgba(57,135,229,0.10), transparent 40%),
-    radial-gradient(circle at 85% 10%, rgba(12,163,12,0.06), transparent 35%);
+    radial-gradient(circle at 15% 0%, color-mix(in srgb, var(--primary) 10%, transparent), transparent 40%),
+    radial-gradient(circle at 85% 10%, color-mix(in srgb, var(--gold-accent) 6%, transparent), transparent 35%);
   background-attachment: fixed;
   transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+/* Numeric data - tile figures, table prices/lots/P&L, backtest results, the
+   equity/donut chart labels - render in the monospaced data face with
+   tabular figures so digits align in columns instead of the proportional
+   UI font. Selectors matched against the actual markup/render functions in
+   index.html and app.js (there is no shared ".num" class in the trades
+   table, so the price/lot columns are addressed positionally). */
+.value,
+.tile .value,
+#trades-table td:nth-child(3),  /* Lote */
+#trades-table td:nth-child(4),  /* Entrada */
+#trades-table td:nth-child(5),  /* Salida */
+#trades-table td.pnl,
+.bt-grid strong,
+#chart-equity text,
+#chart-donut text,
+.live-strip-time,
+.event-time {
+  font-family: var(--font-data);
+  font-variant-numeric: tabular-nums;
 }
 
 .app {
@@ -167,8 +200,10 @@ body {
 .brand .mark {
   width: 40px; height: 40px;
   border-radius: 12px;
-  background: linear-gradient(135deg, var(--series-1), #7c5cff);
-  box-shadow: var(--glow-blue);
+  /* --gold-accent is reserved for this brand mark only - see the token
+     comment at the top of this file. Nowhere else should reference it. */
+  background: linear-gradient(135deg, var(--gold-accent), color-mix(in srgb, var(--gold-accent) 55%, black));
+  box-shadow: var(--glow-gold);
   display: flex; align-items: center; justify-content: center;
   font-weight: 700;
   color: white;
@@ -210,8 +245,15 @@ body {
 .theme-toggle.is-light .icon-sun { display: none; }
 .theme-toggle.is-light .icon-moon { display: block; }
 
+/* Sitewide focus ring - single style everywhere (topbar buttons, tabs,
+   form inputs, checkboxes, submit buttons). Kept in sync with the
+   per-component rules that used to exist on .field input / the checkbox /
+   .btn-primary (Tasks 10/11) - those were removed as redundant once this
+   rule matched them exactly; if a future element genuinely needs a
+   different treatment, override :focus-visible for that selector instead
+   of drifting this shared rule. */
 button:focus-visible, input:focus-visible, .tab-btn:focus-visible {
-  outline: 3px solid color-mix(in srgb, var(--series-1) 70%, transparent);
+  outline: 2px solid var(--primary);
   outline-offset: 2px;
 }
 
@@ -233,11 +275,24 @@ button:focus-visible, input:focus-visible, .tab-btn:focus-visible {
 .live-indicator.connected { background: var(--good); box-shadow: 0 0 0 4px color-mix(in srgb, var(--good) 15%, transparent); }
 .live-indicator.disconnected { background: var(--critical); box-shadow: 0 0 0 4px color-mix(in srgb, var(--critical) 15%, transparent); }
 .live-indicator.loading { background: var(--warning); animation: live-pulse 1.15s ease-in-out infinite; }
-.live-progress-wrap { height: 3px; flex: 1; min-width: 50px; overflow: hidden; border-radius: 999px; background: color-mix(in srgb, var(--text-muted) 18%, transparent); }
-.live-progress-wrap span { display: block; height: 100%; width: 38%; border-radius: inherit; background: linear-gradient(90deg, var(--series-1), #7c5cff); transform: translateX(-130%); animation: progress-slide 1.15s ease-in-out infinite; }
-.live-progress-wrap span.complete { width: 100%; transform: none; animation: none; background: var(--good); transition: width .25s ease; }
+.live-pulse {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--primary);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--primary) 60%, transparent);
+  transition: background-color .2s ease;
+}
+.live-pulse.slow {
+  animation: live-pulse-ring 900ms ease-out infinite;
+}
+.live-pulse.stale { background: var(--destructive); }
+@keyframes live-pulse-ring {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--primary) 55%, transparent); }
+  100% { box-shadow: 0 0 0 8px color-mix(in srgb, var(--primary) 0%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .live-pulse.slow { animation: none; }
+}
 .live-strip-time { color: var(--text-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
-@keyframes progress-slide { to { transform: translateX(300%); } }
 @keyframes live-pulse { 50% { opacity: .35; transform: scale(.72); } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; } }
 
@@ -298,12 +353,15 @@ button:focus-visible, input:focus-visible, .tab-btn:focus-visible {
 .btn-control-primary {
   border-color: var(--good);
   background: var(--good);
-  color: #0b0c0f;
+  /* --primary's luminance swings a lot between themes (neon green in dark,
+     a much darker green in light) - use the contrast-matched token instead
+     of a hardcoded near-black, which would fail contrast in light mode. */
+  color: var(--on-primary);
 }
 .btn-control-primary.is-running {
   border-color: var(--critical);
   background: var(--critical);
-  color: #fff;
+  color: var(--on-destructive);
 }
 #pill-engine.live .dot { background: var(--good); box-shadow: 0 0 8px var(--good); animation: pulse 1.6s infinite; }
 #pill-engine.off .dot { background: var(--text-muted); box-shadow: none; animation: none; }
@@ -350,8 +408,9 @@ button:focus-visible, input:focus-visible, .tab-btn:focus-visible {
 .field-label { font-size: 12px; color: var(--text-secondary); font-weight: 600; }
 .field input[type="text"],
 .field input[type="password"],
-.field input[type="number"] {
-  background: var(--surface-2);
+.field input[type="number"],
+.field input[type="date"] {
+  background: var(--card);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   padding: 9px 12px;
@@ -359,13 +418,27 @@ button:focus-visible, input:focus-visible, .tab-btn:focus-visible {
      input with a computed font-size below 16px - a real, well-known
      mobile annoyance, not a cosmetic choice. */
   font-size: 16px;
-  color: var(--text-primary);
+  color: var(--foreground);
   font-family: inherit;
   transition: border-color 0.15s ease;
 }
 .field input:focus {
   outline: none;
-  border-color: var(--series-1);
+  border-color: var(--primary);
+}
+/* NOT redundant with the sitewide `input:focus-visible` rule above, even
+   though the declarations are now identical: `.field input:focus` (two
+   classes/pseudo + one element, specificity 0,2,1) outranks the generic
+   `input:focus-visible` (one pseudo + one element, specificity 0,1,1), so
+   without this override the outline:none above would win on every
+   keyboard-focused .field input too and silently kill its ring - verified
+   by tabbing into a Settings field and checking
+   `getComputedStyle(document.activeElement).outlineStyle` (came back
+   "none" until this rule was restored). Keep the value in lockstep with
+   the sitewide rule; only the specificity reason for its existence differs. */
+.field input:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
 }
 .field-checkbox {
   flex-direction: row;
@@ -375,9 +448,11 @@ button:focus-visible, input:focus-visible, .tab-btn:focus-visible {
 }
 .field-checkbox input[type="checkbox"] {
   width: 17px; height: 17px;
-  accent-color: var(--series-1);
+  accent-color: var(--primary);
   cursor: pointer;
 }
+/* Focus ring: covered by the sitewide `input:focus-visible` rule above -
+   no per-component override needed. */
 .field-checkbox span { font-size: 13px; color: var(--text-secondary); font-weight: 600; }
 
 #tab-settings h3 {
@@ -397,13 +472,22 @@ button:focus-visible, input:focus-visible, .tab-btn:focus-visible {
   padding: 10px 20px;
   font-size: 13px;
   font-weight: 700;
-  background: var(--series-1);
-  color: white;
+  background: var(--primary);
+  /* --primary's luminance swings a lot between themes (neon green in dark,
+     a much darker green in light) - a hardcoded "white" text (the old
+     rule) reads fine in light mode but is nearly invisible on dark mode's
+     #00FF41 (contrast ~1.4:1). --on-primary is the contrast-matched token
+     for exactly this ("text atop a solid --primary fill", see :root above)
+     and is already the pattern .btn-control-primary uses for the same
+     reason. */
+  color: var(--on-primary);
   cursor: pointer;
   transition: transform 0.15s ease, box-shadow 0.15s ease, filter 0.15s ease;
 }
 .btn-primary:hover { filter: brightness(1.08); transform: translateY(-1px); box-shadow: var(--shadow-sm); }
 .btn-primary:active { transform: translateY(0); }
+/* Focus ring: .btn-primary is a <button>, covered by the sitewide
+   `button:focus-visible` rule above - no per-component override needed. */
 
 .settings-message { font-size: 12px; font-weight: 600; }
 .settings-message.ok { color: var(--delta-good); }
@@ -436,15 +520,15 @@ button:focus-visible, input:focus-visible, .tab-btn:focus-visible {
      i.e. plenty of real phones/small tablets). 200px leaves a real
      margin (160px content vs ~144.5px needed) instead of a coin flip. */
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 16px;
+  gap: 8px;
   margin-bottom: 24px;
 }
 
 .tile {
-  background: var(--surface-1);
+  background: var(--card);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 18px 20px;
+  padding: 14px 16px;
   position: relative;
   overflow: hidden;
   /* Grid items default to min-width: auto (sized to fit content without
@@ -470,12 +554,19 @@ button:focus-visible, input:focus-visible, .tab-btn:focus-visible {
   container-type: inline-size;
   transition: transform 0.25s ease, box-shadow 0.25s ease, border-color 0.25s ease;
 }
-.tile:hover { transform: translateY(-2px); box-shadow: var(--shadow-md); border-color: var(--border); }
-.tile .label { font-size: 12px; color: var(--text-muted); margin-bottom: 8px; font-weight: 500; }
+/* Same green-tint treatment as .panel:hover below - tiles and panels are
+   sibling card surfaces, so their hover states should read the same way. */
+.tile:hover { transform: translateY(-2px); box-shadow: var(--shadow-md); border-color: color-mix(in srgb, var(--primary) 30%, var(--border)); }
+.tile .label { font-size: 12px; color: var(--muted); margin-bottom: 8px; font-weight: 500; }
 .tile .value {
+  font-family: var(--font-data);
   font-size: 28px;
   font-weight: 650;
-  font-variant-numeric: proportional-nums;
+  /* font-variant-numeric: tabular-nums already comes from the shared
+     .value/.tile .value/... rule above - deliberately not overridden here.
+     A stray `proportional-nums` here used to win the cascade (same
+     .tile .value selector, later in the file) and made the equity tile's
+     animateValue() count-up jitter in width as digits changed. */
   letter-spacing: -0.02em;
   line-height: 1.15;
   /* Defense in depth alongside min-width: 0 above and the hero's extra
@@ -485,8 +576,8 @@ button:focus-visible, input:focus-visible, .tab-btn:focus-visible {
   overflow-wrap: anywhere;
 }
 .tile .delta { font-size: 12px; margin-top: 7px; font-weight: 600; min-height: 15px; }
-.tile .delta.up { color: var(--delta-good); }
-.tile .delta.down { color: var(--delta-critical); }
+.tile .delta.up { color: var(--primary); }
+.tile .delta.down { color: var(--destructive); }
 /* Give the hero tile roughly double a normal tile's width so its bigger
    (42px) font has room to actually fit on one line instead of relying
    only on wrapping - also reads as the emphasized "hero" stat it's meant
@@ -502,7 +593,7 @@ button:focus-visible, input:focus-visible, .tab-btn:focus-visible {
 @media (min-width: 640px) {
   .tile.hero { grid-column: span 2; }
 }
-.tile.hero .value { font-size: 42px; text-shadow: var(--glow-blue); }
+.tile.hero .value { font-size: 42px; text-shadow: var(--glow-primary); }
 /* Below 640px the hero doesn't get the extra column span above, so its
    own rendered width is whatever auto-fit gave it - anywhere from ~200px
    (single column) up to ~420px (two natural columns on a wider phone/
@@ -525,23 +616,24 @@ button:focus-visible, input:focus-visible, .tab-btn:focus-visible {
 @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
 
 .panel {
-  background: var(--surface-1);
+  background: var(--card);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 20px;
+  padding: 16px;
   box-shadow: var(--shadow-sm);
   transition: border-color 0.25s ease, box-shadow 0.25s ease, transform 0.25s ease;
 }
-.panel:hover { border-color: color-mix(in srgb, var(--series-1) 30%, var(--border)); box-shadow: var(--shadow-md); }
+.panel:hover { border-color: color-mix(in srgb, var(--primary) 30%, var(--border)); box-shadow: var(--shadow-md); }
 .panel h2 {
+  font-family: var(--font-ui);
   font-size: 14px;
   margin: 0 0 4px;
-  color: var(--text-primary);
-  font-weight: 700;
+  color: var(--foreground);
+  font-weight: 600;
 }
 .panel .panel-sub {
   font-size: 12px;
-  color: var(--text-muted);
+  color: var(--muted);
   margin-bottom: 14px;
 }
 
@@ -645,8 +737,9 @@ tbody tr:hover { background: var(--surface-2); }
 .task-progress[hidden] { display: none; }
 .task-progress-head { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 8px; color: var(--text-muted); font-size: 11px; }
 .progress-track { height: 6px; overflow: hidden; border-radius: 999px; background: color-mix(in srgb, var(--text-muted) 18%, transparent); }
-.progress-track span { display: block; height: 100%; width: 40%; border-radius: inherit; background: linear-gradient(90deg, var(--series-1), #7c5cff); animation: progress-slide 1.1s ease-in-out infinite; }
+.progress-track span { display: block; height: 100%; width: 40%; border-radius: inherit; background: linear-gradient(90deg, var(--primary), var(--primary-dim)); animation: progress-slide 1.1s ease-in-out infinite; }
 .progress-track span.complete { width: 100%; animation: none; background: var(--good); }
+@keyframes progress-slide { to { transform: translateX(300%); } }
 .toast-region { position: fixed; right: 22px; bottom: 22px; z-index: 50; display: grid; gap: 8px; pointer-events: none; }
 .toast { max-width: min(360px, calc(100vw - 28px)); padding: 11px 14px; border: 1px solid var(--border); border-left: 3px solid var(--series-1); border-radius: 10px; background: var(--surface-2); color: var(--text-primary); box-shadow: var(--shadow-lg); font-size: 12px; opacity: 0; transform: translateY(8px); transition: opacity .2s ease, transform .2s ease; }
 .toast.visible { opacity: 1; transform: none; }
@@ -722,6 +815,6 @@ tbody tr:hover { background: var(--surface-2); }
   .topbar-right { width: 100%; }
   .status-pills { width: 100%; }
   .live-strip { align-items: flex-start; flex-wrap: wrap; }
-  .live-progress-wrap { order: 3; flex-basis: 100%; }
+  .live-pulse { order: 3; }
   .panel { padding: 16px; }
 }
