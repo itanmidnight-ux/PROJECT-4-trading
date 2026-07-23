@@ -99,6 +99,7 @@ class TradingEngine:
         self._last_seen_tick_time: int | None = None
         self._last_tick_change_wallclock: float | None = None
         self._stale_warned = False
+        self._drawdown_breach_alerted = False
         self._last_prune_wallclock: float = 0.0
         self._last_grid_bar_time: int | None = None
         self._ai_brain = (
@@ -206,8 +207,27 @@ class TradingEngine:
         # trades.
         breached, reason = self._risk.check_equity_drawdown(account.equity)
         if breached:
-            self._emergency_close_all_positions(tick, reason)
+            # check_equity_drawdown correctly stays breached for the rest
+            # of the trading day once tripped (it's a DAILY limit, not
+            # something that should silently clear the moment we react to
+            # it - see its docstring) - so this branch keeps being entered
+            # every single poll cycle for the rest of the day, exactly as
+            # intended, to keep blocking new trades via the early return
+            # below. What must NOT repeat is the emergency-close action
+            # itself: reproduced live in production, calling it
+            # unconditionally on every cycle logged a fresh CRITICAL event
+            # every ~2.3s forever, even with zero positions left to close.
+            # One alert per breach episode, mirroring the _stale_warned
+            # one-shot pattern above - EXCEPT a retry must still happen
+            # for as long as a position is stuck open (a transient close
+            # failure must keep getting retried every cycle, exactly like
+            # the normal SL/TP close-failure retry path elsewhere in this
+            # file; only skip when we're already flat AND already alerted).
+            if self._open_positions or not self._drawdown_breach_alerted:
+                self._emergency_close_all_positions(tick, reason)
+                self._drawdown_breach_alerted = True
             return
+        self._drawdown_breach_alerted = False
 
         self._manage_open_positions(tick.bid, tick.ask)  # always: protect any open position first
 
