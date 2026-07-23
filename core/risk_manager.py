@@ -56,6 +56,36 @@ class RiskManager:
 
     MAX_MARGIN_USAGE_FRACTION = 0.6  # never commit more than 60% of free margin to one trade
     MAX_RISK_OVERSHOOT_FACTOR = 1.5  # tolerate lot-step rounding overshoot; reject anything wider
+    # Ronda 13: risk_per_trade_usd is a fixed dollar amount, but on a small
+    # account a "reasonable" fixed number can be a dangerous fraction of
+    # total capital - and the account only gets SMALLER after losses, so a
+    # number sized for the original balance gets proportionally more
+    # dangerous over time, not less. Reproduced directly on real recent
+    # market data (same strategy/signals, same 3000-bar window, only
+    # risk_per_trade_usd changed): $3 (6% of a $50 balance) -> -$0.91 PnL,
+    # 13.1% max drawdown; $6 (12% of the same $50 balance) -> -$39.99 PnL,
+    # 81.5% max drawdown - doubling the fixed dollar risk alone nearly
+    # wiped the account on identical signals. 5% keeps the $3-6 range this
+    # project has actually tuned against safely capped, at a $50 balance
+    # (verified at $50: risk_per_trade_usd of $1-1.5 on this account's
+    # symbol spec produces ZERO trades outright - below the broker's
+    # minimum lot's implied risk floor, not a safer number, just an
+    # inactive bot). This is a ceiling/backstop, not a per-trade risk
+    # target - 5% is aggressive by conventional retail risk-management
+    # standards (1-2%) and is only acceptable BECAUSE it only ever
+    # shrinks, never sets, the actual risk taken.
+    #
+    # Known, accepted consequence at very small balances: as the account
+    # shrinks (e.g. the live account is currently ~$16, where 5% is
+    # ~$0.80), the cap can itself fall below that same $1-1.5 zero-trade
+    # floor - the bot goes dormant on a nearly-wiped account instead of
+    # continuing to trade a shrunken position. That's the intended
+    # fail-safe direction (halt over over-risk), not a bug, but it means
+    # "stays capped without silently going dormant" is a $50-balance
+    # claim, not a universal one - don't assume trades will keep flowing
+    # as balance keeps dropping without re-verifying at the current
+    # balance (second-opinion review, Ronda 13 checkpoint, caught this).
+    MAX_RISK_FRACTION_OF_BALANCE = 0.05
 
     def __init__(
         self,
@@ -170,6 +200,11 @@ class RiskManager:
         risk_budget = self.risk_per_trade_usd if risk_budget_usd is None else min(
             max(float(risk_budget_usd), 0.0), self.risk_per_trade_usd
         )
+        # Ceiling, not a floor: only ever shrinks risk_budget, never raises
+        # it - an already-conservative risk_per_trade_usd relative to
+        # balance is untouched. See MAX_RISK_FRACTION_OF_BALANCE above.
+        if account.balance > 0:
+            risk_budget = min(risk_budget, account.balance * self.MAX_RISK_FRACTION_OF_BALANCE)
         if risk_budget <= 0:
             return SizingResult(ok=False, reason="Presupuesto de riesgo supervisor invalido")
         risk_based_lot = risk_budget / (sl_distance_price * value_per_price_per_lot)
@@ -197,8 +232,9 @@ class RiskManager:
                 reason=(
                     f"Volatilidad demasiado alta para el lote minimo del broker ({spec.volume_min}): "
                     f"con esta distancia de stop ({sl_distance_price:.2f}) ese lote arriesgaria "
-                    f"~{actual_risk_usd:.2f} USD, muy por encima del limite de "
-                    f"{self.risk_per_trade_usd:.2f} USD por operacion. Se descarta la señal en vez "
+                    f"~{actual_risk_usd:.2f} USD, muy por encima del limite efectivo de "
+                    f"{risk_budget:.2f} USD por operacion (ya con el cap del {self.MAX_RISK_FRACTION_OF_BALANCE*100:.0f}% "
+                    f"del balance aplicado, ver Ronda 13). Se descarta la señal en vez "
                     f"de operar con un riesgo real muy superior al configurado."
                 ),
             )

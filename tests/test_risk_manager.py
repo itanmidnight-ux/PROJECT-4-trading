@@ -75,6 +75,61 @@ def test_sizing_rejects_when_min_lot_risk_far_exceeds_budget_during_high_volatil
     assert "volatilidad" in result.reason.lower()
 
 
+def test_sizing_caps_risk_budget_to_a_fraction_of_balance_on_small_accounts():
+    """Ronda 13: risk_per_trade_usd is a fixed dollar amount, but on a
+    small account a "reasonable-looking" fixed number can quietly be a
+    huge fraction of total capital. Reproduced directly via backtest on
+    real recent market data (same strategy, same 3000-bar window, only
+    risk_per_trade_usd changed): $3 (6% of a $50 balance) -> -$0.91 PnL,
+    13.1% max drawdown. $6 (12% of the same $50 balance) -> -$39.99 PnL,
+    81.5% max drawdown - the account was nearly wiped by doubling the
+    per-trade dollar risk on the exact same signals. A fixed dollar
+    config can't adapt as balance shrinks after losses either - the
+    account that hit this in production is now ~$16, where even the
+    original $3 would be ~19% of balance per trade. size_position must
+    cap the EFFECTIVE risk budget to a fraction of the CURRENT balance,
+    regardless of the configured risk_per_trade_usd, so a large fixed
+    number stays sane on the small account it's actually protecting
+    today, not just the larger account it might have been sized for
+    originally."""
+    rm = make_risk(risk_per_trade_usd=6.0)
+    # margin_initial set low and deliberately generous so margin is never
+    # the binding constraint here - this test isolates the risk-BUDGET
+    # cap specifically, not margin sizing (a real earlier mistake caught
+    # while writing this test: with STANDARD_SPEC's leverage-derived
+    # margin estimate, margin bound the lot to volume_min regardless of
+    # risk_per_trade_usd, making the risk-budget cap untestable through
+    # it - confirmed uncapped risk-budget sizing here is 0.15 lot before
+    # any balance-fraction cap is applied).
+    spec = SymbolSpec(contract_size=100.0, volume_min=0.01, volume_max=1.0,
+                       volume_step=0.01, point=0.01, trade_tick_value=1.0,
+                       margin_initial=0.5)
+    account = AccountState(balance=50.0, equity=50.0, free_margin=50.0, leverage=500)
+    result = rm.size_position(account, spec, sl_distance_price=0.4, current_price=2400.0)
+    assert result.ok is True
+    uncapped_lot = rm._round_to_step(6.0 / (0.4 * 1.0 / 0.01), spec.volume_step)
+    assert uncapped_lot == 0.15, f"sanity check on the test's own math failed: {uncapped_lot}"
+    # lot sized off the capped budget (balance * MAX_RISK_FRACTION_OF_BALANCE),
+    # not the full $6 - i.e. strictly less than what $6 alone would size.
+    assert result.lot < uncapped_lot, (
+        f"expected the balance cap to shrink the lot below the uncapped ${6.0} sizing "
+        f"({uncapped_lot}), got {result.lot} - the balance-fraction cap isn't being applied"
+    )
+
+
+def test_sizing_balance_cap_does_not_affect_already_conservative_risk_settings():
+    """The cap must be a ceiling, not a new floor or a universal shrink -
+    a risk_per_trade_usd that's already well within the balance fraction
+    (e.g. institutional-style 1% risk on a well-capitalized account) must
+    size exactly as before, uncapped."""
+    rm = make_risk(risk_per_trade_usd=50.0)  # 1% of a 5,000 balance
+    account = AccountState(balance=5_000.0, equity=5_000.0, free_margin=5_000.0, leverage=500)
+    result = rm.size_position(account, STANDARD_SPEC, sl_distance_price=0.4, current_price=2400.0)
+    assert result.ok is True
+    uncapped_lot = rm._round_to_step(50.0 / (0.4 * 1.0 / 0.01), STANDARD_SPEC.volume_step)
+    assert result.lot == min(uncapped_lot, STANDARD_SPEC.volume_max)
+
+
 def test_sizing_tolerates_small_rounding_overshoot_near_the_risk_budget():
     """The floor/rounding to the broker's lot step is expected to overshoot
     the exact risk budget a little - only a LARGE overshoot (the bug above)
