@@ -23,6 +23,25 @@ that's the new default. This is directional evidence from one short,
 proxy (not FBS's actual feed) dataset, not a validated edge - rerun
 scripts/run_backtest.py against real FBS history before trusting any of
 these numbers on the actual account.
+
+Ronda 15 (2026-07-23, see .env.example's "Gestion de riesgo" comment
+block and README for the full sweep table): re-swept sl_atr_multiple
+{2.0, 2.5, 3.0, 3.5, 4.0, 5.0} against real 7-day M1 gold data
+(data/gold_m1_7d_{train,test}.csv, 60/40 chronological split) with the
+real wiring (core/signals.py::build_strategy_from_settings), same
+risk_per_trade_usd=3/balance=50/leverage=500 as Rondas 13-14. 3.5 beat
+the 4.0 baseline on BOTH halves (TRAIN +$2.04/8 trades/87.5% win rate vs
+4.0's -$2.19/3 trades; TEST +$2.76/9 trades/88.9% win rate vs 4.0's
++$1.20/2 trades) - more trades AND a positive, not just less-negative,
+TRAIN result, holding out of sample. Tighter than 3.5 (2.0-3.0) opens up
+trade count a lot (16-53 trades) but goes net negative on TRAIN; 5.0
+produced ZERO trades on this dataset - every candidate signal got
+rejected by core/risk_manager.py's Ronda 13 "volatilidad demasiado alta
+para el lote minimo del broker" check (the broker-minimum lot's real
+dollar risk at that SL distance exceeds the risk budget's overshoot
+allowance on this $50/1:500 account), not a lack of BB/RSI setups. 3.5
+is the new default. Same caveat as above: single short dataset,
+re-validate before trusting blindly on the live account.
 """
 from __future__ import annotations
 
@@ -146,7 +165,7 @@ class ScalpStrategy:
         rsi_overbought: float = 75.0,
         max_spread_price: float = 0.5,
         min_atr_price: float = 0.15,
-        sl_atr_multiple: float = 4.0,
+        sl_atr_multiple: float = 3.5,
         cooldown_bars: int = 2,
         bb_period: int = 20,
         bb_std: float = 2.0,
