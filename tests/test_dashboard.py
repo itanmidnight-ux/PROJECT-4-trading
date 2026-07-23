@@ -35,13 +35,19 @@ def _wait_until_listening(port: int, timeout: float = 15.0) -> None:
     raise AssertionError(f"nada escuchando en 127.0.0.1:{port} tras {timeout}s")
 
 
-def _wait_until_dead(pid: int, timeout: float = 5.0) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if not Path(f"/proc/{pid}").exists():
-            return
-        time.sleep(0.1)
-    raise AssertionError(f"PID {pid} sigue vivo tras {timeout}s")
+def _wait_until_dead(proc: subprocess.Popen, timeout: float = 5.0) -> None:
+    """Waits for (and reaps) a child process we hold a Popen handle for.
+
+    Uses Popen.wait() instead of polling /proc/<pid> because a signalled
+    process lingers as a zombie - still present under /proc - until
+    something actually reaps it. Popen.wait() both waits for death and
+    reaps the zombie in one call, so this can't be fooled by a lingering
+    zombie into thinking the process is still alive.
+    """
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise AssertionError(f"PID {proc.pid} sigue vivo tras {timeout}s")
 
 
 def test_no_flags_starts_web_dashboard(monkeypatch):
@@ -110,8 +116,7 @@ def test_reclaim_kills_a_real_dashboard_py_process_and_frees_the_port():
 
         dmod._reclaim_stale_dashboard_port("127.0.0.1", port)
 
-        _wait_until_dead(proc.pid)  # the real process must actually be gone
-        proc.wait(timeout=5)
+        _wait_until_dead(proc)  # the real process must actually be gone (and reaped)
 
         # Port must now be genuinely free - a real bind proves it, not a
         # mock returning what we told it to return.
