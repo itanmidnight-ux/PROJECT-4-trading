@@ -266,11 +266,24 @@ button:focus-visible, input:focus-visible, .tab-btn:focus-visible {
 .live-indicator.connected { background: var(--good); box-shadow: 0 0 0 4px color-mix(in srgb, var(--good) 15%, transparent); }
 .live-indicator.disconnected { background: var(--critical); box-shadow: 0 0 0 4px color-mix(in srgb, var(--critical) 15%, transparent); }
 .live-indicator.loading { background: var(--warning); animation: live-pulse 1.15s ease-in-out infinite; }
-.live-progress-wrap { height: 3px; flex: 1; min-width: 50px; overflow: hidden; border-radius: 999px; background: color-mix(in srgb, var(--text-muted) 18%, transparent); }
-.live-progress-wrap span { display: block; height: 100%; width: 38%; border-radius: inherit; background: linear-gradient(90deg, var(--primary-dim), var(--primary)); transform: translateX(-130%); animation: progress-slide 1.15s ease-in-out infinite; }
-.live-progress-wrap span.complete { width: 100%; transform: none; animation: none; background: var(--good); transition: width .25s ease; }
+.live-pulse {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--primary);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--primary) 60%, transparent);
+  transition: background-color .2s ease;
+}
+.live-pulse.slow {
+  animation: live-pulse-ring 900ms ease-out infinite;
+}
+.live-pulse.stale { background: var(--destructive); }
+@keyframes live-pulse-ring {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--primary) 55%, transparent); }
+  100% { box-shadow: 0 0 0 8px color-mix(in srgb, var(--primary) 0%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .live-pulse.slow { animation: none; }
+}
 .live-strip-time { color: var(--text-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
-@keyframes progress-slide { to { transform: translateX(300%); } }
 @keyframes live-pulse { 50% { opacity: .35; transform: scale(.72); } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; } }
 
@@ -758,6 +771,6 @@ tbody tr:hover { background: var(--surface-2); }
   .topbar-right { width: 100%; }
   .status-pills { width: 100%; }
   .live-strip { align-items: flex-start; flex-wrap: wrap; }
-  .live-progress-wrap { order: 3; flex-basis: 100%; }
+  .live-pulse { order: 3; }
   .panel { padding: 16px; }
 }

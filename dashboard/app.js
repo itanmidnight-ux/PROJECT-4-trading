@@ -4,16 +4,19 @@ const AUTH_TOKEN_KEY = 'xauusd-dashboard-token';
 const tooltip = document.getElementById('tooltip');
 let refreshInFlight = false;
 
-function setLiveState(kind, message, stamp = '') {
+function setLiveState(kind, message, stamp = '', elapsedMs = null) {
   const strip = document.getElementById('live-strip');
   const indicator = document.getElementById('live-indicator');
-  const progress = document.getElementById('live-progress');
+  const pulse = document.getElementById('live-pulse');
   if (!strip || !indicator) return;
   strip.classList.toggle('is-loading', kind === 'loading');
   indicator.className = `live-indicator ${kind}`;
   document.getElementById('live-strip-text').textContent = message;
   document.getElementById('live-strip-time').textContent = stamp || (kind === 'loading' ? 'Actualizando' : 'Ahora');
-  if (progress) progress.classList.toggle('complete', kind !== 'loading');
+  if (pulse) {
+    pulse.classList.toggle('stale', kind === 'disconnected');
+    pulse.classList.toggle('slow', elapsedMs !== null && elapsedMs >= 400);
+  }
 }
 
 function showToast(message, kind = 'info') {
@@ -620,7 +623,7 @@ async function refresh() {
   document.getElementById('pill-conn-text').textContent = status.connected ? 'Motor activo' : 'Motor sin datos recientes';
 
   document.getElementById('pill-updated').textContent = new Date().toLocaleTimeString();
-  setLiveState(status.connected ? 'connected' : 'disconnected', status.connected ? (status.engine_running ? 'Motor activo · datos en vivo' : 'Dashboard conectado · motor detenido') : 'Motor sin datos recientes', `${Math.round(performance.now() - started)} ms`);
+  setLiveState(status.connected ? 'connected' : 'disconnected', status.connected ? (status.engine_running ? 'Motor activo · datos en vivo' : 'Dashboard conectado · motor detenido') : 'Motor sin datos recientes', `${Math.round(performance.now() - started)} ms`, Math.round(performance.now() - started));
 
   updateEngineButton(!!status.engine_running);
   updatePauseButton(!!status.paused);
