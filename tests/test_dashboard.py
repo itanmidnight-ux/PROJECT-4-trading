@@ -162,6 +162,65 @@ def test_reclaim_leaves_non_dashboard_process_alone():
                 proc.wait(timeout=5)
 
 
+def test_reclaim_leaves_other_dashboard_py_with_matching_filename_alone(tmp_path):
+    """(d) The tightened check: a REAL process whose argv literally
+    contains the substring 'dashboard.py' - it IS a file named exactly
+    that - but living at a DIFFERENT resolved path than this project's
+    own dashboard.py (e.g. a decoy in another directory, standing in for
+    an unrelated app or a DIFFERENT checkout/worktree's dashboard.py,
+    concretely the live main-checkout instance). The old loose substring
+    check ("dashboard.py" in cmdline) would have killed this. The
+    resolved-path check must leave it running untouched, exactly like any
+    other unrelated process on the port."""
+    decoy_dir = tmp_path / "unrelated_checkout"
+    decoy_dir.mkdir()
+    decoy_script = decoy_dir / "dashboard.py"
+    decoy_script.write_text(
+        "import socket, sys, time\n"
+        "port = int(sys.argv[1])\n"
+        "s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n"
+        "s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n"
+        "s.bind(('127.0.0.1', port))\n"
+        "s.listen(1)\n"
+        "while True:\n"
+        "    time.sleep(1)\n"
+    )
+    # Sanity check assumed by this test: same filename as the real script,
+    # but genuinely a different file on disk.
+    assert decoy_script.name == "dashboard.py"
+    assert decoy_script.resolve() != (PROJECT_ROOT / "dashboard.py").resolve()
+
+    port = _free_port()
+    proc = subprocess.Popen(
+        [PYTHON_BIN, str(decoy_script), str(port)],
+        cwd=str(decoy_dir),
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        _wait_until_listening(port)
+
+        dmod._reclaim_stale_dashboard_port("127.0.0.1", port)
+
+        # Give it a beat - if reclaim wrongly signalled it (old substring
+        # behaviour), it would be dead or dying by now.
+        time.sleep(0.3)
+        assert proc.poll() is None, (
+            "reclaim mató un proceso dashboard.py de OTRO checkout/proyecto - "
+            "el chequeo por substring volvió a colarse"
+        )
+        _wait_until_listening(port, timeout=1.0)
+
+        # And the pre-existing auto-increment fallback must still kick in.
+        free = dmod._find_free_port("127.0.0.1", port)
+        assert free != port
+        assert free > port
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            with contextlib_suppress_timeout():
+                proc.wait(timeout=5)
+
+
 class contextlib_suppress_timeout:
     """Tiny local helper so cleanup in `finally` blocks above never masks
     the real assertion failure with an unrelated TimeoutExpired from a
