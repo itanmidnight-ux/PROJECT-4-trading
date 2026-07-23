@@ -400,7 +400,7 @@ button:focus-visible, input:focus-visible, .tab-btn:focus-visible {
 .field input[type="text"],
 .field input[type="password"],
 .field input[type="number"] {
-  background: var(--surface-2);
+  background: var(--card);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   padding: 9px 12px;
@@ -408,13 +408,20 @@ button:focus-visible, input:focus-visible, .tab-btn:focus-visible {
      input with a computed font-size below 16px - a real, well-known
      mobile annoyance, not a cosmetic choice. */
   font-size: 16px;
-  color: var(--text-primary);
+  color: var(--foreground);
   font-family: inherit;
   transition: border-color 0.15s ease;
 }
 .field input:focus {
   outline: none;
-  border-color: var(--series-1);
+  border-color: var(--primary);
+}
+/* Keyboard-only ring, on top of the border-color change above - required
+   by the a11y checklist's focus-states rule. :focus-visible (not :focus)
+   so a mouse click doesn't ring every field, only actual keyboard nav. */
+.field input:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
 }
 .field-checkbox {
   flex-direction: row;
@@ -424,8 +431,12 @@ button:focus-visible, input:focus-visible, .tab-btn:focus-visible {
 }
 .field-checkbox input[type="checkbox"] {
   width: 17px; height: 17px;
-  accent-color: var(--series-1);
+  accent-color: var(--primary);
   cursor: pointer;
+}
+.field-checkbox input[type="checkbox"]:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
 }
 .field-checkbox span { font-size: 13px; color: var(--text-secondary); font-weight: 600; }
 
@@ -446,13 +457,24 @@ button:focus-visible, input:focus-visible, .tab-btn:focus-visible {
   padding: 10px 20px;
   font-size: 13px;
   font-weight: 700;
-  background: var(--series-1);
-  color: white;
+  background: var(--primary);
+  /* --primary's luminance swings a lot between themes (neon green in dark,
+     a much darker green in light) - a hardcoded "white" text (the old
+     rule) reads fine in light mode but is nearly invisible on dark mode's
+     #00FF41 (contrast ~1.4:1). --on-primary is the contrast-matched token
+     for exactly this ("text atop a solid --primary fill", see :root above)
+     and is already the pattern .btn-control-primary uses for the same
+     reason. */
+  color: var(--on-primary);
   cursor: pointer;
   transition: transform 0.15s ease, box-shadow 0.15s ease, filter 0.15s ease;
 }
 .btn-primary:hover { filter: brightness(1.08); transform: translateY(-1px); box-shadow: var(--shadow-sm); }
 .btn-primary:active { transform: translateY(0); }
+.btn-primary:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
 
 .settings-message { font-size: 12px; font-weight: 600; }
 .settings-message.ok { color: var(--delta-good); }
