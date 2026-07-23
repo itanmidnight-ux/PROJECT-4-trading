@@ -40,7 +40,9 @@
   --card:           #182424;
   --primary:        #00FF41;  /* terminal green - actions, gains, live pulse */
   --primary-dim:    #008F11;  /* secondary green / hover */
-  --destructive:    #FF3333;  /* losses, dangerous actions */
+  --destructive:    #FF3D3D;  /* losses, dangerous actions - darkened from #FF3333
+                                  to clear WCAG AA 4.5:1 as text on --card #182424
+                                  (measured contrast ~4.55:1; #FF3333 was ~4.38:1) */
   --foreground:     #E6EDF3;
   --muted:          #94A3B8;
   --border:         #30363D;
@@ -115,7 +117,7 @@
   --card:           #182424;
   --primary:        #00FF41;
   --primary-dim:    #008F11;
-  --destructive:    #FF3333;
+  --destructive:    #FF3D3D;
   --foreground:     #E6EDF3;
   --muted:          #94A3B8;
   --border:         #30363D;
@@ -243,8 +245,15 @@ body {
 .theme-toggle.is-light .icon-sun { display: none; }
 .theme-toggle.is-light .icon-moon { display: block; }
 
+/* Sitewide focus ring - single style everywhere (topbar buttons, tabs,
+   form inputs, checkboxes, submit buttons). Kept in sync with the
+   per-component rules that used to exist on .field input / the checkbox /
+   .btn-primary (Tasks 10/11) - those were removed as redundant once this
+   rule matched them exactly; if a future element genuinely needs a
+   different treatment, override :focus-visible for that selector instead
+   of drifting this shared rule. */
 button:focus-visible, input:focus-visible, .tab-btn:focus-visible {
-  outline: 3px solid color-mix(in srgb, var(--series-1) 70%, transparent);
+  outline: 2px solid var(--primary);
   outline-offset: 2px;
 }
 
@@ -417,9 +426,16 @@ button:focus-visible, input:focus-visible, .tab-btn:focus-visible {
   outline: none;
   border-color: var(--primary);
 }
-/* Keyboard-only ring, on top of the border-color change above - required
-   by the a11y checklist's focus-states rule. :focus-visible (not :focus)
-   so a mouse click doesn't ring every field, only actual keyboard nav. */
+/* NOT redundant with the sitewide `input:focus-visible` rule above, even
+   though the declarations are now identical: `.field input:focus` (two
+   classes/pseudo + one element, specificity 0,2,1) outranks the generic
+   `input:focus-visible` (one pseudo + one element, specificity 0,1,1), so
+   without this override the outline:none above would win on every
+   keyboard-focused .field input too and silently kill its ring - verified
+   by tabbing into a Settings field and checking
+   `getComputedStyle(document.activeElement).outlineStyle` (came back
+   "none" until this rule was restored). Keep the value in lockstep with
+   the sitewide rule; only the specificity reason for its existence differs. */
 .field input:focus-visible {
   outline: 2px solid var(--primary);
   outline-offset: 2px;
@@ -435,10 +451,8 @@ button:focus-visible, input:focus-visible, .tab-btn:focus-visible {
   accent-color: var(--primary);
   cursor: pointer;
 }
-.field-checkbox input[type="checkbox"]:focus-visible {
-  outline: 2px solid var(--primary);
-  outline-offset: 2px;
-}
+/* Focus ring: covered by the sitewide `input:focus-visible` rule above -
+   no per-component override needed. */
 .field-checkbox span { font-size: 13px; color: var(--text-secondary); font-weight: 600; }
 
 #tab-settings h3 {
@@ -472,10 +486,8 @@ button:focus-visible, input:focus-visible, .tab-btn:focus-visible {
 }
 .btn-primary:hover { filter: brightness(1.08); transform: translateY(-1px); box-shadow: var(--shadow-sm); }
 .btn-primary:active { transform: translateY(0); }
-.btn-primary:focus-visible {
-  outline: 2px solid var(--primary);
-  outline-offset: 2px;
-}
+/* Focus ring: .btn-primary is a <button>, covered by the sitewide
+   `button:focus-visible` rule above - no per-component override needed. */
 
 .settings-message { font-size: 12px; font-weight: 600; }
 .settings-message.ok { color: var(--delta-good); }
@@ -542,13 +554,19 @@ button:focus-visible, input:focus-visible, .tab-btn:focus-visible {
   container-type: inline-size;
   transition: transform 0.25s ease, box-shadow 0.25s ease, border-color 0.25s ease;
 }
-.tile:hover { transform: translateY(-2px); box-shadow: var(--shadow-md); border-color: var(--border); }
+/* Same green-tint treatment as .panel:hover below - tiles and panels are
+   sibling card surfaces, so their hover states should read the same way. */
+.tile:hover { transform: translateY(-2px); box-shadow: var(--shadow-md); border-color: color-mix(in srgb, var(--primary) 30%, var(--border)); }
 .tile .label { font-size: 12px; color: var(--muted); margin-bottom: 8px; font-weight: 500; }
 .tile .value {
   font-family: var(--font-data);
   font-size: 28px;
   font-weight: 650;
-  font-variant-numeric: proportional-nums;
+  /* font-variant-numeric: tabular-nums already comes from the shared
+     .value/.tile .value/... rule above - deliberately not overridden here.
+     A stray `proportional-nums` here used to win the cascade (same
+     .tile .value selector, later in the file) and made the equity tile's
+     animateValue() count-up jitter in width as digits changed. */
   letter-spacing: -0.02em;
   line-height: 1.15;
   /* Defense in depth alongside min-width: 0 above and the hero's extra

@@ -9,7 +9,10 @@ function setLiveState(kind, message, stamp = '', elapsedMs = null) {
   const indicator = document.getElementById('live-indicator');
   const pulse = document.getElementById('live-pulse');
   if (!strip || !indicator) return;
-  strip.classList.toggle('is-loading', kind === 'loading');
+  // No `.is-loading` class on the strip itself: the pulse-dot redesign
+  // already conveys the loading state per-dot - `.live-indicator.loading`
+  // (pulsing warning dot) and `.live-pulse.slow` (ring on slow polls) -
+  // so a whole-strip class here would be dead CSS with nothing to style.
   indicator.className = `live-indicator ${kind}`;
   document.getElementById('live-strip-text').textContent = message;
   document.getElementById('live-strip-time').textContent = stamp || (kind === 'loading' ? 'Actualizando' : 'Ahora');
