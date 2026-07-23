@@ -286,6 +286,53 @@ def test_engine_emergency_closes_on_equity_drawdown_before_sl_is_hit(tmp_path):
     assert any(e["level"] == "CRITICAL" for e in events)
 
 
+def test_engine_does_not_spam_emergency_alert_once_flat_and_still_breached(tmp_path):
+    """Real bug, reproduced live in production: once the drawdown breach
+    force-closes every position, the account is flat and there is nothing
+    left to close - but check_equity_drawdown correctly keeps reporting
+    breached=True for the rest of the trading day (that's the intended
+    "daily" circuit-breaker semantics, see RiskManager.check_equity_drawdown
+    - it must NOT silently clear early just because we already reacted to
+    it once). The bug was calling _emergency_close_all_positions() on every
+    single subsequent engine.step() while breached, which unconditionally
+    logs a fresh CRITICAL "cerrando todas las posiciones abiertas" event
+    even with zero positions open - in production this produced a new
+    CRITICAL log/DB event every ~2.3s forever, forever blocking recovery
+    visibility with noise. Fixed: exactly one CRITICAL alert per breach
+    episode, not one per poll cycle, while still correctly blocking new
+    trades (via the early `return`) every cycle for as long as breached
+    stays true."""
+    entry_state, last_close = oversold_entry_state()
+    settings = make_settings(max_daily_drawdown_pct=0.1)
+    broker = SimulatedBroker(starting_balance=50.0, leverage=100, spec=SPEC)
+    db = Database(str(tmp_path / "engine_emergency_nospam.db"))
+    engine = TradingEngine(settings, ScriptedMarketData([entry_state]), broker, db, poll_seconds=0)
+
+    engine.step()  # opens the BUY on the oversold signal
+    pos = engine._open_positions[0]
+    sl_distance = pos.entry_price - pos.sl_price
+    adverse_move = sl_distance * 0.3
+    down_price = last_close - adverse_move
+    down_tick = Tick(bid=down_price - 0.1, ask=down_price + 0.1, spread_price=0.2, time=1_700_002_060)
+    down_state = LiveState(tick=down_tick, candles=entry_state.candles)
+    engine.market_data = ScriptedMarketData([down_state])
+
+    engine.step()  # drawdown breached, emergency close succeeds, account now flat
+    assert len(engine._open_positions) == 0
+
+    # Still breached (same day, same low equity, nothing to recover it) -
+    # simulate 5 more poll cycles exactly like the live engine's loop does.
+    for _ in range(5):
+        engine.market_data = ScriptedMarketData([down_state])
+        engine.step()
+
+    critical_events = [e for e in db.recent_events(limit=50) if e["level"] == "CRITICAL"]
+    assert len(critical_events) == 1, (
+        f"expected exactly 1 CRITICAL emergency alert for the whole breach episode, "
+        f"got {len(critical_events)} - the engine is spamming on every poll cycle"
+    )
+
+
 def test_emergency_close_failure_keeps_position_tracked_for_retry(tmp_path):
     """The drawdown circuit breaker's close must not silently drop the
     position if the broker call fails - same class of bug as a normal
