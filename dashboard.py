@@ -582,6 +582,47 @@ WEB_DEFAULT_PORT = 9000
 DASHBOARD_PORT_FILE = RUN_DIR / "dashboard.port"
 
 
+def _reclaim_stale_dashboard_port(host: str, port: int) -> None:
+    """If `port` is already bound by another dashboard.py process (a stale
+    instance left over from a previous run/crash/duplicate manual launch),
+    terminates it and frees the port - so a fresh launch always ends up on
+    WEB_DEFAULT_PORT instead of silently drifting to 9001/9002/... forever.
+    Never touches a process that isn't confirmably this project's own
+    dashboard.py (verified via /proc/<pid>/cmdline) - anything else on the
+    port is left completely alone and _find_free_port's normal
+    auto-increment fallback takes over instead, exactly as it did before
+    this function existed."""
+    try:
+        out = subprocess.run(["lsof", "-ti", f":{port}", "-sTCP:LISTEN"],
+                              capture_output=True, text=True, timeout=5)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return  # lsof unavailable or hung - don't guess, fall back to auto-increment
+    pids = [p.strip() for p in out.stdout.split() if p.strip()]
+    for pid_str in pids:
+        try:
+            pid = int(pid_str)
+            cmdline = Path(f"/proc/{pid}/cmdline").read_text(errors="replace")
+        except (OSError, ValueError):
+            continue
+        if "dashboard.py" not in cmdline:
+            continue  # not us - never kill something we can't identify as our own dashboard
+        if pid == os.getpid():
+            continue  # can't be ourselves, we haven't bound the port yet, but guard anyway
+        print(f"\033[1;33m[dashboard]\033[0m Puerto {port} ocupado por otra instancia de "
+              f"dashboard.py (PID {pid}) - liberándolo...", flush=True)
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+        for _ in range(30):  # up to ~3s grace period
+            time.sleep(0.1)
+            if not Path(f"/proc/{pid}").exists():
+                break
+        else:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+
+
 def _find_free_port(host: str, start_port: int, max_tries: int = 200) -> int:
     """Probes real bind()s starting at start_port, returning the first that
     succeeds - not a guess based on "is something answering on it" (a
@@ -619,6 +660,7 @@ def _run_web(host: str, port: int) -> None:
     print("\033[1;36m[dashboard]\033[0m Preparando dashboard web", flush=True)
     for label in ("cargando configuración", "comprobando rutas", "reservando puerto"):
         print(f"\033[2m  ▸ {label}...\033[0m", flush=True)
+    _reclaim_stale_dashboard_port(host, port)
     port = _find_free_port(host, port)
     try:
         RUN_DIR.mkdir(parents=True, exist_ok=True)
