@@ -50,14 +50,14 @@ const fmtSigned = (v) => {
 const EMPTY_ICON = `<svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 5-7"/></svg>`;
 
 // ------------------------------------------------------------------- theme
+// Dark is the unconditional default: with no stored preference we render
+// (and report) 'dark', full stop - never delegate to prefers-color-scheme.
 function effectiveTheme() {
   const saved = localStorage.getItem(THEME_KEY);
-  if (saved) return saved;
-  return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+  return saved || 'dark';
 }
 function applyTheme(saved) {
-  if (saved) document.documentElement.setAttribute('data-theme', saved);
-  else document.documentElement.removeAttribute('data-theme');
+  document.documentElement.setAttribute('data-theme', saved || 'dark');
   const btn = document.getElementById('theme-toggle');
   if (btn) btn.classList.toggle('is-light', effectiveTheme() === 'light');
 }

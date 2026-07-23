@@ -1,9 +1,11 @@
 /* ===========================================================================
-   Design tokens - terminal-green / near-black palette. Dark is the default
-   (:root); light is applied either by the OS preference (media query,
-   low-specificity :where() guard so a manual toggle always wins) or by an
-   explicit viewer toggle (data-theme, see app.js) which must win in both
-   directions - see the two [data-theme] blocks below the media query.
+   Design tokens - terminal-green / near-black palette. Dark is the
+   UNCONDITIONAL default (bare :root) - it must render regardless of OS/
+   browser prefers-color-scheme. Light is reached ONLY via an explicit
+   viewer toggle (data-theme="light", see app.js) - see the two [data-theme]
+   blocks below. There is intentionally no `prefers-color-scheme` media
+   query here: dark-mode-primary is a non-negotiable product requirement,
+   not something that should auto-follow the OS/browser default.
 
    Canonical source-of-truth tokens (redeclared per theme block below):
    --bg, --card, --primary, --primary-dim, --destructive, --foreground,
@@ -90,27 +92,8 @@
   font-size: 15px;
 }
 
-@media (prefers-color-scheme: light) {
-  :root:where(:not([data-theme="dark"])) {
-    color-scheme: light;
-    --bg:             #F7F9F8;
-    --card:           #FFFFFF;
-    --primary:        #008F11;  /* darker green for AA contrast on light bg */
-    --primary-dim:    #00C22C;
-    --destructive:    #C81E1E;
-    --foreground:     #0D1117;
-    --muted:          #57606A;
-    --border:         #D0D7DE;
-    --gold-accent:    #B45309;
-    --warning:        #9A6700;
-    --on-primary:     #FFFFFF;
-    --on-destructive: #FFFFFF;
-  }
-}
-
-/* Explicit viewer toggle (see the theme-toggle button in app.js) - beats the
-   OS setting in both directions because an attribute selector always outranks
-   the :where()-wrapped media block above. */
+/* Explicit viewer toggle (see the theme-toggle button in app.js) - the ONLY
+   way to reach the light palette. */
 :root[data-theme="light"] {
   color-scheme: light;
   --bg:             #F7F9F8;
