@@ -265,16 +265,20 @@ class ScalpStrategy:
         return [TpLevel(distance_price=base_distance * mult, close_fraction=frac)
                 for mult, frac in zip(multipliers, fractions, strict=True)]
 
-    def generate_signal(self, df: pd.DataFrame, spread_price: float, lot_hint: float) -> Signal:
+    def generate_signal(self, df: pd.DataFrame, spread_price: float, lot_hint: float,
+                         precomputed_indicators: pd.DataFrame | None = None) -> Signal:
         if self._bars_since_last_trade < self.cooldown_bars:
             return Signal(side=None, reason="cooldown")
 
         if len(df) < self._warmup_bars:
             return Signal(side=None, reason="not enough history")
 
-        ind = compute_indicators(df, bb_period=self.bb_period, bb_std=self.bb_std,
-                                  rsi_period=self.rsi_period, atr_period=self.atr_period,
-                                  adx_period=self.adx_period)
+        if precomputed_indicators is not None:
+            ind = precomputed_indicators
+        else:
+            ind = compute_indicators(df, bb_period=self.bb_period, bb_std=self.bb_std,
+                                      rsi_period=self.rsi_period, atr_period=self.atr_period,
+                                      adx_period=self.adx_period)
         last = ind.iloc[-1]
 
         if any(pd.isna(last[c]) for c in ("bb_upper", "bb_lower", "rsi", "atr", "adx")):

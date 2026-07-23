@@ -4,16 +4,22 @@ const AUTH_TOKEN_KEY = 'xauusd-dashboard-token';
 const tooltip = document.getElementById('tooltip');
 let refreshInFlight = false;
 
-function setLiveState(kind, message, stamp = '') {
+function setLiveState(kind, message, stamp = '', elapsedMs = null) {
   const strip = document.getElementById('live-strip');
   const indicator = document.getElementById('live-indicator');
-  const progress = document.getElementById('live-progress');
+  const pulse = document.getElementById('live-pulse');
   if (!strip || !indicator) return;
-  strip.classList.toggle('is-loading', kind === 'loading');
+  // No `.is-loading` class on the strip itself: the pulse-dot redesign
+  // already conveys the loading state per-dot - `.live-indicator.loading`
+  // (pulsing warning dot) and `.live-pulse.slow` (ring on slow polls) -
+  // so a whole-strip class here would be dead CSS with nothing to style.
   indicator.className = `live-indicator ${kind}`;
   document.getElementById('live-strip-text').textContent = message;
   document.getElementById('live-strip-time').textContent = stamp || (kind === 'loading' ? 'Actualizando' : 'Ahora');
-  if (progress) progress.classList.toggle('complete', kind !== 'loading');
+  if (pulse) {
+    pulse.classList.toggle('stale', kind === 'disconnected');
+    pulse.classList.toggle('slow', elapsedMs !== null && elapsedMs >= 400);
+  }
 }
 
 function showToast(message, kind = 'info') {
@@ -50,14 +56,14 @@ const fmtSigned = (v) => {
 const EMPTY_ICON = `<svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 5-7"/></svg>`;
 
 // ------------------------------------------------------------------- theme
+// Dark is the unconditional default: with no stored preference we render
+// (and report) 'dark', full stop - never delegate to prefers-color-scheme.
 function effectiveTheme() {
   const saved = localStorage.getItem(THEME_KEY);
-  if (saved) return saved;
-  return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+  return saved || 'dark';
 }
 function applyTheme(saved) {
-  if (saved) document.documentElement.setAttribute('data-theme', saved);
-  else document.documentElement.removeAttribute('data-theme');
+  document.documentElement.setAttribute('data-theme', saved || 'dark');
   const btn = document.getElementById('theme-toggle');
   if (btn) btn.classList.toggle('is-light', effectiveTheme() === 'light');
 }
@@ -620,7 +626,7 @@ async function refresh() {
   document.getElementById('pill-conn-text').textContent = status.connected ? 'Motor activo' : 'Motor sin datos recientes';
 
   document.getElementById('pill-updated').textContent = new Date().toLocaleTimeString();
-  setLiveState(status.connected ? 'connected' : 'disconnected', status.connected ? (status.engine_running ? 'Motor activo · datos en vivo' : 'Dashboard conectado · motor detenido') : 'Motor sin datos recientes', `${Math.round(performance.now() - started)} ms`);
+  setLiveState(status.connected ? 'connected' : 'disconnected', status.connected ? (status.engine_running ? 'Motor activo · datos en vivo' : 'Dashboard conectado · motor detenido') : 'Motor sin datos recientes', `${Math.round(performance.now() - started)} ms`, Math.round(performance.now() - started));
 
   updateEngineButton(!!status.engine_running);
   updatePauseButton(!!status.paused);

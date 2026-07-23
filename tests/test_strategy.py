@@ -294,3 +294,45 @@ def test_generate_signal_sets_a_sane_vol_ratio_on_a_real_signal():
 
 def test_signal_without_an_explicit_vol_ratio_defaults_to_neutral():
     assert Signal(side=None).vol_ratio == 1.0
+
+
+# ------------------------------------------------ precomputed indicators
+def _trending_down_candles(n: int = 60) -> pd.DataFrame:
+    close = 2000.0 - np.arange(n) * 0.5
+    return pd.DataFrame({
+        "time": range(n), "open": close + 0.2, "high": close + 0.3,
+        "low": close - 0.3, "close": close,
+    })
+
+
+def test_generate_signal_uses_precomputed_indicators_when_given():
+    """When precomputed_indicators is passed, generate_signal must use it
+    verbatim (not recompute) - proven by feeding a precomputed frame with
+    deliberately doctored indicator values that would flip the decision
+    (force rsi/bb into an oversold BUY setup) even though the real
+    (uncomputed-from-df) values wouldn't produce that signal."""
+    strat = ScalpStrategy(min_tp_usd=0.5, tp_levels=3, value_per_point_per_lot=1.0)
+    df = _trending_down_candles()
+
+    real_ind = compute_indicators(df, bb_period=strat.bb_period, bb_std=strat.bb_std,
+                                   rsi_period=strat.rsi_period, atr_period=strat.atr_period,
+                                   adx_period=strat.adx_period)
+    doctored = real_ind.copy()
+    last_idx = doctored.index[-1]
+    doctored.loc[last_idx, "bb_lower"] = df["close"].iloc[-1] + 10  # close is now "below" bb_lower
+    doctored.loc[last_idx, "rsi"] = 5.0  # deeply oversold
+    doctored.loc[last_idx, "adx"] = 0.0  # no trend filter block
+    doctored.loc[last_idx, "atr"] = 5.0  # well above min_atr_price
+
+    result = strat.generate_signal(df, spread_price=0.2, lot_hint=0.01, precomputed_indicators=doctored)
+    assert result.side == "BUY", f"expected doctored precomputed indicators to force a BUY, got {result}"
+
+
+def test_generate_signal_without_precomputed_indicators_unchanged():
+    """precomputed_indicators=None (the default) must behave exactly like
+    calling generate_signal with the old 3-arg signature."""
+    strat = ScalpStrategy(min_tp_usd=0.5, tp_levels=3, value_per_point_per_lot=1.0)
+    df = _trending_down_candles()
+    old_style = strat.generate_signal(df, 0.2, 0.01)
+    new_style = strat.generate_signal(df, 0.2, 0.01, precomputed_indicators=None)
+    assert old_style == new_style

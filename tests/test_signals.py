@@ -6,6 +6,7 @@ strategy.
 """
 from __future__ import annotations
 
+from unittest.mock import patch
 import numpy as np
 import pandas as pd
 
@@ -836,3 +837,74 @@ def test_composite_computes_and_applies_vol_ratio_when_an_extra_fires():
 
     expected_ladder = mr.build_tp_ladder(0.01, 0.2, vol_ratio=signal.vol_ratio)
     assert signal.tp_levels == expected_ladder
+
+
+# ----- Regression test: redundant compute_indicators in CompositeStrategy.generate_signal
+def _flat_candles_for_redundant_test(n=120):
+    # Flat/no-signal series on purpose: mean-reversion won't fire, so
+    # generate_signal is forced down the "no signal, check extras, fall
+    # through" path where the redundant recompute happens.
+    close = 2000.0 + np.zeros(n)
+    return pd.DataFrame({
+        "time": range(n), "open": close, "high": close + 0.1,
+        "low": close - 0.1, "close": close,
+    })
+
+
+def test_composite_generate_signal_computes_indicators_at_most_twice():
+    """One CompositeStrategy.generate_signal() call, with extra strategies
+    configured and mean-reversion NOT firing, must call compute_indicators
+    at most twice: once for mean-reversion's own periods, once for the
+    composite's own (different) periods for regime/extras — never a third
+    time recomputing mean-reversion's indicators again in the fallback
+    return. Today it calls 3 times; this fails until Task 2's fix lands."""
+    mean_reversion_strat = ScalpStrategy(min_tp_usd=0.5, tp_levels=3, value_per_point_per_lot=1.0)
+
+    class NoOpExtra:
+        def check(self, df, ind, spread_price):
+            return SubSignal(side=None, reason="never fires")
+
+    composite = CompositeStrategy(
+        mean_reversion=mean_reversion_strat,
+        extra_strategies=[("noop", NoOpExtra())],
+    )
+    df = _flat_candles_for_redundant_test()
+
+    # Patch both import locations: core.strategy (used by ScalpStrategy) and
+    # core.signals (used by CompositeStrategy line 734). Both refer to the same
+    # function, but patching replaces the name binding in each module separately.
+    call_count = [0]
+    def counted_compute_indicators(*args, **kwargs):
+        call_count[0] += 1
+        return compute_indicators(*args, **kwargs)
+
+    with patch("core.strategy.compute_indicators", side_effect=counted_compute_indicators), \
+         patch("core.signals.compute_indicators", side_effect=counted_compute_indicators):
+        composite.generate_signal(df, spread_price=0.2, lot_hint=0.01)
+
+    assert call_count[0] <= 2, f"expected <=2 compute_indicators calls, got {call_count[0]}"
+
+
+def test_composite_forwards_precomputed_indicators():
+    mean_reversion = ScalpStrategy(min_tp_usd=0.5, tp_levels=3, value_per_point_per_lot=1.0)
+
+    class NoOpExtra:
+        def check(self, df, ind, spread_price):
+            from core.signals import SubSignal
+            return SubSignal(side=None, reason="never fires")
+
+    composite = CompositeStrategy(mean_reversion=mean_reversion, extra_strategies=[("noop", NoOpExtra())])
+    df = _flat_candles()
+    mr_ind = compute_indicators(df, bb_period=mean_reversion.bb_period, bb_std=mean_reversion.bb_std,
+                                 rsi_period=mean_reversion.rsi_period, atr_period=mean_reversion.atr_period,
+                                 adx_period=mean_reversion.adx_period)
+    composite_ind = compute_indicators(df, rsi_period=composite._indicator_rsi_period,
+                                        atr_period=composite._indicator_atr_period)
+
+    with patch("core.strategy.compute_indicators", wraps=compute_indicators) as spy, \
+         patch("core.signals.compute_indicators", wraps=compute_indicators) as spy2:
+        composite.generate_signal(df, 0.2, 0.01,
+                                   precomputed_mr_indicators=mr_ind,
+                                   precomputed_composite_indicators=composite_ind)
+    assert spy.call_count == 0
+    assert spy2.call_count == 0
