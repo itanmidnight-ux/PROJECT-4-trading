@@ -228,6 +228,106 @@ def test_backtest_route_passes_precompute_indicators_true(tmp_path, monkeypatch)
     assert mock_run_backtest.call_args.kwargs.get("precompute_indicators") is True
 
 
+def test_backtest_route_returns_valid_json_when_a_real_trade_closes(tmp_path, monkeypatch):
+    """Regression test for a real 500 seen against live MT5 data:
+    TypeError: Object of type int64 is not JSON serializable.
+
+    core/backtest.py's run_backtest() accumulates wins/losses via
+    `wins += open_pos["realized_pnl"] > 0`, where realized_pnl is a numpy
+    float born from pandas Series arithmetic on real candle data - that
+    promotes the plain-int accumulator to numpy.int64 (same story for
+    balance/total_pnl/max_dd becoming numpy.float64), which Flask's
+    default JSON encoder cannot serialize. The route's other real (non-
+    mocked-run_backtest) test above, test_backtest_route_uses_mt5_history_
+    without_order_calls, uses flat-price candles that never open a
+    position, so it never exercises this arithmetic at all. This test
+    does NOT mock run_backtest: it feeds a real oversold-then-rally candle
+    set (long enough to also clear the route's own 100-bar minimum)
+    through the actual ScalpStrategy + RiskManager + run_backtest path so
+    a real trade opens and closes, then asserts the Flask test client's
+    response is valid JSON with a 200, not a 500."""
+    import dashboard as dmod
+    import pandas as pd
+    from core.strategy import ScalpStrategy
+    from core.risk_manager import AccountState, RiskManager
+    from tests.test_strategy import _ranging_base, build_candles
+
+    # Same ranging-then-breakout shape as tests.test_strategy.oversold_
+    # candles(), just padded with extra leading ranging bars so the total
+    # clears /api/backtest's 100-bar minimum without changing the tail
+    # that triggers the BUY signal.
+    closes = _ranging_base(99)
+    closes.append(closes[-1] - 3.0)
+    base = build_candles(closes)
+
+    spec = SymbolSpec(100, .01, 1, .01, .01, 1.0, trade_tick_size=.01)
+    value_per_point = spec.trade_tick_value / spec.trade_tick_size
+    probe = ScalpStrategy(min_tp_usd=0.28, tp_levels=3, value_per_point_per_lot=value_per_point)
+    signal = probe.generate_signal(base, spread_price=0.25, lot_hint=spec.volume_min)
+    assert signal.side == "BUY"
+
+    # Replicate run_backtest's own sizing step (see
+    # test_backtest_counts_partial_tp_then_breakeven_stop_as_a_win in
+    # tests/test_backtest.py for the original of this pattern) to know
+    # exactly how far price needs to rally to lock in TP1, then fall back
+    # to breakeven - a guaranteed net-positive close, i.e. a real win that
+    # flows through the numpy-promoting wins/total_pnl arithmetic.
+    risk = RiskManager(risk_per_trade_usd=1.0, max_daily_loss_usd=10**9,
+                        max_daily_drawdown_pct=100.0, max_trades_per_day=1000)
+    account = AccountState(balance=50.0, equity=50.0, free_margin=50.0, leverage=500)
+    entry_price = base.iloc[-1]["close"] + 0.25 / 2
+    sizing = risk.size_position(account, spec, signal.sl_distance_price, entry_price)
+    assert sizing.ok
+    tp1_distance = probe.build_tp_ladder(sizing.lot, 0.25)[0].distance_price
+
+    up = entry_price + tp1_distance + 0.3
+    prev_close = base.iloc[-1]["close"]
+    t = int(base.iloc[-1]["time"]) + 60
+    rows = []
+    for c in (up, up, entry_price, entry_price):
+        rows.append({"time": t, "open": prev_close, "high": max(prev_close, c),
+                     "low": min(prev_close, c), "close": c, "tick_volume": 50})
+        prev_close = c
+        t += 60
+    candles = pd.concat([base, pd.DataFrame(rows)], ignore_index=True)
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs): pass
+        def login(self, *args): pass
+        def symbol_spec(self, symbol): return spec
+        def candles(self, symbol, timeframe, count): return candles
+
+    # Pin every strat_* knob and the other strategies' enable flags
+    # explicitly, so the ScalpStrategy that dashboard.build_strategy_from_
+    # settings() builds matches `probe` above regardless of whatever the
+    # real .env this worktree symlinks to happens to contain.
+    client, _db = make_client(
+        tmp_path, mt5_login="123", mt5_password="pw", mt5_server="Demo", dashboard_auth_token="",
+        min_tp_usd=0.28, tp_levels=3, tp_targets_usd=[],
+        strat_rsi_oversold=25.0, strat_rsi_overbought=75.0, strat_max_spread_price=0.5,
+        strat_min_atr_price=0.15, strat_sl_atr_multiple=4.0, strat_cooldown_bars=2,
+        strat_bb_period=20, strat_bb_std=2.0, strat_rsi_period=7, strat_atr_period=14,
+        strat_adx_period=14, strat_trend_filter_adx_threshold=35.0,
+        strat_enable_momentum_cross=False, strat_enable_rsi_hysteresis=False,
+        strat_enable_directional_candle=False, strat_enable_session_open=False,
+        strat_enable_asian_breakout=False, strat_enable_m15_trend=False,
+        strat_enable_ma_grid=False, strat_enable_quantum_queen=False,
+    )
+    monkeypatch.setattr(dmod, "Mt5BridgeClient", FakeClient)
+
+    response = client.post("/api/backtest", json={
+        "bars": len(candles), "balance": 50, "leverage": 500, "risk_usd": 1.0, "spread": 0.25,
+    })
+
+    assert response.status_code == 200, response.get_data(as_text=True)
+    data = response.get_json()  # raises if the body isn't valid JSON
+    assert data["ok"] is True
+    assert data["trades"] == 1
+    assert data["wins"] == 1
+    assert data["losses"] == 0
+    assert data["total_pnl"] > 0
+
+
 def test_status_reports_the_running_engines_own_settings_not_pending_saves(tmp_path):
     """/api/status must reflect what the (possibly separate, already-
     running) engine process actually connected with - not a settings-tab
