@@ -485,15 +485,15 @@ button:focus-visible, input:focus-visible, .tab-btn:focus-visible {
      i.e. plenty of real phones/small tablets). 200px leaves a real
      margin (160px content vs ~144.5px needed) instead of a coin flip. */
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 16px;
+  gap: 8px;
   margin-bottom: 24px;
 }
 
 .tile {
-  background: var(--surface-1);
+  background: var(--card);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 18px 20px;
+  padding: 14px 16px;
   position: relative;
   overflow: hidden;
   /* Grid items default to min-width: auto (sized to fit content without
@@ -520,8 +520,9 @@ button:focus-visible, input:focus-visible, .tab-btn:focus-visible {
   transition: transform 0.25s ease, box-shadow 0.25s ease, border-color 0.25s ease;
 }
 .tile:hover { transform: translateY(-2px); box-shadow: var(--shadow-md); border-color: var(--border); }
-.tile .label { font-size: 12px; color: var(--text-muted); margin-bottom: 8px; font-weight: 500; }
+.tile .label { font-size: 12px; color: var(--muted); margin-bottom: 8px; font-weight: 500; }
 .tile .value {
+  font-family: var(--font-data);
   font-size: 28px;
   font-weight: 650;
   font-variant-numeric: proportional-nums;
@@ -534,8 +535,8 @@ button:focus-visible, input:focus-visible, .tab-btn:focus-visible {
   overflow-wrap: anywhere;
 }
 .tile .delta { font-size: 12px; margin-top: 7px; font-weight: 600; min-height: 15px; }
-.tile .delta.up { color: var(--delta-good); }
-.tile .delta.down { color: var(--delta-critical); }
+.tile .delta.up { color: var(--primary); }
+.tile .delta.down { color: var(--destructive); }
 /* Give the hero tile roughly double a normal tile's width so its bigger
    (42px) font has room to actually fit on one line instead of relying
    only on wrapping - also reads as the emphasized "hero" stat it's meant
@@ -574,23 +575,24 @@ button:focus-visible, input:focus-visible, .tab-btn:focus-visible {
 @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
 
 .panel {
-  background: var(--surface-1);
+  background: var(--card);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 20px;
+  padding: 16px;
   box-shadow: var(--shadow-sm);
   transition: border-color 0.25s ease, box-shadow 0.25s ease, transform 0.25s ease;
 }
-.panel:hover { border-color: color-mix(in srgb, var(--series-1) 30%, var(--border)); box-shadow: var(--shadow-md); }
+.panel:hover { border-color: color-mix(in srgb, var(--primary) 30%, var(--border)); box-shadow: var(--shadow-md); }
 .panel h2 {
+  font-family: var(--font-ui);
   font-size: 14px;
   margin: 0 0 4px;
-  color: var(--text-primary);
-  font-weight: 700;
+  color: var(--foreground);
+  font-weight: 600;
 }
 .panel .panel-sub {
   font-size: 12px;
-  color: var(--text-muted);
+  color: var(--muted);
   margin-bottom: 14px;
 }
 
