@@ -148,7 +148,7 @@ class Settings:
     strat_rsi_overbought: float = 75.0
     strat_max_spread_price: float = 0.5
     strat_min_atr_price: float = 0.15
-    strat_sl_atr_multiple: float = 4.0
+    strat_sl_atr_multiple: float = 3.5
     strat_cooldown_bars: int = 2
     strat_bb_period: int = 20
     strat_bb_std: float = 2.0
@@ -311,7 +311,7 @@ def load_settings() -> Settings:
         strat_rsi_overbought=_float("STRAT_RSI_OVERBOUGHT", 75.0),
         strat_max_spread_price=_float("STRAT_MAX_SPREAD_PRICE", 0.5),
         strat_min_atr_price=_float("STRAT_MIN_ATR_PRICE", 0.15),
-        strat_sl_atr_multiple=_float("STRAT_SL_ATR_MULTIPLE", 4.0),
+        strat_sl_atr_multiple=_float("STRAT_SL_ATR_MULTIPLE", 3.5),
         strat_cooldown_bars=_int("STRAT_COOLDOWN_BARS", 2),
         strat_bb_period=_int("STRAT_BB_PERIOD", 20),
         strat_bb_std=_float("STRAT_BB_STD", 2.0),
