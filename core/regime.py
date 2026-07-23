@@ -104,9 +104,21 @@ def detect_regime_series(candles: pd.DataFrame, *, adx_threshold: float = 25.0,
     trend = trend.mask(slope_series > 0, "up")
     trend = trend.mask(slope_series < 0, "down")
 
-    # First 20 rows (and anywhere baseline/adx aren't warm yet): match
-    # detect_regime's own len(df) < 20 -> "unknown" guard.
-    unknown_mask = candles.index.to_series().lt(20) if hasattr(candles.index, "to_series") else pd.Series(range(len(candles)), index=candles.index).lt(20)
+    # detect_regime's own guard is `len(df) < 20`. For a window ending at row
+    # position i (window = candles.iloc[max(0, i+1-max_lookback):i+1]), the
+    # window length is i+1 while i < max_lookback-1, so `len(df) < 20` means
+    # i+1 < 20, i.e. i <= 18 (row positions 0..18, 19 rows) -> "unknown".
+    # Row i=19 (window length exactly 20) is NOT covered by the guard and
+    # must get a real classification. Position-based (not index-label-based)
+    # so this holds regardless of the DataFrame's actual index.
+    position = pd.Series(range(len(candles)), index=candles.index)
+    unknown_mask = position.lt(19)
+    # detect_regime's guard returns Regime("unknown", 0.0, 1.0, "flat")
+    # unconditionally - all four columns must reproduce those exact values,
+    # not just `name`.
     name = name.mask(unknown_mask, "unknown")
+    adx_series = adx_series.mask(unknown_mask, 0.0)
+    ratio_series = ratio_series.mask(unknown_mask, 1.0)
+    trend = trend.mask(unknown_mask, "flat")
 
     return pd.DataFrame({"name": name, "adx": adx_series, "atr_ratio": ratio_series, "trend": trend}, index=candles.index)
