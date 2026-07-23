@@ -491,9 +491,9 @@ def api_backtest():
         "tick_to_tick": bool(tick_mode),
         "warning": ("Ticks reales bid/ask de MT5; la señal sigue evaluándose al cierre de cada vela M1."
                     if tick_mode else "No es tick-by-tick: se usaron velas M1 cerradas y OHLC conservador."),
-        "trades": result.trades, "wins": result.wins, "losses": result.losses,
-        "win_rate": result.win_rate, "total_pnl": result.total_pnl,
-        "max_drawdown_pct": result.max_drawdown_pct, "final_balance": result.final_balance,
+        "trades": int(result.trades), "wins": int(result.wins), "losses": int(result.losses),
+        "win_rate": float(result.win_rate), "total_pnl": float(result.total_pnl),
+        "max_drawdown_pct": float(result.max_drawdown_pct), "final_balance": float(result.final_balance),
         "starting_balance": balance, "leverage": leverage})
 
 
