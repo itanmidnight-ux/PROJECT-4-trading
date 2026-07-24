@@ -9,15 +9,18 @@ from __future__ import annotations
 from unittest.mock import patch
 import numpy as np
 import pandas as pd
+import pytest
 
 from core.signals import (
     AsianRangeBreakoutStrategy,
     CompositeStrategy,
     CooldownGate,
     DirectionalCandleStrategy,
+    EngulfingReversalStrategy,
     M15TrendStrategy,
     MACrossGridStrategy,
     MomentumCrossStrategy,
+    PinBarReversalStrategy,
     RsiHysteresisStrategy,
     SessionOpenStrategy,
     SubSignal,
@@ -38,14 +41,20 @@ def make_df(closes: list[float], start_time: int = BASE_TIME, step: int = 60) ->
     return pd.DataFrame(rows)
 
 
-def flat_ind(n: int, atr: float = 0.3, rsi: float = 50.0, adx: float = 50.0) -> pd.DataFrame:
+def flat_ind(n: int, atr: float = 0.3, rsi: float = 50.0, adx: float = 50.0,
+             bb_lower: float = -1e9, bb_upper: float = 1e9) -> pd.DataFrame:
     """A minimal hand-built indicator frame for strategies that only read
     specific columns - avoids depending on real Bollinger/EMA warm-up for
     tests that aren't exercising that machinery. adx defaults to 50.0 (well
     above any min_adx used in tests) so it never blocks a caller that
-    doesn't care about it."""
+    doesn't care about it. bb_lower/bb_upper default far away (-1e9/1e9) so
+    they never accidentally satisfy a "price at the band extreme" check for
+    callers that don't care about them (EngulfingReversalStrategy,
+    PinBarReversalStrategy) - only rsi drives those tests unless bb_lower/
+    bb_upper is explicitly overridden."""
     return pd.DataFrame({"atr": [atr] * n, "rsi": [rsi] * n, "adx": [adx] * n,
-                          "ema9": [0.0] * n, "ema21": [0.0] * n, "ema50": [0.0] * n})
+                          "ema9": [0.0] * n, "ema21": [0.0] * n, "ema50": [0.0] * n,
+                          "bb_lower": [bb_lower] * n, "bb_upper": [bb_upper] * n})
 
 
 # --------------------------------------------------------------- resample
@@ -169,6 +178,124 @@ def test_directional_candle_ignores_small_indecisive_candle():
         {"time": BASE_TIME + 120, "open": 100.02, "high": 100.05, "low": 100.0, "close": 100.02},
     ])
     ind = flat_ind(3, atr=0.3)
+    sig = s.check(df, ind, spread_price=0.2)
+    assert sig.side is None
+
+
+# ------------------------------------------------------- EngulfingReversal
+def engulfing_strategy(**kwargs) -> EngulfingReversalStrategy:
+    return EngulfingReversalStrategy(cooldown_bars=2, max_spread_price=0.5, min_atr_price=0.1,
+                                      sl_buffer_atr_mult=0.3, rsi_oversold=30.0, rsi_overbought=70.0,
+                                      bb_tolerance_atr_mult=0.3, **kwargs)
+
+
+def test_engulfing_fires_buy_on_bullish_engulfing_at_rsi_oversold():
+    s = engulfing_strategy()
+    df = pd.DataFrame([
+        {"time": BASE_TIME, "open": 101.0, "high": 101.05, "low": 100.4, "close": 100.5},        # prior bearish bar
+        {"time": BASE_TIME + 60, "open": 100.4, "high": 101.3, "low": 100.2, "close": 101.2},     # engulfing bull bar
+        {"time": BASE_TIME + 120, "open": 101.2, "high": 101.3, "low": 101.15, "close": 101.25},  # forming bar
+    ])
+    ind = flat_ind(3, atr=0.3, rsi=25.0)  # oversold, bb_lower/upper left far away
+    sig = s.check(df, ind, spread_price=0.2)
+    assert sig.side == "BUY"
+    assert sig.sl_distance_price == pytest.approx((101.2 - 100.2) + 0.3 * 0.3)
+
+
+def test_engulfing_fires_sell_on_bearish_engulfing_at_rsi_overbought():
+    s = engulfing_strategy()
+    df = pd.DataFrame([
+        {"time": BASE_TIME, "open": 100.5, "high": 101.05, "low": 100.45, "close": 101.0},        # prior bullish bar
+        {"time": BASE_TIME + 60, "open": 101.1, "high": 101.3, "low": 100.3, "close": 100.4},      # engulfing bear bar
+        {"time": BASE_TIME + 120, "open": 100.4, "high": 100.45, "low": 100.35, "close": 100.4},   # forming bar
+    ])
+    ind = flat_ind(3, atr=0.3, rsi=75.0)  # overbought
+    sig = s.check(df, ind, spread_price=0.2)
+    assert sig.side == "SELL"
+    assert sig.sl_distance_price == pytest.approx((101.3 - 100.4) + 0.3 * 0.3)
+
+
+def test_engulfing_silent_without_a_real_engulfing_pattern():
+    s = engulfing_strategy()
+    # Both bars bullish - no reversal pattern at all, regardless of RSI.
+    df = pd.DataFrame([
+        {"time": BASE_TIME, "open": 100.0, "high": 100.3, "low": 99.9, "close": 100.2},
+        {"time": BASE_TIME + 60, "open": 100.2, "high": 100.6, "low": 100.1, "close": 100.5},
+        {"time": BASE_TIME + 120, "open": 100.5, "high": 100.55, "low": 100.45, "close": 100.5},
+    ])
+    ind = flat_ind(3, atr=0.3, rsi=25.0)
+    sig = s.check(df, ind, spread_price=0.2)
+    assert sig.side is None
+
+
+def test_engulfing_silent_when_not_at_a_band_or_rsi_extreme():
+    s = engulfing_strategy()
+    # Same bullish engulfing shape as the BUY test, but RSI is neutral and
+    # bb_lower/bb_upper (flat_ind defaults) are far away - no extreme context.
+    df = pd.DataFrame([
+        {"time": BASE_TIME, "open": 101.0, "high": 101.05, "low": 100.4, "close": 100.5},
+        {"time": BASE_TIME + 60, "open": 100.4, "high": 101.3, "low": 100.2, "close": 101.2},
+        {"time": BASE_TIME + 120, "open": 101.2, "high": 101.3, "low": 101.15, "close": 101.25},
+    ])
+    ind = flat_ind(3, atr=0.3, rsi=50.0)
+    sig = s.check(df, ind, spread_price=0.2)
+    assert sig.side is None
+
+
+# --------------------------------------------------------- PinBarReversal
+def pin_bar_strategy(**kwargs) -> PinBarReversalStrategy:
+    return PinBarReversalStrategy(cooldown_bars=2, max_spread_price=0.5, min_atr_price=0.1,
+                                   sl_buffer_atr_mult=0.3, rsi_oversold=30.0, rsi_overbought=70.0,
+                                   bb_tolerance_atr_mult=0.3, min_wick_body_ratio=2.0,
+                                   max_opposite_wick_ratio=0.5, min_close_position_ratio=0.6, **kwargs)
+
+
+def test_pin_bar_fires_buy_on_hammer_at_rsi_oversold():
+    s = pin_bar_strategy()
+    df = pd.DataFrame([
+        {"time": BASE_TIME, "open": 100.0, "high": 100.05, "low": 99.95, "close": 100.0},
+        {"time": BASE_TIME + 60, "open": 100.5, "high": 100.62, "low": 99.8, "close": 100.6},  # hammer
+        {"time": BASE_TIME + 120, "open": 100.6, "high": 100.65, "low": 100.55, "close": 100.6},
+    ])
+    ind = flat_ind(3, atr=0.3, rsi=25.0)
+    sig = s.check(df, ind, spread_price=0.2)
+    assert sig.side == "BUY"
+    assert sig.sl_distance_price == pytest.approx((100.6 - 99.8) + 0.3 * 0.3)
+
+
+def test_pin_bar_fires_sell_on_shooting_star_at_rsi_overbought():
+    s = pin_bar_strategy()
+    df = pd.DataFrame([
+        {"time": BASE_TIME, "open": 100.0, "high": 100.05, "low": 99.95, "close": 100.0},
+        {"time": BASE_TIME + 60, "open": 100.5, "high": 101.2, "low": 100.38, "close": 100.4},  # shooting star
+        {"time": BASE_TIME + 120, "open": 100.4, "high": 100.45, "low": 100.35, "close": 100.4},
+    ])
+    ind = flat_ind(3, atr=0.3, rsi=75.0)
+    sig = s.check(df, ind, spread_price=0.2)
+    assert sig.side == "SELL"
+    assert sig.sl_distance_price == pytest.approx((101.2 - 100.4) + 0.3 * 0.3)
+
+
+def test_pin_bar_silent_on_candle_with_no_dominant_wick():
+    s = pin_bar_strategy()
+    df = pd.DataFrame([
+        {"time": BASE_TIME, "open": 100.0, "high": 100.05, "low": 99.95, "close": 100.0},
+        {"time": BASE_TIME + 60, "open": 100.5, "high": 100.6, "low": 100.4, "close": 100.55},  # normal small-wick bar
+        {"time": BASE_TIME + 120, "open": 100.55, "high": 100.6, "low": 100.5, "close": 100.55},
+    ])
+    ind = flat_ind(3, atr=0.3, rsi=25.0)
+    sig = s.check(df, ind, spread_price=0.2)
+    assert sig.side is None
+
+
+def test_pin_bar_silent_when_not_at_a_band_or_rsi_extreme():
+    s = pin_bar_strategy()
+    df = pd.DataFrame([
+        {"time": BASE_TIME, "open": 100.0, "high": 100.05, "low": 99.95, "close": 100.0},
+        {"time": BASE_TIME + 60, "open": 100.5, "high": 100.62, "low": 99.8, "close": 100.6},  # same hammer shape
+        {"time": BASE_TIME + 120, "open": 100.6, "high": 100.65, "low": 100.55, "close": 100.6},
+    ])
+    ind = flat_ind(3, atr=0.3, rsi=50.0)  # neutral RSI, bb far away
     sig = s.check(df, ind, spread_price=0.2)
     assert sig.side is None
 
