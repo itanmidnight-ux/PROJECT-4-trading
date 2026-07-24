@@ -311,7 +311,7 @@ def load_settings() -> Settings:
         max_daily_loss_usd=_float("MAX_DAILY_LOSS_USD", 8.0),
         max_daily_drawdown_pct=_float("MAX_DAILY_DRAWDOWN_PCT", 20.0),
         max_trades_per_day=_int("MAX_TRADES_PER_DAY", 1000),
-        min_tp_usd=_float("MIN_TP_USD", 0.28),
+        min_tp_usd=_float("MIN_TP_USD", 0.60),  # see .env.example "Ronda 20" for the sweep behind 0.28 -> 0.60
         tp_levels=_int("TP_LEVELS", 5),  # see .env.example / README "Ronda 5" for why 5, not 3
         # Keep the library fallback safe when called without a .env; the
         # installer-created .env is explicitly DRY_RUN=false for this live

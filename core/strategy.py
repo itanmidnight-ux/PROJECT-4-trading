@@ -42,6 +42,30 @@ dollar risk at that SL distance exceeds the risk budget's overshoot
 allowance on this $50/1:500 account), not a lack of BB/RSI setups. 3.5
 is the new default. Same caveat as above: single short dataset,
 re-validate before trusting blindly on the live account.
+
+Ronda 20 (2026-07-24, see .env.example's "Gestion de riesgo" comment block
+for the full sweep table): Rondas 14/17/19 each found the same structural
+ceiling with a different new signal - the TP ladder anchored at
+MIN_TP_USD=0.28 versus an SL of max(atr*sl_atr_multiple, 1.5x the TP1
+distance, see generate_signal below) demands a very high, sustained win
+rate because every loss is >=1.5x bigger than a typical win. This round
+attacks that ratio directly instead of trying yet another signal: swept
+MIN_TP_USD alone (mean reversion ONLY, no extra signal, same wiring as
+Ronda 15) against data/gold_m1_7d_{train,test}.csv. A diagnostic pass
+confirmed atr*sl_atr_multiple always dominates the max(...) at this
+account's real lot size (0.01-0.03) across the whole 0.28-2.20 range
+swept, so raising MIN_TP_USD here only grows the TP side, never the SL -
+a clean improvement of the ratio's numerator, not a risk-for-risk trade.
+TRAIN stays at the exact same 8 trades/7 wins/87.5% win rate from 0.28 up
+through 0.80 (PnL grows monotonically as each win nets more, not because
+the trade pattern changed), then flips hard between 0.80 and 0.82 (one
+winner becomes a loser, 75% win rate, PnL negative) - a real, sharp
+edge, not noise. 0.60 was chosen inside the stable zone with real margin
+(~25%) below that edge, not the local maximum: TRAIN +$3.67/8 trades/
+87.5% (vs +$2.04 at 0.28), TEST +$8.73/12 trades/91.7% (vs +$2.76 at
+0.28) - improves both halves, with TEST also picking up more trades at a
+higher win rate (bigger TP1 changes trade duration, which changes
+cooldown timing for later signals). New default: 0.60.
 """
 from __future__ import annotations
 
