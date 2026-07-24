@@ -657,6 +657,186 @@ class MACrossGridStrategy(CooldownGate):
                                  f"+ {self.entry_wait_bars}-bar wait, RSI {rsi_prev:.1f}")
 
 
+class EngulfingReversalStrategy(CooldownGate):
+    """Ronda 19: NOT adapted from the reference EA or any prior signal in
+    this file - a classic Japanese-candlestick reversal pattern (bullish/
+    bearish engulfing), gated to only fire when it happens AT a Bollinger
+    Band extreme (or a matching RSI extreme) - the same statistical-stretch
+    context the validated mean-reversion strategy in core/strategy.py
+    already requires.
+
+    Thesis: the base mean-reversion strategy fires on any bar whose CLOSE
+    is beyond the band with RSI past a threshold, even if that closing
+    candle itself is a weak, indecisive one (e.g. a small-bodied bar that
+    barely ticks the RSI threshold). An engulfing pattern is a much more
+    specific, textbook reversal confirmation - a full second candle whose
+    body completely reverses and overtakes the prior one - that some
+    traders read as visible evidence of an actual order-flow reversal, not
+    just an extended price. Requiring the SAME band/RSI extreme context the
+    already-validated core strategy uses, but gated by candlestick pattern
+    quality instead of (or in addition to) the RSI threshold, should in
+    principle admit different, and hopefully higher-quality, bars than the
+    core strategy sees alone - genuinely new entries the six previously
+    tested extras (Ronda 4/14/17, all continuation/momentum reads) never
+    tried, since none of them require two candles reversing a mean, only
+    one candle moving with a trend.
+
+    Unlike DirectionalCandleStrategy (a trend-CONTINUATION thrust-bar read,
+    already measured net negative in Ronda 14), this is explicitly a
+    reversal-AT-an-extreme read, same regime as the validated core
+    strategy, not the opposite one.
+
+    Stop is structural: beyond the engulfing candle's own low/high (its
+    real invalidation point - if price makes a new low/high past this
+    candle right after it supposedly reversed, the pattern failed) plus a
+    small ATR buffer, same placement convention as DirectionalCandleStrategy
+    - not a bare ATR multiple.
+
+    See README/.env.example "Ronda 19" for whether this actually holds up
+    train+test on real data before trusting it, same honest test every
+    other signal in this file already went through.
+    """
+
+    def __init__(self, cooldown_bars: int, max_spread_price: float, min_atr_price: float,
+                 sl_buffer_atr_mult: float = 0.3, rsi_oversold: float = 30.0,
+                 rsi_overbought: float = 70.0, bb_tolerance_atr_mult: float = 0.3) -> None:
+        super().__init__(cooldown_bars)
+        self.max_spread_price = max_spread_price
+        self.min_atr_price = min_atr_price
+        self.sl_buffer_atr_mult = sl_buffer_atr_mult
+        self.rsi_oversold = rsi_oversold
+        self.rsi_overbought = rsi_overbought
+        self.bb_tolerance_atr_mult = bb_tolerance_atr_mult
+
+    def check(self, df: pd.DataFrame, ind: pd.DataFrame, spread_price: float) -> SubSignal:
+        if not self._cooled_down:
+            return SubSignal(side=None, reason="cooldown")
+        if spread_price > self.max_spread_price:
+            return SubSignal(side=None, reason="spread too wide")
+        if len(df) < 3:
+            return SubSignal(side=None, reason="not enough history")
+
+        last = ind.iloc[-1]
+        atr = last["atr"]
+        if pd.isna(atr) or atr < self.min_atr_price:
+            return SubSignal(side=None, reason="volatility too low")
+
+        prev = df.iloc[-3]        # bar before the engulfing candle
+        curr = df.iloc[-2]        # the last fully closed bar - the engulfing candle
+        curr_ind = ind.iloc[-2]
+        rsi = curr_ind["rsi"]
+        bb_lower = curr_ind["bb_lower"]
+        bb_upper = curr_ind["bb_upper"]
+        if pd.isna(rsi) or pd.isna(bb_lower) or pd.isna(bb_upper):
+            return SubSignal(side=None, reason="indicators warming up")
+
+        tolerance = atr * self.bb_tolerance_atr_mult
+        buffer = atr * self.sl_buffer_atr_mult
+
+        prev_bearish = prev["close"] < prev["open"]
+        prev_bullish = prev["close"] > prev["open"]
+        curr_bullish = curr["close"] > curr["open"]
+        curr_bearish = curr["close"] < curr["open"]
+
+        if (prev_bearish and curr_bullish
+                and curr["open"] <= prev["close"] and curr["close"] >= prev["open"]
+                and (curr["close"] <= bb_lower + tolerance or rsi <= self.rsi_oversold)):
+            return SubSignal(side="BUY", sl_distance_price=(curr["close"] - curr["low"]) + buffer,
+                              reason="engulfing: bullish engulfing at lower BB / RSI oversold")
+
+        if (prev_bullish and curr_bearish
+                and curr["open"] >= prev["close"] and curr["close"] <= prev["open"]
+                and (curr["close"] >= bb_upper - tolerance or rsi >= self.rsi_overbought)):
+            return SubSignal(side="SELL", sl_distance_price=(curr["high"] - curr["close"]) + buffer,
+                              reason="engulfing: bearish engulfing at upper BB / RSI overbought")
+
+        return SubSignal(side=None, reason="no qualifying engulfing pattern")
+
+
+class PinBarReversalStrategy(CooldownGate):
+    """Ronda 19: a second, independent classic candlestick reversal pattern
+    (hammer/shooting star "pin bar" - one candle with a small body and a
+    long rejection wick on one side), gated the same way as
+    EngulfingReversalStrategy (band/RSI extreme context), but catching a
+    DIFFERENT candle shape - a single sharp wick rejection with no
+    requirement that the prior candle be the opposite color, which
+    EngulfingReversalStrategy's two-candle body-engulf structurally cannot
+    catch. Independent hypothesis, independent pattern, so it is measured
+    and toggled on its own STRAT_ENABLE_PIN_BAR flag.
+
+    Stop is structural: beyond the wick's own tip (the real invalidation
+    point for a pin bar - if price trades past the wick right after,
+    the rejection failed) plus a small ATR buffer.
+    """
+
+    def __init__(self, cooldown_bars: int, max_spread_price: float, min_atr_price: float,
+                 sl_buffer_atr_mult: float = 0.3, rsi_oversold: float = 30.0,
+                 rsi_overbought: float = 70.0, bb_tolerance_atr_mult: float = 0.3,
+                 min_wick_body_ratio: float = 2.0, max_opposite_wick_ratio: float = 0.5,
+                 min_close_position_ratio: float = 0.6) -> None:
+        super().__init__(cooldown_bars)
+        self.max_spread_price = max_spread_price
+        self.min_atr_price = min_atr_price
+        self.sl_buffer_atr_mult = sl_buffer_atr_mult
+        self.rsi_oversold = rsi_oversold
+        self.rsi_overbought = rsi_overbought
+        self.bb_tolerance_atr_mult = bb_tolerance_atr_mult
+        self.min_wick_body_ratio = min_wick_body_ratio
+        self.max_opposite_wick_ratio = max_opposite_wick_ratio
+        self.min_close_position_ratio = min_close_position_ratio
+
+    def check(self, df: pd.DataFrame, ind: pd.DataFrame, spread_price: float) -> SubSignal:
+        if not self._cooled_down:
+            return SubSignal(side=None, reason="cooldown")
+        if spread_price > self.max_spread_price:
+            return SubSignal(side=None, reason="spread too wide")
+        if len(df) < 2:
+            return SubSignal(side=None, reason="not enough history")
+
+        last = ind.iloc[-1]
+        atr = last["atr"]
+        if pd.isna(atr) or atr < self.min_atr_price:
+            return SubSignal(side=None, reason="volatility too low")
+
+        bar = df.iloc[-2]  # last fully closed bar
+        bar_ind = ind.iloc[-2]
+        rsi = bar_ind["rsi"]
+        bb_lower = bar_ind["bb_lower"]
+        bb_upper = bar_ind["bb_upper"]
+        if pd.isna(rsi) or pd.isna(bb_lower) or pd.isna(bb_upper):
+            return SubSignal(side=None, reason="indicators warming up")
+
+        rng = bar["high"] - bar["low"]
+        if rng <= 0:
+            return SubSignal(side=None, reason="candle range too small")
+        body = abs(bar["close"] - bar["open"])
+        lower_wick = min(bar["open"], bar["close"]) - bar["low"]
+        upper_wick = bar["high"] - max(bar["open"], bar["close"])
+
+        tolerance = atr * self.bb_tolerance_atr_mult
+        buffer = atr * self.sl_buffer_atr_mult
+
+        # Bullish pin bar (hammer): long lower wick rejecting a push lower,
+        # small/no upper wick, close in the upper part of the range.
+        if (lower_wick >= body * self.min_wick_body_ratio
+                and upper_wick <= body * self.max_opposite_wick_ratio
+                and (bar["close"] - bar["low"]) >= rng * self.min_close_position_ratio
+                and (bar["close"] <= bb_lower + tolerance or rsi <= self.rsi_oversold)):
+            return SubSignal(side="BUY", sl_distance_price=(bar["close"] - bar["low"]) + buffer,
+                              reason="pin_bar: bullish hammer at lower BB / RSI oversold")
+
+        # Bearish pin bar (shooting star): long upper wick, small/no lower
+        # wick, close in the lower part of the range.
+        if (upper_wick >= body * self.min_wick_body_ratio
+                and lower_wick <= body * self.max_opposite_wick_ratio
+                and (bar["high"] - bar["close"]) >= rng * self.min_close_position_ratio
+                and (bar["close"] >= bb_upper - tolerance or rsi >= self.rsi_overbought)):
+            return SubSignal(side="SELL", sl_distance_price=(bar["high"] - bar["close"]) + buffer,
+                              reason="pin_bar: bearish shooting star at upper BB / RSI overbought")
+
+        return SubSignal(side=None, reason="no qualifying pin bar pattern")
+
+
 class CompositeStrategy:
     """Orchestrates the validated mean-reversion strategy plus zero or more
     of the extra signals above, sharing one interface with plain
@@ -848,6 +1028,25 @@ def build_strategy_from_settings(settings, value_per_point_per_lot: float) -> Co
         extra.append(("quantum_queen", QuantumQueenVoteStrategy(
             cooldown_bars=cooldown, max_spread_price=spread, min_atr_price=min_atr,
             mask=settings.strat_quantum_mask, threshold=settings.strat_quantum_threshold,
+        )))
+    if settings.strat_enable_engulfing:
+        extra.append(("engulfing", EngulfingReversalStrategy(
+            cooldown_bars=cooldown, max_spread_price=spread, min_atr_price=min_atr,
+            sl_buffer_atr_mult=settings.strat_engulfing_sl_buffer_atr_mult,
+            rsi_oversold=settings.strat_engulfing_rsi_oversold,
+            rsi_overbought=settings.strat_engulfing_rsi_overbought,
+            bb_tolerance_atr_mult=settings.strat_engulfing_bb_tolerance_atr_mult,
+        )))
+    if settings.strat_enable_pin_bar:
+        extra.append(("pin_bar", PinBarReversalStrategy(
+            cooldown_bars=cooldown, max_spread_price=spread, min_atr_price=min_atr,
+            sl_buffer_atr_mult=settings.strat_pin_bar_sl_buffer_atr_mult,
+            rsi_oversold=settings.strat_pin_bar_rsi_oversold,
+            rsi_overbought=settings.strat_pin_bar_rsi_overbought,
+            bb_tolerance_atr_mult=settings.strat_pin_bar_bb_tolerance_atr_mult,
+            min_wick_body_ratio=settings.strat_pin_bar_min_wick_body_ratio,
+            max_opposite_wick_ratio=settings.strat_pin_bar_max_opposite_wick_ratio,
+            min_close_position_ratio=settings.strat_pin_bar_min_close_position_ratio,
         )))
 
     return CompositeStrategy(

@@ -250,6 +250,28 @@ class Settings:
     # to make this signal profitable - see MACrossGridStrategy's docstring.
     strat_ma_grid_min_adx: float = 20.0
 
+    # Eighth/ninth extra signals (Ronda 19) - NOT adapted from the
+    # reference EA, genuinely new: classic Japanese-candlestick reversal
+    # patterns (bullish/bearish engulfing, hammer/shooting-star pin bar)
+    # gated to only fire at a Bollinger Band/RSI extreme, the same context
+    # the validated mean-reversion strategy already requires - see
+    # core/signals.py's EngulfingReversalStrategy/PinBarReversalStrategy
+    # docstrings for the full thesis. See .env.example "Ronda 19" for the
+    # real train/test backtest result before flipping either to true.
+    strat_enable_engulfing: bool = False
+    strat_engulfing_sl_buffer_atr_mult: float = 0.3
+    strat_engulfing_rsi_oversold: float = 30.0
+    strat_engulfing_rsi_overbought: float = 70.0
+    strat_engulfing_bb_tolerance_atr_mult: float = 0.3
+    strat_enable_pin_bar: bool = False
+    strat_pin_bar_sl_buffer_atr_mult: float = 0.3
+    strat_pin_bar_rsi_oversold: float = 30.0
+    strat_pin_bar_rsi_overbought: float = 70.0
+    strat_pin_bar_bb_tolerance_atr_mult: float = 0.3
+    strat_pin_bar_min_wick_body_ratio: float = 2.0
+    strat_pin_bar_max_opposite_wick_ratio: float = 0.5
+    strat_pin_bar_min_close_position_ratio: float = 0.6
+
     # Optional confluence/regime and bounded basket management. All are
     # disabled by default; enabling them never bypasses RiskManager.
     strat_enable_quantum_queen: bool = False
@@ -360,6 +382,19 @@ def load_settings() -> Settings:
         strat_ma_grid_rsi_overbought=_float("STRAT_MA_GRID_RSI_OVERBOUGHT", 70.0),
         strat_ma_grid_rsi_oversold=_float("STRAT_MA_GRID_RSI_OVERSOLD", 30.0),
         strat_ma_grid_min_adx=_float("STRAT_MA_GRID_MIN_ADX", 20.0),
+        strat_enable_engulfing=_bool("STRAT_ENABLE_ENGULFING", False),
+        strat_engulfing_sl_buffer_atr_mult=_float("STRAT_ENGULFING_SL_BUFFER_ATR_MULT", 0.3),
+        strat_engulfing_rsi_oversold=_float("STRAT_ENGULFING_RSI_OVERSOLD", 30.0),
+        strat_engulfing_rsi_overbought=_float("STRAT_ENGULFING_RSI_OVERBOUGHT", 70.0),
+        strat_engulfing_bb_tolerance_atr_mult=_float("STRAT_ENGULFING_BB_TOLERANCE_ATR_MULT", 0.3),
+        strat_enable_pin_bar=_bool("STRAT_ENABLE_PIN_BAR", False),
+        strat_pin_bar_sl_buffer_atr_mult=_float("STRAT_PIN_BAR_SL_BUFFER_ATR_MULT", 0.3),
+        strat_pin_bar_rsi_oversold=_float("STRAT_PIN_BAR_RSI_OVERSOLD", 30.0),
+        strat_pin_bar_rsi_overbought=_float("STRAT_PIN_BAR_RSI_OVERBOUGHT", 70.0),
+        strat_pin_bar_bb_tolerance_atr_mult=_float("STRAT_PIN_BAR_BB_TOLERANCE_ATR_MULT", 0.3),
+        strat_pin_bar_min_wick_body_ratio=_float("STRAT_PIN_BAR_MIN_WICK_BODY_RATIO", 2.0),
+        strat_pin_bar_max_opposite_wick_ratio=_float("STRAT_PIN_BAR_MAX_OPPOSITE_WICK_RATIO", 0.5),
+        strat_pin_bar_min_close_position_ratio=_float("STRAT_PIN_BAR_MIN_CLOSE_POSITION_RATIO", 0.6),
         strat_enable_quantum_queen=_bool("STRAT_ENABLE_QUANTUM_QUEEN", False),
         strat_quantum_primary=_bool("STRAT_QUANTUM_PRIMARY", False),
         strat_quantum_threshold=max(_int("STRAT_QUANTUM_THRESHOLD", 2), 1),
