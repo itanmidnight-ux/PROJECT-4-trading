@@ -238,7 +238,10 @@ class Settings:
     # docstring for why that was rejected). Meant for native M15 bars, not
     # M1 - see README "Ronda 10" for the real backtest result on this
     # dataset before flipping this to true.
-    strat_enable_ma_grid: bool = False
+    # Ronda 21: Ronda 20's MIN_TP_USD 0.28 -> 0.60 rescued this signal -
+    # TRAIN +$11.72/89.3% win (was -$29.24), TEST +$3.19/80.0% win, see
+    # .env.example "Ronda 21" for the full sweep. Enabled by default.
+    strat_enable_ma_grid: bool = True
     strat_ma_grid_sl_atr_multiple: float = 3.0
     strat_ma_grid_fast_period: int = 9
     strat_ma_grid_slow_period: int = 26
@@ -374,7 +377,7 @@ def load_settings() -> Settings:
         strat_asian_breakout_buffer_pct=_float("STRAT_ASIAN_BREAKOUT_BUFFER_PCT", 0.05),
         strat_m15_trend_sl_atr_multiple=_float("STRAT_M15_TREND_SL_ATR_MULTIPLE", 2.0),
         strat_m15_trend_min_body_range_ratio=_float("STRAT_M15_TREND_MIN_BODY_RANGE_RATIO", 0.1),
-        strat_enable_ma_grid=_bool("STRAT_ENABLE_MA_GRID", False),
+        strat_enable_ma_grid=_bool("STRAT_ENABLE_MA_GRID", True),
         strat_ma_grid_sl_atr_multiple=_float("STRAT_MA_GRID_SL_ATR_MULTIPLE", 3.0),
         strat_ma_grid_fast_period=_int("STRAT_MA_GRID_FAST_PERIOD", 9),
         strat_ma_grid_slow_period=_int("STRAT_MA_GRID_SLOW_PERIOD", 26),
