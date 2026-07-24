@@ -12,7 +12,7 @@ def test_defaults_when_env_vars_absent(monkeypatch):
     assert settings.dry_run is True
     assert settings.strat_rsi_oversold == 25.0
     assert settings.strat_bb_period == 20
-    assert settings.tp_levels == 5  # Ronda 5: adaptive ladder + 5 levels beat 3 in backtest, see README
+    assert settings.tp_levels == 8  # Ronda 22: 5 -> 8 improved both TRAIN/TEST halves, see .env.example
 
 
 def test_strategy_env_vars_override_defaults(monkeypatch):
