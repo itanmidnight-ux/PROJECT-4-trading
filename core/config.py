@@ -290,7 +290,7 @@ class Settings:
     strat_micro_range_max_range_atr_mult: float = 0.5
     strat_micro_range_breakout_buffer_atr_mult: float = 0.15
     strat_micro_range_sl_buffer_atr_mult: float = 0.15
-    strat_enable_tight_pin_bar: bool = True
+    strat_enable_tight_pin_bar: bool = False
     strat_tight_pin_bar_sl_buffer_atr_mult: float = 0.15
     strat_tight_pin_bar_rsi_oversold: float = 25.0
     strat_tight_pin_bar_rsi_overbought: float = 75.0
@@ -428,7 +428,7 @@ def load_settings() -> Settings:
         strat_micro_range_max_range_atr_mult=_float("STRAT_MICRO_RANGE_MAX_RANGE_ATR_MULT", 0.5),
         strat_micro_range_breakout_buffer_atr_mult=_float("STRAT_MICRO_RANGE_BREAKOUT_BUFFER_ATR_MULT", 0.15),
         strat_micro_range_sl_buffer_atr_mult=_float("STRAT_MICRO_RANGE_SL_BUFFER_ATR_MULT", 0.15),
-        strat_enable_tight_pin_bar=_bool("STRAT_ENABLE_TIGHT_PIN_BAR", True),
+        strat_enable_tight_pin_bar=_bool("STRAT_ENABLE_TIGHT_PIN_BAR", False),
         strat_tight_pin_bar_sl_buffer_atr_mult=_float("STRAT_TIGHT_PIN_BAR_SL_BUFFER_ATR_MULT", 0.15),
         strat_tight_pin_bar_rsi_oversold=_float("STRAT_TIGHT_PIN_BAR_RSI_OVERSOLD", 25.0),
         strat_tight_pin_bar_rsi_overbought=_float("STRAT_TIGHT_PIN_BAR_RSI_OVERBOUGHT", 75.0),
