@@ -290,15 +290,15 @@ class Settings:
     strat_micro_range_max_range_atr_mult: float = 0.5
     strat_micro_range_breakout_buffer_atr_mult: float = 0.15
     strat_micro_range_sl_buffer_atr_mult: float = 0.15
-    strat_enable_tight_pin_bar: bool = False
+    strat_enable_tight_pin_bar: bool = True
     strat_tight_pin_bar_sl_buffer_atr_mult: float = 0.15
-    strat_tight_pin_bar_rsi_oversold: float = 30.0
-    strat_tight_pin_bar_rsi_overbought: float = 70.0
+    strat_tight_pin_bar_rsi_oversold: float = 25.0
+    strat_tight_pin_bar_rsi_overbought: float = 75.0
     strat_tight_pin_bar_bb_tolerance_atr_mult: float = 0.3
     strat_tight_pin_bar_min_wick_body_ratio: float = 2.0
     strat_tight_pin_bar_max_opposite_wick_ratio: float = 0.5
     strat_tight_pin_bar_min_close_position_ratio: float = 0.6
-    strat_tight_pin_bar_max_range_atr_mult: float = 0.5
+    strat_tight_pin_bar_max_range_atr_mult: float = 1.0
 
     # Optional confluence/regime and bounded basket management. All are
     # disabled by default; enabling them never bypasses RiskManager.
@@ -428,15 +428,15 @@ def load_settings() -> Settings:
         strat_micro_range_max_range_atr_mult=_float("STRAT_MICRO_RANGE_MAX_RANGE_ATR_MULT", 0.5),
         strat_micro_range_breakout_buffer_atr_mult=_float("STRAT_MICRO_RANGE_BREAKOUT_BUFFER_ATR_MULT", 0.15),
         strat_micro_range_sl_buffer_atr_mult=_float("STRAT_MICRO_RANGE_SL_BUFFER_ATR_MULT", 0.15),
-        strat_enable_tight_pin_bar=_bool("STRAT_ENABLE_TIGHT_PIN_BAR", False),
+        strat_enable_tight_pin_bar=_bool("STRAT_ENABLE_TIGHT_PIN_BAR", True),
         strat_tight_pin_bar_sl_buffer_atr_mult=_float("STRAT_TIGHT_PIN_BAR_SL_BUFFER_ATR_MULT", 0.15),
-        strat_tight_pin_bar_rsi_oversold=_float("STRAT_TIGHT_PIN_BAR_RSI_OVERSOLD", 30.0),
-        strat_tight_pin_bar_rsi_overbought=_float("STRAT_TIGHT_PIN_BAR_RSI_OVERBOUGHT", 70.0),
+        strat_tight_pin_bar_rsi_oversold=_float("STRAT_TIGHT_PIN_BAR_RSI_OVERSOLD", 25.0),
+        strat_tight_pin_bar_rsi_overbought=_float("STRAT_TIGHT_PIN_BAR_RSI_OVERBOUGHT", 75.0),
         strat_tight_pin_bar_bb_tolerance_atr_mult=_float("STRAT_TIGHT_PIN_BAR_BB_TOLERANCE_ATR_MULT", 0.3),
         strat_tight_pin_bar_min_wick_body_ratio=_float("STRAT_TIGHT_PIN_BAR_MIN_WICK_BODY_RATIO", 2.0),
         strat_tight_pin_bar_max_opposite_wick_ratio=_float("STRAT_TIGHT_PIN_BAR_MAX_OPPOSITE_WICK_RATIO", 0.5),
         strat_tight_pin_bar_min_close_position_ratio=_float("STRAT_TIGHT_PIN_BAR_MIN_CLOSE_POSITION_RATIO", 0.6),
-        strat_tight_pin_bar_max_range_atr_mult=_float("STRAT_TIGHT_PIN_BAR_MAX_RANGE_ATR_MULT", 0.5),
+        strat_tight_pin_bar_max_range_atr_mult=_float("STRAT_TIGHT_PIN_BAR_MAX_RANGE_ATR_MULT", 1.0),
         strat_enable_quantum_queen=_bool("STRAT_ENABLE_QUANTUM_QUEEN", False),
         strat_quantum_primary=_bool("STRAT_QUANTUM_PRIMARY", False),
         strat_quantum_threshold=max(_int("STRAT_QUANTUM_THRESHOLD", 2), 1),
