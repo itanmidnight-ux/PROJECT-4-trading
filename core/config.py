@@ -336,7 +336,7 @@ def load_settings() -> Settings:
         symbol=os.getenv("SYMBOL", "XAUUSD"),
         timeframe=os.getenv("TIMEFRAME", "M1"),
         risk_per_trade_usd=_float("RISK_PER_TRADE_USD", 6.0),  # see .env.example / README "Ronda 12" for why 6.0, not 3.0
-        max_daily_loss_usd=_float("MAX_DAILY_LOSS_USD", 8.0),
+        max_daily_loss_usd=_float("MAX_DAILY_LOSS_USD", 25.0),  # Ronda 42: 8.0 desproporcionado a balance=$100.45, ver .env.example
         max_daily_drawdown_pct=_float("MAX_DAILY_DRAWDOWN_PCT", 20.0),
         max_trades_per_day=_int("MAX_TRADES_PER_DAY", 1000),
         min_tp_usd=_float("MIN_TP_USD", 0.60),  # see .env.example "Ronda 20" for the sweep behind 0.28 -> 0.60
