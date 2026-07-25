@@ -1,2 +1,7 @@
 # Dev/test-only deps, on top of requirements.txt. Not needed to run the bot.
 pytest>=8.0.0
+# Parallel test runs (`pytest -n 2`, or `-n auto`) - cuts the full suite
+# from ~270-300s to ~93s on this machine's 2 cores. See test_backtest.py's
+# test_precompute_matches_live_parity_trade_count for the other half of
+# that win (3000 -> 1500 bars, same parity guarantee, half the time).
+pytest-xdist>=3.0.0
