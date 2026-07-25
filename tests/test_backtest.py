@@ -202,8 +202,12 @@ def test_precompute_matches_live_parity_trade_count():
     """The fast path must produce the same (or near-identical) trades as
     today's windowed default on real data - if this diverges by more than
     a handful of trades, something is wrong with the precompute wiring,
-    not an acceptable floating-point difference."""
-    candles = _real_gold_csv(3000)
+    not an acceptable floating-point difference. 1500 bars (not 3000): the
+    O(n*600) windowed baseline path is what's slow here by nature (the
+    thing this test exists to compare against), and 1500 already produces
+    10 trades with exact baseline/fast parity - plenty to catch a real
+    divergence, at under half the wall time (~65s vs ~142s)."""
+    candles = _real_gold_csv(1500)
     spec = _test_spec()
     settings = _test_settings()
     value_per_point = spec.trade_tick_value / (spec.trade_tick_size or spec.point)
