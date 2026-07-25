@@ -53,6 +53,7 @@ def run_backtest(
     brain_fn=None,
     max_daily_loss_usd: float | None = None,
     max_daily_drawdown_pct: float | None = None,
+    risk_per_trade_usd_by_regime: dict[str, float] | None = None,
 ) -> BacktestResult:
     """candles: columns open, high, low, close, time (oldest -> newest).
     strategy_overrides passes extra kwargs straight to ScalpStrategy (e.g.
@@ -129,21 +130,57 @@ def run_backtest(
     seconds) is passed into the RiskManager so day-rolls follow the data,
     and passing these two params here lets a backtest actually test them.
     Leaving both None reproduces the old disabled/unbounded behavior
-    exactly, so no existing caller changes results."""
+    exactly, so no existing caller changes results.
+
+    risk_per_trade_usd_by_regime (default None = today's exact behavior,
+    unchanged - Ronda 46): optional {regime_name: usd} map (regime names
+    from core/regime.py::detect_regime, e.g. "trend"/"range"/"volatile"/
+    "quiet"/"unknown") to vary the NOMINAL risk budget per trade by the
+    market regime in effect on the signal's bar, instead of the single
+    fixed risk_per_trade_usd for every trade. A regime missing from the
+    dict falls back to risk_per_trade_usd. This only changes what gets
+    PROPOSED to RiskManager.size_position's risk_budget_usd argument - the
+    untouched MAX_RISK_FRACTION_OF_BALANCE cap in core/risk_manager.py
+    (5% of balance) is still applied inside size_position exactly as
+    before, so this can only ever be capped down further by that ceiling,
+    never bypass or widen it. Implementation note: size_position's
+    risk_budget_usd can only ever shrink RiskManager's own
+    self.risk_per_trade_usd (min(risk_budget_usd, self.risk_per_trade_usd)
+    at core/risk_manager.py line ~209), so when this dict is given the
+    RiskManager below is constructed with the CEILING of risk_per_trade_usd
+    and every dict value, and the per-bar regime amount is then passed as
+    risk_budget_usd on every call - never risk_manager.py itself. Regime is
+    read from the same precomputed_regime_series used by the strategy's own
+    regime filter when available (precompute_indicators=True); otherwise it
+    falls back to a per-bar detect_regime() call (slower, correctness path
+    for precompute_indicators=False)."""
     tick_size = spec.trade_tick_size or spec.point
     value_per_point_per_lot = spec.trade_tick_value / tick_size
     if strategy is None:
         strategy = ScalpStrategy(min_tp_usd=min_tp_usd, tp_levels=tp_levels,
                                   value_per_point_per_lot=value_per_point_per_lot,
                                   **(strategy_overrides or {}))
+    # Ronda 46: risk_per_trade_usd_by_regime can only ever ask for LESS than
+    # RiskManager's own risk_per_trade_usd (size_position clamps
+    # risk_budget_usd to min(risk_budget_usd, self.risk_per_trade_usd)) - so
+    # when regime amounts exceed the flat risk_per_trade_usd, RiskManager
+    # must be constructed with the ceiling of all of them, or higher-regime
+    # amounts would be silently clamped back down to the flat value. The
+    # untouched 5% MAX_RISK_FRACTION_OF_BALANCE cap inside size_position
+    # still applies on top of this regardless.
+    risk_per_trade_ceiling = risk_per_trade_usd
+    if risk_per_trade_usd_by_regime:
+        risk_per_trade_ceiling = max(risk_per_trade_usd, *risk_per_trade_usd_by_regime.values())
     risk = RiskManager(
-        risk_per_trade_usd=risk_per_trade_usd,
+        risk_per_trade_usd=risk_per_trade_ceiling,
         max_daily_loss_usd=max_daily_loss_usd if max_daily_loss_usd is not None else 10**9,
         max_daily_drawdown_pct=max_daily_drawdown_pct if max_daily_drawdown_pct is not None else 100.0,
         max_trades_per_day=max_trades_per_day,
     )
 
     precomputed_mr = precomputed_composite = None
+    precomputed_regime_series = None
+    regime_kwargs = getattr(strategy, "_regime_kwargs", {})
     if precompute_indicators:
         mr_strategy = getattr(strategy, "_mean_reversion", strategy)
         precomputed_mr = compute_indicators(
@@ -155,10 +192,10 @@ def run_backtest(
             precomputed_composite = compute_indicators(
                 candles, rsi_period=strategy._indicator_rsi_period,
                 atr_period=strategy._indicator_atr_period)
-        precomputed_regime_series = None
-        if extra and getattr(strategy, "_regime_filter_enabled", False):
+        needs_regime = (extra and getattr(strategy, "_regime_filter_enabled", False)) or (
+            risk_per_trade_usd_by_regime is not None)
+        if needs_regime:
             from core.regime import detect_regime_series, Regime
-            regime_kwargs = getattr(strategy, "_regime_kwargs", {})
             precomputed_regime_series = detect_regime_series(candles, **regime_kwargs)
 
     balance = starting_balance
@@ -336,7 +373,16 @@ def run_backtest(
                     if not decision.allow:
                         brain_vetoes += 1
                         brain_ok = False
-                sizing = risk.size_position(account, spec, signal.sl_distance_price, mid) if brain_ok else None
+                risk_budget_usd = None
+                if risk_per_trade_usd_by_regime is not None:
+                    if precomputed_regime_series is not None:
+                        bar_regime_name = precomputed_regime_series.iloc[i]["name"]
+                    else:
+                        from core.regime import detect_regime
+                        bar_regime_name = detect_regime(window, **regime_kwargs).name
+                    risk_budget_usd = risk_per_trade_usd_by_regime.get(bar_regime_name, risk_per_trade_usd)
+                sizing = risk.size_position(account, spec, signal.sl_distance_price, mid,
+                                             risk_budget_usd=risk_budget_usd) if brain_ok else None
                 if sizing is not None and sizing.ok:
                     entry = ask if signal.side == "BUY" else bid
                     if tick_times is not None:
