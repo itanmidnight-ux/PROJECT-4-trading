@@ -103,7 +103,21 @@ def test_reclaim_kills_a_real_dashboard_py_process_and_frees_the_port():
     """(b) A REAL dashboard.py subprocess is actually listening on the
     port. Calling the reclaim function must terminate that real process
     (verified via /proc) and free the port for a fresh bind - not just
-    call a mocked os.kill."""
+    call a mocked os.kill.
+
+    The spawned subprocess runs with cwd=PROJECT_ROOT, so its own
+    _run_web() resolves RUN_DIR to this checkout's REAL data/run/ and
+    writes its (ephemeral, throwaway) port into the REAL
+    data/run/dashboard.port - clobbering that file for any genuine
+    ./run.sh --start session running concurrently in this same
+    checkout (run.sh's --status/doctor read that file to find the real
+    dashboard port, and would then report a live dashboard as
+    unreachable). There's no env/CLI override for RUN_DIR in
+    dashboard.py to redirect the child elsewhere, so instead we
+    snapshot the real file's bytes before spawning and restore them
+    afterwards, no matter what the subprocess did to it."""
+    port_file = dmod.DASHBOARD_PORT_FILE
+    original_port_file = port_file.read_bytes() if port_file.exists() else None
     port = _free_port()
     proc = subprocess.Popen(
         [PYTHON_BIN, str(PROJECT_ROOT / "dashboard.py"),
@@ -126,6 +140,10 @@ def test_reclaim_kills_a_real_dashboard_py_process_and_frees_the_port():
             proc.terminate()
             with contextlib_suppress_timeout():
                 proc.wait(timeout=5)
+        if original_port_file is None:
+            port_file.unlink(missing_ok=True)
+        else:
+            port_file.write_bytes(original_port_file)
 
 
 def test_reclaim_leaves_non_dashboard_process_alone():
