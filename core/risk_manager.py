@@ -107,22 +107,31 @@ class RiskManager:
         self._start_of_day_balance: Optional[float] = None
 
     # ---------------------------------------------------------------- day
-    def _roll_day_if_needed(self, balance: float) -> None:
-        today = date.today()
+    def _roll_day_if_needed(self, balance: float, current_date: Optional[date] = None) -> None:
+        # `current_date` lets a caller (the backtester) drive the day-roll
+        # off the historical candle timestamps in the data instead of the
+        # machine's wall clock - a backtest replaying a week of 1-minute
+        # candles in a few seconds never crosses a real wall-clock midnight,
+        # so without this every "day" of a backtest was silently the same
+        # single day, and MAX_DAILY_LOSS_USD/MAX_DAILY_DRAWDOWN_PCT could
+        # never actually be exercised by historical data (Ronda 41). Default
+        # None preserves the exact live behavior in core/engine.py, which
+        # never passes this and must keep using the real wall clock.
+        today = current_date if current_date is not None else date.today()
         if today != self._day:
             self._day = today
             self._trades_today = 0
             self._pnl_today = 0.0
             self._start_of_day_balance = balance
 
-    def register_trade_closed(self, pnl_usd: float, balance_after: float) -> None:
-        self._roll_day_if_needed(balance_after)
+    def register_trade_closed(self, pnl_usd: float, balance_after: float, current_date: Optional[date] = None) -> None:
+        self._roll_day_if_needed(balance_after, current_date)
         self._trades_today += 1
         self._pnl_today += pnl_usd
 
     # ------------------------------------------------------------- gating
-    def can_open_new_trade(self, balance: float) -> tuple[bool, str]:
-        self._roll_day_if_needed(balance)
+    def can_open_new_trade(self, balance: float, current_date: Optional[date] = None) -> tuple[bool, str]:
+        self._roll_day_if_needed(balance, current_date)
         if self._start_of_day_balance is None:
             self._start_of_day_balance = balance
 
@@ -148,7 +157,7 @@ class RiskManager:
     def pnl_today(self) -> float:
         return self._pnl_today
 
-    def check_equity_drawdown(self, equity: float) -> tuple[bool, str]:
+    def check_equity_drawdown(self, equity: float, current_date: Optional[date] = None) -> tuple[bool, str]:
         """
         Real-time check against floating EQUITY (balance + unrealized pnl
         of whatever is open right now), not just realized balance. Meant
@@ -161,7 +170,7 @@ class RiskManager:
         on a breach (emergency-closing the open position), this only
         detects it.
         """
-        self._roll_day_if_needed(equity)
+        self._roll_day_if_needed(equity, current_date)
         if self._start_of_day_balance is None:
             self._start_of_day_balance = equity
         if not self._start_of_day_balance:
