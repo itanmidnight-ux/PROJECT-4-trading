@@ -58,7 +58,12 @@ def main() -> None:
     parser.add_argument("--risk-usd", type=float, default=3.0)
     parser.add_argument("--min-tp-usd", type=float, default=0.28)
     parser.add_argument("--tp-levels", type=int, default=5)
-    parser.add_argument("--spread", type=float, default=0.25)
+    # 0.45 = spread real medido contra el bridge MT5 en vivo (GET
+    # /price/XAUUSD, Ronda 48, 2026-07-25), no 0.25 (usado sin verificar
+    # desde el inicio de la Fase 2). Es una foto de un momento - el spread
+    # real de XAUUSD varia con sesion/liquidez; pasa --spread para medir con
+    # otro valor si lo confirmas contra el bridge en el momento de correr.
+    parser.add_argument("--spread", type=float, default=0.45)
     # 0 = off (the default, and the measured recommendation - Ronda 8 in
     # the README found no value that improved BOTH train/test halves).
     # Kept as an experiment knob: closes any position that hasn't reached

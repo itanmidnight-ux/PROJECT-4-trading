@@ -396,7 +396,13 @@ def api_backtest():
         balance = float(data.get("balance", 50))
         leverage = int(data.get("leverage", 500))
         risk_usd = float(data.get("risk_usd", settings.risk_per_trade_usd))
-        spread = float(data.get("spread", 0.25))
+        # 0.45 = spread real medido contra el bridge MT5 en vivo (GET
+        # /price/XAUUSD, Ronda 48, 2026-07-25) - reemplaza el 0.25 usado sin
+        # verificar desde el inicio de la Fase 2 (Ronda 13+), que subestimaba
+        # el costo real de cada trade a casi la mitad. Es una foto de un
+        # momento (el spread real varia con sesion/liquidez), no una
+        # constante fisica - el campo del dashboard sigue siendo editable.
+        spread = float(data.get("spread", 0.45))
         max_hold = max(int(data.get("max_hold_bars", 0)), 0)
         tick_mode = bool(data.get("tick_mode", False))
         backtest_timeframe = str(data.get("timeframe") or "M1").upper()

@@ -229,7 +229,7 @@
           <label class="field"><span class="field-label">Capital de prueba (USD)</span><input type="number" min="1" step="0.01" id="bt-balance" value="50"></label>
           <label class="field"><span class="field-label">Apalancamiento (1:X)</span><input type="number" min="1" step="1" id="bt-leverage" value="500"></label>
           <label class="field"><span class="field-label">Riesgo por trade (USD)</span><input type="number" min="0.01" step="0.01" id="bt-risk" value="6"></label>
-          <label class="field"><span class="field-label">Spread asumido (precio)</span><input type="number" min="0" step="0.01" id="bt-spread" value="0.25"></label>
+          <label class="field"><span class="field-label">Spread asumido (precio)</span><input type="number" min="0" step="0.01" id="bt-spread" value="0.45" title="0.45 es el spread real medido contra el bridge MT5 en vivo (GET /price/XAUUSD) el 2026-07-25 -- es una foto de un momento, no una constante: el spread de XAUUSD varia con la sesion y la liquidez. Ajustalo si medis un valor distinto antes de correr el backtest."></label>
           <label class="field"><span class="field-label">Time-stop (barras, 0=off)</span><input type="number" min="0" step="1" id="bt-hold" value="0"></label>
           <label class="field field-checkbox"><input type="checkbox" id="bt-ticks"><span>Usar ticks históricos MT5 (hasta 100 por vela)</span></label>
         </div>
