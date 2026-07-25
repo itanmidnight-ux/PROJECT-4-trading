@@ -19,11 +19,13 @@ from core.signals import (
     EngulfingReversalStrategy,
     M15TrendStrategy,
     MACrossGridStrategy,
+    MicroRangeBreakoutStrategy,
     MomentumCrossStrategy,
     PinBarReversalStrategy,
     RsiHysteresisStrategy,
     SessionOpenStrategy,
     SubSignal,
+    TightPinBarReversalStrategy,
     resample_m1_to_tf,
 )
 from core.strategy import ScalpStrategy, compute_indicators
@@ -298,6 +300,164 @@ def test_pin_bar_silent_when_not_at_a_band_or_rsi_extreme():
     ind = flat_ind(3, atr=0.3, rsi=50.0)  # neutral RSI, bb far away
     sig = s.check(df, ind, spread_price=0.2)
     assert sig.side is None
+
+
+# ----------------------------------------------------- TightPinBarReversal
+def tight_pin_bar_strategy(**kwargs) -> TightPinBarReversalStrategy:
+    defaults = {"cooldown_bars": 2, "max_spread_price": 0.5, "min_atr_price": 0.1,
+                "sl_buffer_atr_mult": 0.15, "rsi_oversold": 30.0, "rsi_overbought": 70.0,
+                "bb_tolerance_atr_mult": 0.3, "min_wick_body_ratio": 2.0,
+                "max_opposite_wick_ratio": 0.5, "min_close_position_ratio": 0.6,
+                "max_range_atr_mult": 0.5}
+    defaults.update(kwargs)
+    return TightPinBarReversalStrategy(**defaults)
+
+
+def test_tight_pin_bar_fires_buy_on_small_range_hammer_at_rsi_oversold():
+    s = tight_pin_bar_strategy()
+    # Hammer scaled down so the total range (0.10) clears atr(0.3)*0.5=0.15.
+    df = pd.DataFrame([
+        {"time": BASE_TIME, "open": 100.0, "high": 100.02, "low": 99.98, "close": 100.0},
+        {"time": BASE_TIME + 60, "open": 99.99, "high": 100.00, "low": 99.90, "close": 100.00},  # hammer, range=0.10
+        {"time": BASE_TIME + 120, "open": 100.0, "high": 100.01, "low": 99.99, "close": 100.0},
+    ])
+    ind = flat_ind(3, atr=0.3, rsi=25.0)
+    sig = s.check(df, ind, spread_price=0.2)
+    assert sig.side == "BUY"
+    assert sig.sl_distance_price == pytest.approx((100.00 - 99.90) + 0.15 * 0.3)
+
+
+def test_tight_pin_bar_fires_sell_on_small_range_shooting_star_at_rsi_overbought():
+    s = tight_pin_bar_strategy()
+    df = pd.DataFrame([
+        {"time": BASE_TIME, "open": 100.0, "high": 100.02, "low": 99.98, "close": 100.0},
+        {"time": BASE_TIME + 60, "open": 100.01, "high": 100.10, "low": 100.00, "close": 100.00},  # shooting star, range=0.10
+        {"time": BASE_TIME + 120, "open": 100.0, "high": 100.01, "low": 99.99, "close": 100.0},
+    ])
+    ind = flat_ind(3, atr=0.3, rsi=75.0)
+    sig = s.check(df, ind, spread_price=0.2)
+    assert sig.side == "SELL"
+    assert sig.sl_distance_price == pytest.approx((100.10 - 100.00) + 0.15 * 0.3)
+
+
+def test_tight_pin_bar_rejects_a_wide_range_candle_even_with_a_good_wick_ratio():
+    s = tight_pin_bar_strategy()
+    # Identical shape/ratios to the plain PinBarReversalStrategy's passing
+    # hammer test (range=0.82, well above atr(0.3)*0.5=0.15) - this is
+    # exactly the case TightPinBarReversalStrategy exists to reject that
+    # the plain pin bar accepts.
+    df = pd.DataFrame([
+        {"time": BASE_TIME, "open": 100.0, "high": 100.05, "low": 99.95, "close": 100.0},
+        {"time": BASE_TIME + 60, "open": 100.5, "high": 100.62, "low": 99.8, "close": 100.6},  # hammer, range=0.82
+        {"time": BASE_TIME + 120, "open": 100.6, "high": 100.65, "low": 100.55, "close": 100.6},
+    ])
+    ind = flat_ind(3, atr=0.3, rsi=25.0)
+    sig = s.check(df, ind, spread_price=0.2)
+    assert sig.side is None
+
+
+def test_tight_pin_bar_structural_sl_is_narrower_than_mean_reversion_atr_stop():
+    """The whole point of this strategy (Ronda 31): its structural SL must
+    come out narrower than the mean-reversion baseline's atr*3.5 stop, by
+    construction (range capped to atr*max_range_atr_mult), not by luck."""
+    s = tight_pin_bar_strategy(max_range_atr_mult=0.5)
+    df = pd.DataFrame([
+        {"time": BASE_TIME, "open": 100.0, "high": 100.02, "low": 99.98, "close": 100.0},
+        {"time": BASE_TIME + 60, "open": 99.99, "high": 100.00, "low": 99.90, "close": 100.00},
+        {"time": BASE_TIME + 120, "open": 100.0, "high": 100.01, "low": 99.99, "close": 100.0},
+    ])
+    ind = flat_ind(3, atr=0.3, rsi=25.0)
+    sig = s.check(df, ind, spread_price=0.2)
+    assert sig.side == "BUY"
+    mean_reversion_sl = 0.3 * 3.5  # atr * default STRAT_SL_ATR_MULTIPLE
+    assert sig.sl_distance_price < mean_reversion_sl
+
+
+# --------------------------------------------------------- MicroRangeBreakout
+def micro_range_strategy(**kwargs) -> MicroRangeBreakoutStrategy:
+    defaults = {"cooldown_bars": 2, "max_spread_price": 0.5, "min_atr_price": 0.1,
+                "lookback_bars": 4, "max_range_atr_mult": 0.5, "breakout_buffer_atr_mult": 0.1,
+                "sl_buffer_atr_mult": 0.15}
+    defaults.update(kwargs)
+    return MicroRangeBreakoutStrategy(**defaults)
+
+
+def _micro_range_df(breakout: str) -> pd.DataFrame:
+    """4 tight consolidation bars (range 100.00-100.05, height 0.05 <=
+    atr(0.3)*0.5=0.15) followed by a confirmed breakout candle."""
+    rows = [
+        {"time": BASE_TIME, "open": 100.02, "high": 100.04, "low": 100.00, "close": 100.03},
+        {"time": BASE_TIME + 60, "open": 100.03, "high": 100.05, "low": 100.01, "close": 100.02},
+        {"time": BASE_TIME + 120, "open": 100.02, "high": 100.04, "low": 100.00, "close": 100.01},
+        {"time": BASE_TIME + 180, "open": 100.01, "high": 100.05, "low": 100.00, "close": 100.04},
+    ]
+    if breakout == "BUY":
+        rows.append({"time": BASE_TIME + 240, "open": 100.04, "high": 100.30, "low": 100.03, "close": 100.25})
+    else:
+        rows.append({"time": BASE_TIME + 240, "open": 100.01, "high": 100.02, "low": 99.65, "close": 99.70})
+    rows.append({"time": BASE_TIME + 300, "open": rows[-1]["close"], "high": rows[-1]["close"] + 0.01,
+                 "low": rows[-1]["close"] - 0.01, "close": rows[-1]["close"]})  # forming bar
+    return pd.DataFrame(rows)
+
+
+def test_micro_range_breakout_fires_buy_on_confirmed_close_above_a_tight_range():
+    s = micro_range_strategy()
+    df = _micro_range_df("BUY")
+    ind = flat_ind(len(df), atr=0.3)
+    sig = s.check(df, ind, spread_price=0.2)
+    assert sig.side == "BUY"
+    assert sig.sl_distance_price == pytest.approx((100.25 - 100.00) + 0.15 * 0.3)
+
+
+def test_micro_range_breakout_fires_sell_on_confirmed_close_below_a_tight_range():
+    s = micro_range_strategy()
+    df = _micro_range_df("SELL")
+    ind = flat_ind(len(df), atr=0.3)
+    sig = s.check(df, ind, spread_price=0.2)
+    assert sig.side == "SELL"
+    assert sig.sl_distance_price == pytest.approx((100.05 - 99.70) + 0.15 * 0.3)
+
+
+def test_micro_range_breakout_silent_when_the_prior_range_is_not_tight():
+    s = micro_range_strategy()
+    # Same breakout candle, but the lookback range is wide (0.00 to 0.50 =
+    # height 0.50, above atr(0.3)*0.5=0.15) - not a real micro-consolidation.
+    df = pd.DataFrame([
+        {"time": BASE_TIME, "open": 100.00, "high": 100.50, "low": 100.00, "close": 100.10},
+        {"time": BASE_TIME + 60, "open": 100.10, "high": 100.45, "low": 100.05, "close": 100.30},
+        {"time": BASE_TIME + 120, "open": 100.30, "high": 100.40, "low": 100.02, "close": 100.15},
+        {"time": BASE_TIME + 180, "open": 100.15, "high": 100.50, "low": 100.01, "close": 100.20},
+        {"time": BASE_TIME + 240, "open": 100.20, "high": 100.60, "low": 100.19, "close": 100.55},
+        {"time": BASE_TIME + 300, "open": 100.55, "high": 100.56, "low": 100.54, "close": 100.55},
+    ])
+    ind = flat_ind(len(df), atr=0.3)
+    sig = s.check(df, ind, spread_price=0.2)
+    assert sig.side is None
+
+
+def test_micro_range_breakout_silent_when_close_stays_inside_the_range():
+    s = micro_range_strategy()
+    df = pd.DataFrame([
+        {"time": BASE_TIME, "open": 100.02, "high": 100.04, "low": 100.00, "close": 100.03},
+        {"time": BASE_TIME + 60, "open": 100.03, "high": 100.05, "low": 100.01, "close": 100.02},
+        {"time": BASE_TIME + 120, "open": 100.02, "high": 100.04, "low": 100.00, "close": 100.01},
+        {"time": BASE_TIME + 180, "open": 100.01, "high": 100.05, "low": 100.00, "close": 100.04},
+        {"time": BASE_TIME + 240, "open": 100.04, "high": 100.05, "low": 100.00, "close": 100.03},  # still inside
+        {"time": BASE_TIME + 300, "open": 100.03, "high": 100.04, "low": 100.02, "close": 100.03},
+    ])
+    ind = flat_ind(len(df), atr=0.3)
+    sig = s.check(df, ind, spread_price=0.2)
+    assert sig.side is None
+
+
+def test_micro_range_breakout_structural_sl_is_narrower_than_mean_reversion_atr_stop():
+    s = micro_range_strategy(max_range_atr_mult=0.5)
+    df = _micro_range_df("BUY")
+    ind = flat_ind(len(df), atr=0.3)
+    sig = s.check(df, ind, spread_price=0.2)
+    assert sig.side == "BUY"
+    mean_reversion_sl = 0.3 * 3.5
+    assert sig.sl_distance_price < mean_reversion_sl
 
 
 # ----------------------------------------------------------- SessionOpen

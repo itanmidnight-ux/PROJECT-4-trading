@@ -837,6 +837,182 @@ class PinBarReversalStrategy(CooldownGate):
         return SubSignal(side=None, reason="no qualifying pin bar pattern")
 
 
+class MicroRangeBreakoutStrategy(CooldownGate):
+    """Ronda 31: NOT adapted from the reference EA - a consolidation-
+    breakout pattern whose stop-loss is structural BY CONSTRUCTION, not a
+    generic ATR multiple picked after the fact.
+
+    Context (see docs/superpowers/specs/2026-07-23-strategy-improvement-
+    rondas-design.md "Ronda 24"): shrinking sl_atr_multiple directly was
+    already tried and made PnL worse in every case tested - it tightens the
+    stop on the SAME wide, uncertain mean-reversion setups, so a normal
+    adverse wiggle now stops out a thesis that needed room. This strategy
+    takes the opposite approach: instead of tightening an existing wide
+    setup's stop, it only enters on setups that are structurally narrow to
+    begin with. It looks at the last `lookback_bars` CLOSED bars (a small
+    window, e.g. 6 minutes on M1) and requires their high/low range to
+    already be tight relative to ATR (`max_range_atr_mult`, e.g. half an
+    ATR or less) - a genuine micro-consolidation, not just "some recent
+    bars". Only then does a confirmed close beyond that tight range (plus a
+    small buffer) count as a breakout entry.
+
+    Stop is placed at the OTHER side of the same consolidation range (plus
+    a small ATR buffer) - if price re-enters and crosses back through the
+    whole range, the breakout thesis is invalidated, that is the real
+    invalidation point, not an arbitrary multiple of volatility. Because
+    the range was already gated to be <= max_range_atr_mult * ATR, the
+    resulting SL distance is narrow BY CONSTRUCTION relative to the
+    ATR-multiple stop mean-reversion uses (default 3.5x ATR) - the range
+    itself, not a knob turned down on an unrelated setup, is what makes
+    this narrow.
+
+    See docs/superpowers/specs/2026-07-24-fase2-rondas-13-29-resumen.md and
+    the Ronda 31 commit for whether this holds up train+test on real data
+    before trusting it - same honest test every signal in this file goes
+    through, no exception for this one.
+    """
+
+    def __init__(self, cooldown_bars: int, max_spread_price: float, min_atr_price: float,
+                 lookback_bars: int = 6, max_range_atr_mult: float = 0.5,
+                 breakout_buffer_atr_mult: float = 0.15, sl_buffer_atr_mult: float = 0.15) -> None:
+        super().__init__(cooldown_bars)
+        self.max_spread_price = max_spread_price
+        self.min_atr_price = min_atr_price
+        self.lookback_bars = lookback_bars
+        self.max_range_atr_mult = max_range_atr_mult
+        self.breakout_buffer_atr_mult = breakout_buffer_atr_mult
+        self.sl_buffer_atr_mult = sl_buffer_atr_mult
+
+    def check(self, df: pd.DataFrame, ind: pd.DataFrame, spread_price: float) -> SubSignal:
+        if not self._cooled_down:
+            return SubSignal(side=None, reason="cooldown")
+        if spread_price > self.max_spread_price:
+            return SubSignal(side=None, reason="spread too wide")
+        # +2: the breakout candle itself (df.iloc[-2], last CLOSED bar) plus
+        # the still-forming bar (df.iloc[-1]) on top of the lookback window.
+        if len(df) < self.lookback_bars + 2:
+            return SubSignal(side=None, reason="not enough history")
+
+        last = ind.iloc[-1]
+        atr = last["atr"]
+        if pd.isna(atr) or atr < self.min_atr_price:
+            return SubSignal(side=None, reason="volatility too low")
+
+        breakout = df.iloc[-2]  # last fully closed bar - the candidate breakout candle
+        range_window = df.iloc[-(self.lookback_bars + 2):-2]  # the lookback_bars CLOSED bars BEFORE it
+        range_high = float(range_window["high"].max())
+        range_low = float(range_window["low"].min())
+        range_height = range_high - range_low
+        if range_height <= 0 or range_height > atr * self.max_range_atr_mult:
+            return SubSignal(side=None, reason="range not tight enough for a micro-consolidation")
+
+        buf = atr * self.breakout_buffer_atr_mult
+        sl_buf = atr * self.sl_buffer_atr_mult
+        close = breakout["close"]
+
+        if close > range_high + buf:
+            sl_distance = (close - range_low) + sl_buf
+            return SubSignal(side="BUY", sl_distance_price=sl_distance,
+                              reason=f"micro_range_breakout: confirmed close above a {range_height:.2f}-wide range")
+        if close < range_low - buf:
+            sl_distance = (range_high - close) + sl_buf
+            return SubSignal(side="SELL", sl_distance_price=sl_distance,
+                              reason=f"micro_range_breakout: confirmed close below a {range_height:.2f}-wide range")
+        return SubSignal(side=None, reason="inside the micro-consolidation range")
+
+
+class TightPinBarReversalStrategy(CooldownGate):
+    """Ronda 31: a stricter sibling of PinBarReversalStrategy (Ronda 19),
+    independently toggled, that adds ONE hard filter the original pin bar
+    does not have: the candle's TOTAL range (high-low) must itself be
+    small relative to ATR (`max_range_atr_mult`). The original pin bar
+    only constrains the wick/body RATIO, so a big, genuinely volatile
+    candle can still qualify as long as its wick is proportionally long -
+    its structural SL (wick + buffer) then ends up comparable to, or even
+    wider than, the mean-reversion strategy's own atr*sl_atr_multiple
+    stop, which is why "structural" alone did not make Ronda 19's pin bar
+    narrow in practice.
+
+    Capping the candle's total range directly caps the wick (which is most
+    of that range, by the same min_wick_body_ratio filter the original
+    class already enforces) - so the resulting SL (beyond the wick, plus a
+    small buffer) is narrow BY CONSTRUCTION relative to the ATR-multiple
+    stop, not just "usually smaller". This is the same idea
+    MicroRangeBreakoutStrategy applies to a breakout pattern, applied here
+    to a single-candle reversal pattern instead.
+
+    Same BB/RSI-extreme gating and stop placement (beyond the wick tip,
+    plus a small ATR buffer) as PinBarReversalStrategy - see that class's
+    docstring for the base thesis this narrows further.
+    """
+
+    def __init__(self, cooldown_bars: int, max_spread_price: float, min_atr_price: float,
+                 sl_buffer_atr_mult: float = 0.15, rsi_oversold: float = 30.0,
+                 rsi_overbought: float = 70.0, bb_tolerance_atr_mult: float = 0.3,
+                 min_wick_body_ratio: float = 2.0, max_opposite_wick_ratio: float = 0.5,
+                 min_close_position_ratio: float = 0.6, max_range_atr_mult: float = 0.5) -> None:
+        super().__init__(cooldown_bars)
+        self.max_spread_price = max_spread_price
+        self.min_atr_price = min_atr_price
+        self.sl_buffer_atr_mult = sl_buffer_atr_mult
+        self.rsi_oversold = rsi_oversold
+        self.rsi_overbought = rsi_overbought
+        self.bb_tolerance_atr_mult = bb_tolerance_atr_mult
+        self.min_wick_body_ratio = min_wick_body_ratio
+        self.max_opposite_wick_ratio = max_opposite_wick_ratio
+        self.min_close_position_ratio = min_close_position_ratio
+        self.max_range_atr_mult = max_range_atr_mult
+
+    def check(self, df: pd.DataFrame, ind: pd.DataFrame, spread_price: float) -> SubSignal:
+        if not self._cooled_down:
+            return SubSignal(side=None, reason="cooldown")
+        if spread_price > self.max_spread_price:
+            return SubSignal(side=None, reason="spread too wide")
+        if len(df) < 2:
+            return SubSignal(side=None, reason="not enough history")
+
+        last = ind.iloc[-1]
+        atr = last["atr"]
+        if pd.isna(atr) or atr < self.min_atr_price:
+            return SubSignal(side=None, reason="volatility too low")
+
+        bar = df.iloc[-2]  # last fully closed bar
+        bar_ind = ind.iloc[-2]
+        rsi = bar_ind["rsi"]
+        bb_lower = bar_ind["bb_lower"]
+        bb_upper = bar_ind["bb_upper"]
+        if pd.isna(rsi) or pd.isna(bb_lower) or pd.isna(bb_upper):
+            return SubSignal(side=None, reason="indicators warming up")
+
+        rng = bar["high"] - bar["low"]
+        if rng <= 0:
+            return SubSignal(side=None, reason="candle range too small")
+        if rng > atr * self.max_range_atr_mult:
+            return SubSignal(side=None, reason="candle range too wide for a tight pin bar")
+        body = abs(bar["close"] - bar["open"])
+        lower_wick = min(bar["open"], bar["close"]) - bar["low"]
+        upper_wick = bar["high"] - max(bar["open"], bar["close"])
+
+        tolerance = atr * self.bb_tolerance_atr_mult
+        buffer = atr * self.sl_buffer_atr_mult
+
+        if (lower_wick >= body * self.min_wick_body_ratio
+                and upper_wick <= body * self.max_opposite_wick_ratio
+                and (bar["close"] - bar["low"]) >= rng * self.min_close_position_ratio
+                and (bar["close"] <= bb_lower + tolerance or rsi <= self.rsi_oversold)):
+            return SubSignal(side="BUY", sl_distance_price=(bar["close"] - bar["low"]) + buffer,
+                              reason="tight_pin_bar: bullish hammer, small range, at lower BB / RSI oversold")
+
+        if (upper_wick >= body * self.min_wick_body_ratio
+                and lower_wick <= body * self.max_opposite_wick_ratio
+                and (bar["high"] - bar["close"]) >= rng * self.min_close_position_ratio
+                and (bar["close"] >= bb_upper - tolerance or rsi >= self.rsi_overbought)):
+            return SubSignal(side="SELL", sl_distance_price=(bar["high"] - bar["close"]) + buffer,
+                              reason="tight_pin_bar: bearish shooting star, small range, at upper BB / RSI overbought")
+
+        return SubSignal(side=None, reason="no qualifying tight pin bar pattern")
+
+
 class CompositeStrategy:
     """Orchestrates the validated mean-reversion strategy plus zero or more
     of the extra signals above, sharing one interface with plain
@@ -1022,6 +1198,26 @@ def build_strategy_from_settings(settings, value_per_point_per_lot: float) -> Co
             rsi_overbought=settings.strat_ma_grid_rsi_overbought,
             rsi_oversold=settings.strat_ma_grid_rsi_oversold,
             min_adx=settings.strat_ma_grid_min_adx,
+        )))
+    if settings.strat_enable_micro_range_breakout:
+        extra.append(("micro_range_breakout", MicroRangeBreakoutStrategy(
+            cooldown_bars=cooldown, max_spread_price=spread, min_atr_price=min_atr,
+            lookback_bars=settings.strat_micro_range_lookback_bars,
+            max_range_atr_mult=settings.strat_micro_range_max_range_atr_mult,
+            breakout_buffer_atr_mult=settings.strat_micro_range_breakout_buffer_atr_mult,
+            sl_buffer_atr_mult=settings.strat_micro_range_sl_buffer_atr_mult,
+        )))
+    if settings.strat_enable_tight_pin_bar:
+        extra.append(("tight_pin_bar", TightPinBarReversalStrategy(
+            cooldown_bars=cooldown, max_spread_price=spread, min_atr_price=min_atr,
+            sl_buffer_atr_mult=settings.strat_tight_pin_bar_sl_buffer_atr_mult,
+            rsi_oversold=settings.strat_tight_pin_bar_rsi_oversold,
+            rsi_overbought=settings.strat_tight_pin_bar_rsi_overbought,
+            bb_tolerance_atr_mult=settings.strat_tight_pin_bar_bb_tolerance_atr_mult,
+            min_wick_body_ratio=settings.strat_tight_pin_bar_min_wick_body_ratio,
+            max_opposite_wick_ratio=settings.strat_tight_pin_bar_max_opposite_wick_ratio,
+            min_close_position_ratio=settings.strat_tight_pin_bar_min_close_position_ratio,
+            max_range_atr_mult=settings.strat_tight_pin_bar_max_range_atr_mult,
         )))
     if settings.strat_enable_quantum_queen:
         from core.quantum_queen import QuantumQueenVoteStrategy
