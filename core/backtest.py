@@ -21,6 +21,12 @@ class BacktestResult:
     total_pnl: float
     max_drawdown_pct: float
     final_balance: float
+    # Only populated when run_backtest() is called with brain_fn (Ronda 28
+    # harness). Zero/zero when brain_fn is None (default, today's behavior
+    # unchanged) - kept as trailing defaulted fields so every pre-existing
+    # positional/keyword construction of this dataclass keeps working.
+    brain_calls: int = 0
+    brain_vetoes: int = 0
 
     @property
     def win_rate(self) -> float:
@@ -43,6 +49,7 @@ def run_backtest(
     max_hold_bars: int = 0,
     ticks: pd.DataFrame | None = None,
     precompute_indicators: bool = False,
+    brain_fn=None,
 ) -> BacktestResult:
     """candles: columns open, high, low, close, time (oldest -> newest).
     strategy_overrides passes extra kwargs straight to ScalpStrategy (e.g.
@@ -87,7 +94,25 @@ def run_backtest(
     Does NOT change any extra strategy's own internal M5/M15 resample logic
     (MACrossGridStrategy etc. still see the same windowed `df` as before -
     this is what keeps this change free of look-ahead risk on the
-    resample-based strategies)."""
+    resample-based strategies).
+
+    brain_fn (default None = today's behavior, unchanged): optional AI-brain
+    gate for the Ronda 28 harness (see scripts/count_ai_brain_signals.py's
+    Ronda 18/25/26/27 comments in .env.example for why this stayed
+    unimplemented until now - it only makes sense once the account's real
+    balance makes the risk cap stop rejecting everything). When given, it
+    must be a callable with the exact same signature as
+    core/ai_brain.py::OpenRouterBrain.evaluate: (candles, side, spread,
+    sl_distance) -> an object with an `.allow` bool attribute (AIDecision
+    fits directly). It is called ONLY on bars where `strategy` already
+    produced a deterministic signal.side (never on every bar - the same
+    condition core/engine.py checks before calling the real brain), and
+    ALWAYS before risk.size_position - identical order to core/engine.py
+    (brain veto first, RiskManager's cap has the final word after, and can
+    still reject a signal the brain approved; the brain can never bypass
+    it). Pass a mock here to test the wiring for free; swap in a real
+    OpenRouterBrain().evaluate only once the account balance justifies the
+    paid-call budget (see Ronda 27's balance/RISK_PER_TRADE_USD table)."""
     tick_size = spec.trade_tick_size or spec.point
     value_per_point_per_lot = spec.trade_tick_value / tick_size
     if strategy is None:
@@ -120,6 +145,7 @@ def run_backtest(
     max_dd = 0.0
     trades = wins = losses = 0
     total_pnl = 0.0
+    brain_calls = brain_vetoes = 0
 
     open_pos = None  # dict: side, entry, sl, tp_levels(list), next_idx, remaining_lot, orig_lot
     tick_times = None
@@ -271,8 +297,21 @@ def run_backtest(
             else:
                 signal = strategy.generate_signal(window, assumed_spread_price, spec.volume_min)
             if signal.side:
-                sizing = risk.size_position(account, spec, signal.sl_distance_price, mid)
-                if sizing.ok:
+                brain_ok = True
+                if brain_fn is not None:
+                    # Same order as core/engine.py: the brain is consulted
+                    # ONLY now that a deterministic signal exists, and its
+                    # veto is checked BEFORE risk.size_position runs -
+                    # size_position below still applies the untouched 5%
+                    # cap regardless of what the brain decided, so a brain
+                    # "allow" can never bypass RiskManager.
+                    decision = brain_fn(window, signal.side, assumed_spread_price, signal.sl_distance_price)
+                    brain_calls += 1
+                    if not decision.allow:
+                        brain_vetoes += 1
+                        brain_ok = False
+                sizing = risk.size_position(account, spec, signal.sl_distance_price, mid) if brain_ok else None
+                if sizing is not None and sizing.ok:
                     entry = ask if signal.side == "BUY" else bid
                     if tick_times is not None:
                         start_t = int(bar["time"])
@@ -293,4 +332,5 @@ def run_backtest(
                     strategy.on_trade_opened()
 
     return BacktestResult(trades=trades, wins=wins, losses=losses, total_pnl=total_pnl,
-                           max_drawdown_pct=max_dd, final_balance=balance)
+                           max_drawdown_pct=max_dd, final_balance=balance,
+                           brain_calls=brain_calls, brain_vetoes=brain_vetoes)
