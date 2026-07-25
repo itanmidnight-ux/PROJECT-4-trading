@@ -224,3 +224,50 @@ def test_precompute_matches_live_parity_trade_count():
 
     assert abs(fast.trades - baseline.trades) <= 2, (
         f"trade count diverged too much: baseline={baseline.trades} fast={fast.trades}")
+
+
+def test_backtest_daily_loss_cap_actually_cuts_trades_on_real_multi_day_data():
+    """Ronda 41: before this, run_backtest() always built its RiskManager
+    with max_daily_loss_usd/max_daily_drawdown_pct hardcoded to effectively
+    disabled (10**9 / 100.0), AND RiskManager rolled days off date.today()
+    (the wall clock) instead of the data - so a multi-day historical
+    backtest never crossed a simulated day boundary and these two circuit
+    breakers (the same ones core/engine.py enforces live) could never be
+    exercised by a backtest at all. data/gold_m1_7d.csv genuinely spans 7
+    calendar days, so this is the real regression test: passing a tight
+    max_daily_loss_usd must measurably reduce the trades taken relative to
+    leaving it unset, because the cap now actually gets to trip and roll
+    across those 7 real days."""
+    candles = _real_gold_csv(7839)  # full file: needs multiple real days to prove day-rolling works
+    spec = _test_spec()
+
+    kwargs = dict(candles=candles, spec=spec, starting_balance=50_000.0, leverage=500,
+                  risk_per_trade_usd=6.0, min_tp_usd=0.5, tp_levels=3,
+                  assumed_spread_price=0.25, precompute_indicators=True)
+
+    uncapped = run_backtest(**kwargs)
+    capped = run_backtest(**kwargs, max_daily_loss_usd=1.0, max_daily_drawdown_pct=100.0)
+
+    assert uncapped.trades > 0, "sanity: this data must produce trades at all for the comparison to mean anything"
+    assert capped.trades < uncapped.trades, (
+        f"a $1 daily loss cap over 7 real days should block meaningfully more trades than "
+        f"no cap, but capped={capped.trades} uncapped={uncapped.trades}"
+    )
+
+
+def test_backtest_without_daily_limits_matches_pre_ronda41_unbounded_behavior():
+    """Leaving max_daily_loss_usd/max_daily_drawdown_pct unset (the default)
+    must reproduce the exact old hardcoded-disabled behavior (10**9 USD /
+    100% drawdown) bit-for-bit - this is the compatibility guarantee for
+    every pre-existing caller/test of run_backtest that doesn't pass them."""
+    candles = _real_gold_csv(3000)
+    spec = _test_spec()
+
+    kwargs = dict(candles=candles, spec=spec, starting_balance=50_000.0, leverage=500,
+                  risk_per_trade_usd=6.0, min_tp_usd=0.5, tp_levels=3,
+                  assumed_spread_price=0.25, precompute_indicators=True)
+
+    default = run_backtest(**kwargs)
+    explicit_old_hardcode = run_backtest(**kwargs, max_daily_loss_usd=10**9, max_daily_drawdown_pct=100.0)
+
+    assert default == explicit_old_hardcode

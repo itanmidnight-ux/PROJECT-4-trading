@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import pandas as pd
+from datetime import date
 
 from core.risk_manager import AccountState, RiskManager, SymbolSpec
 from core.strategy import ScalpStrategy, compute_indicators
@@ -50,6 +51,8 @@ def run_backtest(
     ticks: pd.DataFrame | None = None,
     precompute_indicators: bool = False,
     brain_fn=None,
+    max_daily_loss_usd: float | None = None,
+    max_daily_drawdown_pct: float | None = None,
 ) -> BacktestResult:
     """candles: columns open, high, low, close, time (oldest -> newest).
     strategy_overrides passes extra kwargs straight to ScalpStrategy (e.g.
@@ -112,15 +115,33 @@ def run_backtest(
     still reject a signal the brain approved; the brain can never bypass
     it). Pass a mock here to test the wiring for free; swap in a real
     OpenRouterBrain().evaluate only once the account balance justifies the
-    paid-call budget (see Ronda 27's balance/RISK_PER_TRADE_USD table)."""
+    paid-call budget (see Ronda 27's balance/RISK_PER_TRADE_USD table).
+
+    max_daily_loss_usd / max_daily_drawdown_pct (default None = today's
+    exact behavior, unchanged): before Ronda 41 this function always
+    constructed its RiskManager with these hardcoded to 10**9 / 100.0 (i.e.
+    effectively disabled), AND RiskManager._roll_day_if_needed compared
+    against date.today() (the wall clock) instead of the candles' own
+    timestamps - so a multi-day backtest ran entirely inside one wall-clock
+    "today" in seconds, and these two circuit breakers (the same ones
+    core/engine.py uses live) could never actually be exercised by
+    historical data. Now each bar's real date (from candles['time'], epoch
+    seconds) is passed into the RiskManager so day-rolls follow the data,
+    and passing these two params here lets a backtest actually test them.
+    Leaving both None reproduces the old disabled/unbounded behavior
+    exactly, so no existing caller changes results."""
     tick_size = spec.trade_tick_size or spec.point
     value_per_point_per_lot = spec.trade_tick_value / tick_size
     if strategy is None:
         strategy = ScalpStrategy(min_tp_usd=min_tp_usd, tp_levels=tp_levels,
                                   value_per_point_per_lot=value_per_point_per_lot,
                                   **(strategy_overrides or {}))
-    risk = RiskManager(risk_per_trade_usd=risk_per_trade_usd, max_daily_loss_usd=10**9,
-                        max_daily_drawdown_pct=100.0, max_trades_per_day=max_trades_per_day)
+    risk = RiskManager(
+        risk_per_trade_usd=risk_per_trade_usd,
+        max_daily_loss_usd=max_daily_loss_usd if max_daily_loss_usd is not None else 10**9,
+        max_daily_drawdown_pct=max_daily_drawdown_pct if max_daily_drawdown_pct is not None else 100.0,
+        max_trades_per_day=max_trades_per_day,
+    )
 
     precomputed_mr = precomputed_composite = None
     if precompute_indicators:
@@ -158,6 +179,11 @@ def run_backtest(
         bar = candles.iloc[i]
         mid = bar["close"]
         bid, ask = mid - assumed_spread_price / 2, mid + assumed_spread_price / 2
+        # Drives RiskManager's day-roll off this bar's own historical
+        # timestamp (see Ronda 41 note in the docstring above) instead of
+        # the wall clock, so a multi-day replay actually crosses simulated
+        # days the way live trading crosses real ones.
+        bar_date = pd.Timestamp(int(bar["time"]), unit="s").date()
 
         account = AccountState(balance=balance, equity=balance, free_margin=balance, leverage=leverage)
 
@@ -206,7 +232,7 @@ def run_backtest(
                 # is still a net winner, even though this last slice was ~0.
                 wins += open_pos["realized_pnl"] > 0
                 losses += open_pos["realized_pnl"] <= 0
-                risk.register_trade_closed(pnl, balance)
+                risk.register_trade_closed(pnl, balance, current_date=bar_date)
                 open_pos = None
             else:
                 while open_pos and open_pos["next_idx"] < len(open_pos["tp_levels"]):
@@ -230,7 +256,7 @@ def run_backtest(
                         trades += 1
                         wins += open_pos["realized_pnl"] > 0
                         losses += open_pos["realized_pnl"] <= 0
-                        risk.register_trade_closed(pnl, balance)  # this slice only, matches engine.py's per-fill registration
+                        risk.register_trade_closed(pnl, balance, current_date=bar_date)  # this slice only, matches engine.py's per-fill registration
                         open_pos = None
                         break
 
@@ -266,14 +292,14 @@ def run_backtest(
                         trades += 1
                         wins += open_pos["realized_pnl"] > 0
                         losses += open_pos["realized_pnl"] <= 0
-                        risk.register_trade_closed(pnl, balance)
+                        risk.register_trade_closed(pnl, balance, current_date=bar_date)
                         open_pos = None
 
         peak = max(peak, balance)
         max_dd = max(max_dd, (peak - balance) / peak * 100 if peak else 0)
 
         strategy.on_bar_closed()
-        can_trade, _ = risk.can_open_new_trade(balance)
+        can_trade, _ = risk.can_open_new_trade(balance, current_date=bar_date)
         if open_pos is None and can_trade:
             if precompute_indicators:
                 mr_slice = precomputed_mr.iloc[max(0, i - 2): i + 1]
