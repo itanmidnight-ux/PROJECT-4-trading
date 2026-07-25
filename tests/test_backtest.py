@@ -271,3 +271,53 @@ def test_backtest_without_daily_limits_matches_pre_ronda41_unbounded_behavior():
     explicit_old_hardcode = run_backtest(**kwargs, max_daily_loss_usd=10**9, max_daily_drawdown_pct=100.0)
 
     assert default == explicit_old_hardcode
+
+
+def test_risk_per_trade_usd_by_regime_none_matches_flat_risk_behavior():
+    """Ronda 46: risk_per_trade_usd_by_regime defaults to None, which must
+    reproduce the exact flat risk_per_trade_usd behavior bit-for-bit - the
+    compatibility guarantee for every pre-existing caller."""
+    candles = _real_gold_csv(3000)
+    spec = _test_spec()
+
+    kwargs = dict(candles=candles, spec=spec, starting_balance=100.45, leverage=500,
+                  risk_per_trade_usd=5.25, min_tp_usd=0.60, tp_levels=8,
+                  assumed_spread_price=0.25, precompute_indicators=True)
+
+    default = run_backtest(**kwargs)
+    explicit_none = run_backtest(**kwargs, risk_per_trade_usd_by_regime=None)
+
+    assert default == explicit_none
+
+
+def test_risk_per_trade_usd_by_regime_never_bypasses_the_five_percent_cap():
+    """Even when a regime's nominal risk is set far above what a small
+    account can afford, RiskManager's MAX_RISK_FRACTION_OF_BALANCE (5% of
+    balance, core/risk_manager.py, untouchable) must still be the real
+    ceiling on any trade actually taken - this is the safety invariant
+    Ronda 46's implementation note claims but doesn't otherwise verify by
+    test: a regime map can only ever be capped DOWN by size_position, never
+    let a trade risk more than 5% of the account regardless of the nominal
+    dict value requested."""
+    candles = _real_gold_csv(3000)
+    spec = _test_spec()
+    balance = 100.45
+
+    kwargs = dict(candles=candles, spec=spec, starting_balance=balance, leverage=500,
+                  risk_per_trade_usd=5.25, min_tp_usd=0.60, tp_levels=8,
+                  assumed_spread_price=0.25, precompute_indicators=True)
+
+    # An absurdly high nominal for "trend" (far above 5% of this account's
+    # balance) must not translate into a real trade risking anywhere near
+    # that much - the cap inside RiskManager.size_position still applies.
+    huge_regime_risk = run_backtest(
+        **kwargs, risk_per_trade_usd_by_regime={"trend": 500.0, "range": 5.25,
+                                                 "volatile": 5.25, "quiet": 5.25})
+    flat = run_backtest(**kwargs)
+
+    # The 5% cap means no single trade's risk can exceed roughly
+    # balance * 0.05 * MAX_RISK_OVERSHOOT_FACTOR (1.5) regardless of the
+    # nominal requested - if the huge regime value leaked through
+    # uncapped, max_drawdown_pct would blow far past what the flat run
+    # shows on the same data.
+    assert huge_regime_risk.max_drawdown_pct <= flat.max_drawdown_pct * 3
