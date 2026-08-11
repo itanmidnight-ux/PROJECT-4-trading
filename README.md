@@ -1,7 +1,5 @@
 # XAUUSD Scalper · MT5 + Web Dashboard
 
-> Revisión de seguridad: [SECURITY_AUDIT.md](SECURITY_AUDIT.md)
-
 [![Project focus](https://readme-typing-svg.demolab.com?font=Inter&weight=700&size=20&duration=2600&pause=700&color=F59E0B&center=true&vCenter=true&width=820&lines=Broker-aware+risk+management;Backtesting+before+execution;MT5+%2B+Flask+dashboard)](https://github.com/itanmidnight-ux/PROJECT-4-trading)
 
 ## Identidad pública del repositorio
