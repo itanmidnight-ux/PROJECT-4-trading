@@ -1,5 +1,13 @@
 # XAUUSD Scalper · MT5 + Web Dashboard
 
+## Identidad pública del repositorio
+
+- **Nombre recomendado:** `xauusd-mt5-scalper`
+- **Nombre actual:** `PROJECT-4-trading`
+- **Posicionamiento:** bot algorítmico para XAUUSD con ejecución MT5, backtesting y control de riesgo.
+
+---
+
 Bot algorítmico para XAUUSD con ejecución a través de MetaTrader 5, gestión
 de riesgo basada en la especificación real del broker, backtesting histórico y
 un dashboard web responsive. El proyecto está pensado para Kali/Ubuntu con
