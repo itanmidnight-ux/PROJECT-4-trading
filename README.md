@@ -1,5 +1,9 @@
 # XAUUSD Scalper · MT5 + Web Dashboard
 
+> Revisión de seguridad: [SECURITY_AUDIT.md](SECURITY_AUDIT.md)
+
+[![Project focus](https://readme-typing-svg.demolab.com?font=Inter&weight=700&size=20&duration=2600&pause=700&color=F59E0B&center=true&vCenter=true&width=820&lines=Broker-aware+risk+management;Backtesting+before+execution;MT5+%2B+Flask+dashboard)](https://github.com/itanmidnight-ux/PROJECT-4-trading)
+
 ## Identidad pública del repositorio
 
 - **Nombre recomendado:** `xauusd-mt5-scalper`
@@ -27,8 +31,8 @@ Wine + MT5.
 - Opcionales: confluencia Quantum Queen de 12 votos, régimen de mercado,
   grid/piramidación limitada y recuperación controlada. Están apagados por
   defecto y nunca saltan el `RiskManager`.
-- Calidad actual: `220 passed, 1 skipped` en la suite local. El test omitido
-  requiere un CSV histórico que no está incluido en el repositorio.
+- Calidad actual: `269 passed, 14 skipped` en la suite local. Los tests omitidos
+  dependen de recursos externos o de un entorno MT5 que no se incluye en el repositorio.
 
 ## Arquitectura
 
@@ -59,8 +63,8 @@ Componentes principales:
 ## Instalación
 
 ```bash
-git clone <URL-del-repositorio>
-cd programa2
+git clone https://github.com/itanmidnight-ux/PROJECT-4-trading.git
+cd PROJECT-4-trading
 chmod +x install.sh run.sh
 ./install.sh
 ```
