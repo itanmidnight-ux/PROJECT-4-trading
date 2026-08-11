@@ -32,6 +32,7 @@ mt5setup.exe
 
 # Skill driver screenshot sessions (regenerated on every run)
 .claude/skills/*/sessions/
+.claude/skills/
 
 # Local worktrees
 .worktrees/
