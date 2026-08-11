@@ -914,6 +914,10 @@ cmd_start_foreground() {
 
 # ======================================================= subcommand dispatch
 case "${1:-}" in
+    -h|--help)
+        sed -n '1,36p' "$0"
+        exit 0
+        ;;
     --start)
         if [ "${RUN_SH_FOREGROUND:-0}" = "1" ]; then
             cmd_start_foreground
